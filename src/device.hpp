@@ -8,16 +8,17 @@
 #include <string>
 #include <unordered_map>
 
-// Forward declarations to avoid pulling in heavy headers in this file
+// UMD xy_pair = tt::tt_metal::CoreCoord (needed as return type below)
+#include <umd/device/types/xy_pair.hpp>
+
+// Forward declarations — complete types provided in device.cpp
 namespace tt {
 class Cluster;
-namespace llrt {
-class RunTimeOptions;
 }
-namespace tt_metal {
+namespace tt::tt_metal {
 class Hal;
-}
-}  // namespace tt
+class IDevice;
+}  // namespace tt::tt_metal
 
 namespace tt::foil {
 
@@ -43,46 +44,46 @@ struct DramAllocator {
     void reset();
 };
 
-// Core of the Device handle.  Owns UMD Cluster + HAL + allocators.
-// Not exposed to external callers — only accessible via runtime.hpp APIs.
+// Device handle. Firmware init is delegated to tt-metal's CreateDevice().
+// cluster and hal are borrowed references from MetalContext (valid while tt_device is alive).
 struct Device {
     uint32_t chip_id{0};
-    std::unique_ptr<tt::llrt::RunTimeOptions> rtoptions;
-    std::unique_ptr<tt::Cluster>              cluster;
-    std::unique_ptr<tt::tt_metal::Hal>        hal;
+
+    // Owned: call CloseDevice() in device_close().
+    tt::tt_metal::IDevice* tt_device{nullptr};
+
+    // Borrowed from MetalContext — valid while tt_device is alive.
+    tt::Cluster*                cluster{nullptr};
+    const tt::tt_metal::Hal*    hal{nullptr};
 
     // Per-core L1 bump allocators, keyed by (x,y)
     std::unordered_map<uint64_t, L1Allocator> l1_allocs;
 
+    // Per-core kernel-config region allocators (KERNEL_CONFIG = MEM_MAP_END).
+    // RTA must live here so the uint16_t rta_offset fits.
+    std::unordered_map<uint64_t, L1Allocator> kernel_config_allocs;
+
     // DRAM bump allocator (channel 0)
     DramAllocator dram_alloc;
 
-    // Returns the key used to index l1_allocs
     static uint64_t core_key(uint32_t x, uint32_t y) { return (static_cast<uint64_t>(x) << 32) | y; }
 
-    // Get or create an L1 allocator for a logical core.
     L1Allocator& l1_for_core(const CoreCoord& logical_core);
+    L1Allocator& kernel_config_for_core(const CoreCoord& logical_core);
 };
 
-// Initialize device: UMD cluster, HAL, firmware load, wait for INIT-done.
+// Open device via tt-metal CreateDevice() (handles FW init).
 std::unique_ptr<Device> device_open(int pcie_device_index, const std::string& firmware_dir);
 
-// Tear down device: assert resets, close cluster.
+// Close device via tt-metal CloseDevice().
 void device_close(Device& dev);
 
 // Resolve a logical Tensix core to a virtual coordinate understood by UMD.
-tt::CoreCoord logical_to_virtual(const Device& dev, const CoreCoord& logical);
+tt::xy_pair logical_to_virtual(const Device& dev, const CoreCoord& logical);
 
-// Write `size` bytes from `src` to device L1 at `addr` on `core`.
 void write_l1(Device& dev, const CoreCoord& core, uint64_t addr, const void* src, std::size_t size);
-
-// Read `size` bytes from device L1 at `addr` on `core` into `dst`.
 void read_l1(Device& dev, const CoreCoord& core, uint64_t addr, void* dst, std::size_t size);
-
-// Write `size` bytes from `src` to DRAM at `addr`.
 void write_dram(Device& dev, uint64_t addr, const void* src, std::size_t size);
-
-// Read `size` bytes from DRAM at `addr` into `dst`.
 void read_dram(Device& dev, uint64_t addr, void* dst, std::size_t size);
 
 }  // namespace tt::foil

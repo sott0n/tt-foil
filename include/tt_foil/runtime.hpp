@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -12,10 +13,9 @@
 namespace tt::foil {
 
 // ---------------------------------------------------------------------------
-// Forward declarations (opaque handles — callers never touch internals)
+// Opaque forward declarations
 // ---------------------------------------------------------------------------
 struct Device;
-struct Buffer;
 struct Kernel;
 
 // ---------------------------------------------------------------------------
@@ -27,22 +27,6 @@ struct CoreCoord {
 };
 
 // ---------------------------------------------------------------------------
-// Device
-// ---------------------------------------------------------------------------
-
-// Open the Nth PCIe Blackhole chip (0-indexed).
-// firmware_dir: directory containing pre-built management firmware ELFs
-//   (brisc.elf, ncrisc.elf, trisc0.elf, trisc1.elf, trisc2.elf).
-//   If empty, searches the default build output path.
-// Throws std::runtime_error on failure.
-std::unique_ptr<Device> open_device(
-    int pcie_device_index = 0,
-    const std::string& firmware_dir = "");
-
-// Close the device, assert resets on all cores, tear down UMD.
-void close_device(std::unique_ptr<Device> device);
-
-// ---------------------------------------------------------------------------
 // Buffer
 // ---------------------------------------------------------------------------
 
@@ -51,19 +35,47 @@ enum class BufferLocation {
     DRAM,  // off-chip DRAM channel 0
 };
 
+// Buffer: device memory allocation.
+// device_addr is the NOC-visible address; pass it as a kernel runtime arg.
+struct Buffer {
+    BufferLocation location;
+    uint64_t       device_addr{0};
+    std::size_t    size_bytes{0};
+    CoreCoord      core;  // for L1 buffers; unused for DRAM
+};
+
+// ---------------------------------------------------------------------------
+// Device
+// ---------------------------------------------------------------------------
+
+// Open the Nth PCIe Blackhole chip (0-indexed).
+// firmware_dir: directory containing pre-built management firmware ELFs
+//   (brisc.elf, ncrisc.elf, trisc0.elf, trisc1.elf, trisc2.elf).
+// Throws std::runtime_error on failure.
+std::shared_ptr<Device> open_device(
+    int pcie_device_index = 0,
+    const std::string& firmware_dir = "");
+
+// Close the device explicitly before the shared_ptr goes out of scope.
+// Asserts resets on all cores and tears down UMD.
+// The shared_ptr will call this automatically when the last reference drops.
+void close_device(std::shared_ptr<Device> device);
+
+// ---------------------------------------------------------------------------
+// Buffer API
+// ---------------------------------------------------------------------------
+
 // Allocate a contiguous region of device memory via a bump allocator.
 // For L1, logical_core identifies which core's L1 to use.
-// For DRAM, logical_core is ignored.
 // Throws std::runtime_error if out of memory.
-std::unique_ptr<Buffer> allocate_buffer(
+std::shared_ptr<Buffer> allocate_buffer(
     Device& device,
     BufferLocation loc,
     std::size_t size_bytes,
     CoreCoord logical_core = {});
 
-// Release a buffer.
-// Simple bump allocator: only the most recent allocation is actually freed.
-void free_buffer(std::unique_ptr<Buffer> buffer);
+// Release a buffer (bump allocator; only the most recent alloc is freed).
+void free_buffer(std::shared_ptr<Buffer> buffer);
 
 // Blocking host -> device write.
 void write_buffer(Device& device, Buffer& buf, const void* src, std::size_t bytes);
@@ -85,17 +97,13 @@ struct RiscBinary {
 };
 
 // Load ELF binaries from disk and prepare them for execution on logical_core.
-// The ELFs are parsed and XIP-transformed at this point; all disk I/O happens
-// inside load_kernel().
 // v1: single core target only.
-std::unique_ptr<Kernel> load_kernel(
+std::shared_ptr<Kernel> load_kernel(
     Device& device,
     std::span<const RiscBinary> binaries,
     CoreCoord logical_core);
 
 // Write runtime arguments for a specific RISC processor.
-// Must be called after load_kernel() and before execute().
-// Args are 32-bit words written to the kernel's RTA region in L1.
 void set_runtime_args(
     Device& device,
     Kernel& kernel,
@@ -106,13 +114,8 @@ void set_runtime_args(
 // Execution
 // ---------------------------------------------------------------------------
 
-// Blocking execution:
-//   1. Write loaded ELF binaries to core L1
-//   2. Write launch_msg (DISPATCH_MODE_HOST)
-//   3. Write runtime args to the RTA region
-//   4. Fire go_msg (RUN_MSG_GO)
-//   5. Poll go_msg until RUN_MSG_DONE
-// Throws std::runtime_error on timeout or hardware error.
+// Blocking execution: write ELF + args, fire go_msg, poll until DONE.
+// Throws std::runtime_error on timeout.
 void execute(Device& device, Kernel& kernel);
 
 }  // namespace tt::foil

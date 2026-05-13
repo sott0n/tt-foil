@@ -2,12 +2,12 @@ cmake_minimum_required(VERSION 3.21)
 
 # Unit test: ELF loading (no hardware required)
 add_executable(test_elf_load test_elf_load.cpp)
-target_link_libraries(test_elf_load PRIVATE TT::Foil)
+target_link_libraries(test_elf_load PRIVATE TT::Foil tt_foil_llrt)
 add_test(NAME test_elf_load COMMAND test_elf_load)
 
 # Unit test: bump allocator (no hardware required)
 add_executable(test_bump_alloc test_bump_alloc.cpp)
-target_link_libraries(test_bump_alloc PRIVATE TT::Foil)
+target_link_libraries(test_bump_alloc PRIVATE TT::Foil tt_foil_llrt)
 add_test(NAME test_bump_alloc COMMAND test_bump_alloc)
 
 # Integration test: add two numbers (requires Blackhole hardware)

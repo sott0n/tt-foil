@@ -5,9 +5,7 @@
 // Requires a real Blackhole chip and pre-built firmware + kernel binaries.
 //
 // Usage:
-//   TT_FOIL_FW_DIR=/path/to/firmware \
-//   TT_FOIL_KERNEL_DIR=/path/to/kernels \
-//   ./test_add_kernel
+//   TT_FOIL_KERNEL_DIR=/path/to/prebuilt ./test_add_kernel
 
 #include <cassert>
 #include <cstdio>
@@ -28,11 +26,12 @@ static std::string required_env(const char* name) {
 }
 
 int main() try {
-    const std::string fw_dir     = required_env("TT_FOIL_FW_DIR");
     const std::string kernel_dir = required_env("TT_FOIL_KERNEL_DIR");
 
-    // ---- Open device ----
-    auto dev = tt::foil::open_device(/*pcie_index=*/0, fw_dir);
+    // ---- Open device (firmware init delegated to tt-metal CreateDevice) ----
+    const char* dev_env = std::getenv("TT_FOIL_DEVICE");
+    int pcie_index = dev_env ? std::stoi(dev_env) : 0;
+    auto dev = tt::foil::open_device(pcie_index);
     std::puts("test_add_kernel: device opened");
 
     // ---- Target core: (0, 0) ----

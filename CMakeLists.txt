@@ -26,25 +26,13 @@ target_include_directories(tt_foil
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
-        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tt-metal/tt_metal"
-        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tt-metal/tt_metal/llrt"
-        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tt-metal/tt_metal/hw/inc"
-        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tt-metal/tt_metal/hw/inc/hostdev"
-        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tt-metal/tt_metal/hw/inc/internal/tt-1xx/blackhole"
-        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tt-metal/tt_metal/hostdevcommon"
-        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tt-metal/tt_metal/api"
-        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tt-metal/tt_metal/api/tt-metalium"
 )
-
-target_compile_definitions(tt_foil PRIVATE ARCH_BLACKHOLE)
 
 target_link_libraries(tt_foil
     PUBLIC
         umd::tt-umd
     PRIVATE
         tt_foil_llrt
-        HAL::1xx
-        fmt::fmt-header-only
 )
 
 if(TT_FOIL_BUILD_TESTS)

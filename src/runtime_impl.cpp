@@ -17,30 +17,30 @@ namespace tt::foil {
 
 // ---- Device ----
 
-std::unique_ptr<Device> open_device(int pcie_device_index, const std::string& firmware_dir) {
-    return device_open(pcie_device_index, firmware_dir);
+std::shared_ptr<Device> open_device(int pcie_device_index, const std::string& firmware_dir) {
+    return std::shared_ptr<Device>(
+        device_open(pcie_device_index, firmware_dir).release(),
+        [](Device* d) { device_close(*d); delete d; });
 }
 
-void close_device(std::unique_ptr<Device> device) {
+void close_device(std::shared_ptr<Device> device) {
     if (device) {
         device_close(*device);
+        device.reset();
     }
 }
 
 // ---- Buffer ----
 
-std::unique_ptr<Buffer> allocate_buffer(
+std::shared_ptr<Buffer> allocate_buffer(
     Device& device, BufferLocation loc, std::size_t size_bytes, CoreCoord logical_core)
 {
     Buffer* raw = buffer_alloc(device, loc, size_bytes, logical_core);
-    return std::unique_ptr<Buffer>(raw);
+    return std::shared_ptr<Buffer>(raw, [](Buffer* b) { buffer_free(b); });
 }
 
-void free_buffer(std::unique_ptr<Buffer> buffer) {
-    // unique_ptr destructor calls buffer_free via custom deleter — but Buffer's
-    // destructor is trivial (bump allocator; no actual memory reclaim).
-    // Explicitly do nothing: the unique_ptr going out of scope handles cleanup.
-    (void)buffer;
+void free_buffer(std::shared_ptr<Buffer> buffer) {
+    (void)buffer;  // shared_ptr destructor calls buffer_free when refcount hits 0
 }
 
 void write_buffer(Device& device, Buffer& buf, const void* src, std::size_t bytes) {
@@ -73,13 +73,13 @@ void read_buffer(Device& device, Buffer& buf, void* dst, std::size_t bytes) {
 
 // ---- Kernel ----
 
-std::unique_ptr<Kernel> load_kernel(
+std::shared_ptr<Kernel> load_kernel(
     Device& device,
     std::span<const RiscBinary> binaries,
     CoreCoord logical_core)
 {
     Kernel* raw = kernel_load(device, binaries, logical_core);
-    return std::unique_ptr<Kernel>(raw);
+    return std::shared_ptr<Kernel>(raw, [](Kernel* k) { delete k; });
 }
 
 void set_runtime_args(

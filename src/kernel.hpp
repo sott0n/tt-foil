@@ -11,8 +11,8 @@
 
 #include "tt_foil/runtime.hpp"  // RiscBinary, CoreCoord
 
-// Forward declaration (ll_api::memory is in the tt-metal submodule)
-namespace ll_api { class memory; }
+// Full header needed for unique_ptr<ll_api::memory> member
+#include "llrt/tt_memory.h"
 
 namespace tt::foil {
 
@@ -21,6 +21,9 @@ struct Device;
 // Blackhole has 5 RISC processors per Tensix core.
 // v1 exposes only BRISC (DM0) and NCRISC (DM1).
 static constexpr uint32_t kMaxRiscs = 5;
+
+// Max runtime args per RISC processor.
+static constexpr uint32_t kMaxRtaWords = 64;
 
 // Processor indices within the Blackhole Tensix HAL config.
 // processor_class 0 = DM, types: 0 = BRISC, 1 = NCRISC
@@ -41,10 +44,13 @@ struct LoadedRisc {
     uint32_t processor_index;  // index into rta_offset[] and kernel_text_offset[]
     std::unique_ptr<ll_api::memory> mem;
     std::vector<uint32_t> runtime_args;
+    uint64_t kernel_text_addr{0};  // L1 address where kernel binary is stored (in KERNEL_CONFIG region)
 };
 
 struct Kernel {
-    CoreCoord core;
+    CoreCoord core;           // logical coordinate (user-facing)
+    uint32_t virt_x{0};      // virtual (translated) x for UMD write_core
+    uint32_t virt_y{0};      // virtual (translated) y for UMD write_core
     std::vector<LoadedRisc> riscs;
 
     // L1 address where runtime args for each risc will be written.

@@ -4,18 +4,11 @@
 // Example: add two numbers on Blackhole using a pre-compiled BRISC kernel.
 //
 // Prerequisites:
-//   1. Pre-built management firmware in $TT_FOIL_FW_DIR
-//   2. Pre-compiled kernel at $TT_FOIL_KERNEL_DIR/add_brisc.elf
-//
-// Build the kernel first:
-//   riscv32-unknown-elf-g++ -march=rv32imc -mabi=ilp32 \
-//     -O2 -fno-exceptions -fno-rtti \
-//     -I<tt-metal>/tt_metal/hw/inc \
-//     -I<tt-metal>/tt_metal/hw/inc/hostdev \
-//     kernels/add_brisc.cpp -o add_brisc.elf
+//   1. Pre-compiled kernel at $TT_FOIL_KERNEL_DIR/add_brisc.elf
+//      (see kernels/add_brisc.cpp and the build script in prebuilt/)
 //
 // Run:
-//   TT_FOIL_FW_DIR=/path/fw TT_FOIL_KERNEL_DIR=/path/kernels ./add_two_numbers
+//   TT_FOIL_KERNEL_DIR=prebuilt ./add_two_numbers
 
 #include <cstdio>
 #include <cstdlib>
@@ -27,19 +20,17 @@
 #include "tt_foil/runtime.hpp"
 
 int main() try {
-    const char* fw_dir_env     = std::getenv("TT_FOIL_FW_DIR");
     const char* kernel_dir_env = std::getenv("TT_FOIL_KERNEL_DIR");
 
-    if (!fw_dir_env || !kernel_dir_env) {
-        std::puts("Usage: TT_FOIL_FW_DIR=... TT_FOIL_KERNEL_DIR=... ./add_two_numbers");
+    if (!kernel_dir_env) {
+        std::puts("Usage: TT_FOIL_KERNEL_DIR=prebuilt ./add_two_numbers");
         return 1;
     }
 
-    std::string fw_dir     = fw_dir_env;
     std::string kernel_dir = kernel_dir_env;
 
-    // Open the first Blackhole chip.
-    auto dev = tt::foil::open_device(0, fw_dir);
+    // Open the first Blackhole chip (firmware init delegated to tt-metal CreateDevice).
+    auto dev = tt::foil::open_device(0);
 
     // Use logical core (0,0).
     tt::foil::CoreCoord core{0, 0};
