@@ -12,9 +12,6 @@
 
 namespace tt::foil {
 
-// Reserve a fixed number of 32-bit words for RTA per risc.
-// This caps the maximum number of runtime args per kernel.
-static constexpr uint32_t kMaxRtaWords = 64;
 
 Kernel* kernel_load(
     Device& dev,
@@ -27,12 +24,18 @@ Kernel* kernel_load(
 
     auto* kernel       = new Kernel{};
     kernel->core       = logical_core;
+    {
+        auto virt = logical_to_virtual(dev, logical_core);
+        kernel->virt_x = virt.x;
+        kernel->virt_y = virt.y;
+    }
 
-    // Allocate a contiguous RTA region in L1 for all active riscs.
+    // Allocate a contiguous RTA region inside the KERNEL_CONFIG region (MEM_MAP_END).
+    // rta_offset in launch_msg is uint16_t (relative to kernel_config_base), so
+    // the RTA must live within the KERNEL_CONFIG region, not DEFAULT_UNRESERVED.
     // Layout: [BRISC args (kMaxRtaWords * 4 bytes)] [NCRISC args (kMaxRtaWords * 4 bytes)]
-    // Indices: rta_base_addr + proc_idx * kMaxRtaWords * 4
     uint32_t rta_region_bytes = kMaxRiscs * kMaxRtaWords * sizeof(uint32_t);
-    kernel->rta_base_addr  = dev.l1_for_core(logical_core).alloc(rta_region_bytes, /*alignment=*/16);
+    kernel->rta_base_addr  = dev.kernel_config_for_core(logical_core).alloc(rta_region_bytes, /*alignment=*/16);
     kernel->rta_region_size = rta_region_bytes;
 
     for (const auto& rb : binaries) {
@@ -46,6 +49,11 @@ Kernel* kernel_load(
 
         // Load ELF from disk and apply XIP transformation.
         lr.mem = std::make_unique<ll_api::memory>(rb.elf_path, ll_api::memory::Loading::CONTIGUOUS_XIP);
+
+        // Allocate space for kernel text in the KERNEL_CONFIG region.
+        // The binary will be written here; firmware calls kernel_config_base + text_offset.
+        std::size_t text_bytes = lr.mem->size() * sizeof(uint32_t);
+        lr.kernel_text_addr = dev.kernel_config_for_core(logical_core).alloc(text_bytes, /*alignment=*/16);
 
         kernel->riscs.push_back(std::move(lr));
     }

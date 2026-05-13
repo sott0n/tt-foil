@@ -4,9 +4,9 @@
 #include "dispatch.hpp"
 #include "device.hpp"
 #include "kernel.hpp"
+// kMaxRtaWords defined in kernel.hpp
 
 #include <chrono>
-#include <cstring>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -16,35 +16,16 @@
 #include "llrt/hal.hpp"
 #include "llrt/tt_memory.h"
 
-// Blackhole device messages (launch_msg_t, go_msg_t, DISPATCH_MODE_HOST, RUN_MSG_*)
-#include "dev_msgs.h"
-#include "dev_mem_map.h"
+// HAL-generated dev_msgs (new StructBuffer/View API)
+#include "hal/generated/dev_msgs.hpp"
 
 // UMD pair type
 #include <umd/device/types/xy_pair.hpp>
 
-namespace tt::foil {
+// NUM_CIRCULAR_BUFFERS = 64 on Blackhole; must match circular_buffer_constants.h
+#include "tt-metalium/circular_buffer_constants.h"
 
-// ---------------------------------------------------------------------------
-// Write kernel ELF to core L1 (without MetalContext)
-// ---------------------------------------------------------------------------
-static void write_elf_to_core(
-    tt::Cluster& cluster,
-    const tt::tt_metal::Hal& hal,
-    const ll_api::memory& mem,
-    uint32_t chip_id,
-    const tt::CoreCoord& virt_core,
-    uint64_t local_init_addr)
-{
-    mem.process_spans([&](std::vector<uint32_t>::const_iterator mem_ptr, uint64_t addr, uint32_t len_words) {
-        uint64_t relo_addr = hal.relocate_dev_addr(addr, local_init_addr, /*shared_local=*/false);
-        cluster.write_core(
-            &*mem_ptr,
-            len_words * sizeof(uint32_t),
-            tt_cxy_pair(chip_id, virt_core),
-            relo_addr);
-    });
-}
+namespace tt::foil {
 
 // ---------------------------------------------------------------------------
 // dispatch_execute — blocking slow-dispatch
@@ -54,21 +35,28 @@ void dispatch_execute(Device& dev, Kernel& kernel, int timeout_ms) {
     tt::Cluster& cluster         = *dev.cluster;
     const uint32_t chip          = dev.chip_id;
 
-    // Resolve logical → virtual core coordinate.
-    tt::CoreCoord virt{kernel.core.x, kernel.core.y};
+    // Virtual (translated) core coordinate resolved at kernel_load() time.
+    tt::xy_pair virt{kernel.virt_x, kernel.virt_y};
+
+    // Dev-msgs factory for TENSIX core type
+    const auto& dev_msgs_factory =
+        hal.get_dev_msgs_factory(tt_metal::HalProgrammableCoreType::TENSIX);
 
     // ---- Step 1: Write kernel ELF binaries to core L1 ----
+    // Write the kernel binary data to kernel_text_addr (allocated in KERNEL_CONFIG region).
+    // We ignore the span addresses (which are 0 after XIPify) and write to the pre-allocated slot.
+    // This mirrors llrt::write_binary_to_address: target address is explicit, not from span.
     for (const auto& lr : kernel.riscs) {
-        const auto& jit_cfg = hal.get_jit_build_config(
-            static_cast<uint32_t>(tt_metal::HalProgrammableCoreType::TENSIX),
-            lr.proc_class,
-            lr.proc_type);
-
-        write_elf_to_core(cluster, hal, *lr.mem, chip, virt, jit_cfg.local_init_addr);
+        lr.mem->process_spans([&](std::vector<uint32_t>::const_iterator mem_ptr, uint64_t /*addr*/, uint32_t len_words) {
+            cluster.write_core(
+                &*mem_ptr,
+                len_words * sizeof(uint32_t),
+                tt_cxy_pair(chip, virt),
+                lr.kernel_text_addr);
+        });
     }
 
     // ---- Step 2: Write runtime args to the RTA region in L1 ----
-    // RTA layout: [proc_idx * kMaxRtaWords * 4] byte offset from rta_base_addr.
     for (const auto& lr : kernel.riscs) {
         if (lr.runtime_args.empty()) {
             continue;
@@ -82,39 +70,53 @@ void dispatch_execute(Device& dev, Kernel& kernel, int timeout_ms) {
             rta_addr);
     }
 
-    // ---- Step 3: Build launch_msg ----
-    // We construct a launch_msg_t on the stack and zero it out.
-    // Only the fields needed for DISPATCH_MODE_HOST are populated.
-    tt_metal::dev_msgs::launch_msg_t launch_msg{};
-    std::memset(&launch_msg, 0, sizeof(launch_msg));
+    // ---- Step 3: Build launch_msg using the new StructBuffer/View API ----
+    auto launch_msg_buf = dev_msgs_factory.create<tt_metal::dev_msgs::launch_msg_t>();
+    {
+        auto kernel_config = launch_msg_buf.view().kernel_config();
 
-    // Set dispatch mode to HOST (no dispatch firmware).
-    launch_msg.kernel_config.mode = tt_metal::dev_msgs::DISPATCH_MODE_HOST;
+        // DISPATCH_MODE_HOST: host controls execution directly.
+        kernel_config.mode() = tt_metal::dev_msgs::DISPATCH_MODE_HOST;
 
-    // Enable the processors that have loaded kernels.
-    // Bit i set in 'enables' means processor i is active.
-    uint32_t enables = 0;
-    for (const auto& lr : kernel.riscs) {
-        enables |= (1u << lr.processor_index);
-    }
-    launch_msg.kernel_config.enables = enables;
+        // Enable processors that have loaded kernels.
+        for (const auto& lr : kernel.riscs) {
+            kernel_config.enables() |= (1u << lr.processor_index);
+        }
 
-    // kernel_config_base[TENSIX] = address in L1 that the firmware uses to find
-    // the kernel config (including the RTA base offsets).
-    // We point it at the RTA region itself: the firmware reads rta_offset[proc_idx]
-    // and adds it to kernel_config_base to locate the args.
-    // With rta_offset = proc_idx * kMaxRtaWords * 4, args are at the right place.
-    constexpr uint32_t kTensixIdx = 0;  // ProgrammableCoreType::TENSIX == 0 in Blackhole
-    launch_msg.kernel_config.kernel_config_base[kTensixIdx] =
-        static_cast<uint32_t>(kernel.rta_base_addr);
+        // kernel_config_base = KERNEL_CONFIG region start (= MEM_MAP_END).
+        // Firmware computes:
+        //   rta_l1_base  = kernel_config_base + rta_offset[proc].rta_offset
+        //   kernel_lma   = kernel_config_base + kernel_text_offset[proc]
+        // rta_offset is uint16_t, so RTA must be within first 64KB of this region.
+        // kernel_text_offset is uint32_t; wrapping addition recovers absolute text_addr.
+        constexpr uint32_t kTensixIdx = 0;  // ProgrammableCoreType::TENSIX == 0
+        uint32_t kcfg_base = static_cast<uint32_t>(hal.get_dev_addr(
+            tt_metal::HalProgrammableCoreType::TENSIX,
+            tt_metal::HalL1MemAddrType::KERNEL_CONFIG));
+        kernel_config.kernel_config_base()[kTensixIdx] = kcfg_base;
 
-    // Set rta_offset for each active processor.
-    // rta_offset is the byte offset from kernel_config_base to where that proc's args start.
-    for (const auto& lr : kernel.riscs) {
-        launch_msg.kernel_config.rta_offset[lr.processor_index].rta_offset =
-            static_cast<uint16_t>(lr.processor_index * kMaxRtaWords * sizeof(uint32_t));
-        // crta_offset = 0 (no compile-time runtime args in v1)
-        launch_msg.kernel_config.rta_offset[lr.processor_index].crta_offset = 0;
+        // rta_offset[proc_idx]: relative to kernel_config_base.
+        for (const auto& lr : kernel.riscs) {
+            uint32_t abs_rta_addr = static_cast<uint32_t>(kernel.rta_base_addr) +
+                lr.processor_index * kMaxRtaWords * sizeof(uint32_t);
+            uint32_t rel_rta = abs_rta_addr - kcfg_base;
+            auto rta_entry = kernel_config.rta_offset()[lr.processor_index];
+            rta_entry.rta_offset() = static_cast<uint16_t>(rel_rta);
+            rta_entry.crta_offset() = 0;
+        }
+
+        // kernel_text_offset[proc_idx]: offset from kernel_config_base to the loaded kernel binary.
+        for (const auto& lr : kernel.riscs) {
+            uint32_t text_off = static_cast<uint32_t>(lr.kernel_text_addr) - kcfg_base;
+            kernel_config.kernel_text_offset()[lr.processor_index] = text_off;
+        }
+
+        // Skip remote CB setup: set min_remote_cb_start_index = NUM_CIRCULAR_BUFFERS.
+        // When this field equals NUM_CIRCULAR_BUFFERS, the firmware's setup_remote_cb_interfaces
+        // loop and barrier_remote_cb_interface_setup are both no-ops (brisc.cc check).
+        // Without this, firmware misinterprets the RTA region (at remote_cb_offset=0) as CB
+        // config data, finds non-zero RTA values, and hangs on a bogus NOC transaction.
+        kernel_config.min_remote_cb_start_index() = static_cast<uint8_t>(NUM_CIRCULAR_BUFFERS);
     }
 
     // ---- Step 4: Write launch_msg to the mailbox in L1 ----
@@ -123,7 +125,7 @@ void dispatch_execute(Device& dev, Kernel& kernel, int timeout_ms) {
         tt_metal::HalL1MemAddrType::LAUNCH);
 
     cluster.write_core_immediate(
-        &launch_msg, sizeof(launch_msg),
+        launch_msg_buf.data(), static_cast<uint32_t>(launch_msg_buf.size()),
         tt_cxy_pair(chip, virt),
         launch_addr);
 
@@ -131,35 +133,35 @@ void dispatch_execute(Device& dev, Kernel& kernel, int timeout_ms) {
     tt_driver_atomics::sfence();
 
     // ---- Step 5: Fire go_msg (RUN_MSG_GO) ----
-    tt_metal::dev_msgs::go_msg_t go_msg{};
-    go_msg.signal = tt_metal::dev_msgs::RUN_MSG_GO;
-
-    uint64_t go_addr = hal.get_dev_noc_addr(
+    // For unicast Tensix cores, go_message_index is always 0.
+    // Write RUN_MSG_GO directly to go_messages[0] (= GO_MSG base address),
+    // matching the pattern in llrt::write_launch_msg_to_core.
+    uint64_t go_entry_addr = hal.get_dev_noc_addr(
         tt_metal::HalProgrammableCoreType::TENSIX,
         tt_metal::HalL1MemAddrType::GO_MSG);
 
+    uint32_t go_val = hal.make_go_msg_u32(
+        static_cast<uint8_t>(tt_metal::dev_msgs::RUN_MSG_GO), 0, 0, 0);
+
     cluster.write_core_immediate(
-        &go_msg, sizeof(go_msg),
+        &go_val, sizeof(go_val),
         tt_cxy_pair(chip, virt),
-        go_addr);
+        go_entry_addr);
 
     cluster.l1_barrier(chip);
 
     // ---- Step 6: Poll go_msg until RUN_MSG_DONE ----
+    auto go_msg_buf = dev_msgs_factory.create<tt_metal::dev_msgs::go_msg_t>();
     auto start = std::chrono::steady_clock::now();
     while (true) {
-        tt_metal::dev_msgs::go_msg_t result{};
         cluster.read_core(
-            &result, sizeof(result),
+            go_msg_buf.data(), static_cast<uint32_t>(go_msg_buf.size()),
             tt_cxy_pair(chip, virt),
-            go_addr & ~0x3ULL);  // read must be 4-byte aligned
+            go_entry_addr);
 
-        if (result.signal == tt_metal::dev_msgs::RUN_MSG_DONE) {
+        uint8_t sig = go_msg_buf.view().signal();
+        if (sig == tt_metal::dev_msgs::RUN_MSG_DONE) {
             break;
-        }
-        if (result.signal != tt_metal::dev_msgs::RUN_MSG_GO) {
-            throw std::runtime_error(
-                "tt-foil: unexpected go_msg signal: " + std::to_string(result.signal));
         }
 
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
