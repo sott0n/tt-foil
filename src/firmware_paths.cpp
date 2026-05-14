@@ -16,8 +16,13 @@ namespace fs = std::filesystem;
 namespace {
 
 // Required ELFs relative to the pre-compiled/<hash>/ root.
-constexpr const char* kRelBrisc  = "brisc/brisc_weakened.elf";
-constexpr const char* kRelNcrisc = "ncrisc/ncrisc_weakened.elf";
+// tt-metal's BuildEnvManager picks "<risc>/<risc>.elf" (see build.cpp:429).
+// `*_weakened.elf` exists too but is the input to user-kernel linking, not the
+// firmware. They differ in a few words (relocations resolved differently),
+// so picking the wrong one looks "almost right" but mismatches at relocation
+// sites.
+constexpr const char* kRelBrisc  = "brisc/brisc.elf";
+constexpr const char* kRelNcrisc = "ncrisc/ncrisc.elf";
 constexpr const char* kRelTrisc0 = "trisc0/trisc0.elf";
 constexpr const char* kRelTrisc1 = "trisc1/trisc1.elf";
 constexpr const char* kRelTrisc2 = "trisc2/trisc2.elf";

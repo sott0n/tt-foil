@@ -29,6 +29,12 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_brisc_ncrisc PRIVATE TT::Foil)
     add_test(NAME test_brisc_ncrisc COMMAND test_brisc_ncrisc)
 
+    # Firmware ELF load equivalence vs tt-metal (Phase B2 step 3)
+    add_executable(test_firmware_load test_firmware_load.cpp)
+    target_include_directories(test_firmware_load PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(test_firmware_load PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_firmware_load COMMAND test_firmware_load)
+
     # UMD direct open + L1 round trip (Phase B2 step 2)
     # No tt-metal CreateDevice: opens umd::Cluster directly. Must not run
     # alongside another process that has the same chip open.

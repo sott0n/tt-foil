@@ -18,6 +18,7 @@ add_library(tt_foil STATIC
     src/kernel.cpp
     src/dispatch.cpp
     src/firmware_paths.cpp
+    src/firmware_load.cpp
     src/umd_boot.cpp
     src/runtime_impl.cpp
 )
