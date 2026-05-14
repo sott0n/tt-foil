@@ -5,10 +5,8 @@
 
 #include <stdexcept>
 
-// tt-metal public API — delegates firmware init to tt-metal
-#include "tt-metalium/host_api.hpp"   // CreateDevice, CloseDevice
-
-// MetalContext — cluster and HAL accessors (available after CreateDevice)
+// MetalContext — cluster and HAL accessors. Implicitly initialised on first
+// `instance()` call; no need to go through CreateDevice anymore.
 #include "impl/context/metal_context.hpp"
 
 // Full cluster and HAL headers (needed for member function calls in this file)
@@ -18,6 +16,7 @@
 
 // UMD direct API (Phase B1)
 #include <umd/device/cluster.hpp>
+#include <umd/device/soc_descriptor.hpp>
 #include <umd/device/types/xy_pair.hpp>
 #include <umd/device/types/core_coordinates.hpp>
 
@@ -25,6 +24,16 @@
 #include "tt-metalium/kernel_types.hpp"
 
 #include "tt_foil/runtime.hpp"  // for CoreCoord
+
+// Phase B2: UMD-direct cold boot pieces (replaces tt::tt_metal::CreateDevice)
+#include "bank_tables_init.hpp"
+#include "core_info_init.hpp"
+#include "firmware_load.hpp"
+#include "firmware_paths.hpp"
+#include "mailbox_init.hpp"
+#include "reset.hpp"
+
+#include <cstdlib>
 
 namespace tt::foil {
 
@@ -102,55 +111,94 @@ L1Allocator& Device::l1_for_core(const CoreCoord& logical_core) {
 
 // ---- Public device API ----
 
+// Translate a logical Tensix coord to UMD's TRANSLATED coord system via the
+// soc descriptor. This replaces the IDevice::worker_core_from_logical_core
+// call we used to make before dropping CreateDevice.
+static tt::umd::CoreCoord soc_logical_to_translated(
+    const metal_SocDescriptor& soc_desc, uint32_t logical_x, uint32_t logical_y) {
+    tt::umd::CoreCoord logical{
+        logical_x, logical_y, tt::CoreType::TENSIX, tt::CoordSystem::LOGICAL};
+    return soc_desc.translate_coord_to(logical, tt::CoordSystem::TRANSLATED);
+}
+
 std::unique_ptr<Device> device_open(int pcie_device_index, const std::string& /*firmware_dir*/) {
     auto dev = std::make_unique<Device>();
     dev->chip_id = static_cast<uint32_t>(pcie_device_index);
 
-    // Delegate device init (cluster setup, HAL, firmware load, wait for INIT)
-    // entirely to tt-metal's CreateDevice.
-    dev->tt_device = tt::tt_metal::CreateDevice(
-        static_cast<tt::ChipId>(pcie_device_index));
-
-    // Borrow cluster and HAL from MetalContext (valid while tt_device is alive).
-    auto& ctx = tt::tt_metal::MetalContext::instance();
-    dev->cluster = &ctx.get_cluster();
-    dev->hal     = &ctx.hal();
-
-    // Cache the underlying UMD driver so host<->core I/O can bypass tt::Cluster.
+    // ---------------------------------------------------------------------
+    // Phase B2 step 8: cold-boot the chip ourselves, no CreateDevice.
+    //
+    // MetalContext::instance() implicitly constructs MetalEnv, which in turn
+    // builds a tt::Cluster (=> umd::Cluster) and a Hal — without touching
+    // device firmware. We borrow the driver pointer and HAL from there.
+    // ---------------------------------------------------------------------
+    auto& ctx   = tt::tt_metal::MetalContext::instance();
+    dev->cluster    = &ctx.get_cluster();
+    dev->hal        = &ctx.hal();
     dev->umd_driver = dev->cluster->get_driver().get();
 
-    // Pre-translate DRAM channel 0's preferred worker core into UMD's
-    // CoordSystem::TRANSLATED, plus the per-view address offset.
+    const auto& soc_desc = dev->cluster->get_soc_desc(dev->chip_id);
+
+    // Pre-translate DRAM channel 0 worker core for write_dram / read_dram.
     {
-        const auto& soc_desc = dev->cluster->get_soc_desc(dev->chip_id);
         ::CoreCoord dram_xy = soc_desc.get_preferred_worker_core_for_dram_view(0, tt_metal::NOC::NOC_0);
         dev->dram0_core = tt::umd::CoreCoord{
             dram_xy.x, dram_xy.y, tt::CoreType::DRAM, tt::CoordSystem::TRANSLATED};
         dev->dram0_offset = soc_desc.get_address_offset(0);
     }
 
-    // Initialise DRAM bump allocator from HAL.
+    // Init DRAM bump allocator from HAL.
     uint64_t dram_base = dev->hal->get_dev_addr(tt_metal::HalDramMemAddrType::UNRESERVED);
     uint64_t dram_size = dev->hal->get_dev_size(tt_metal::HalDramMemAddrType::UNRESERVED);
     dev->dram_alloc = DramAllocator{dram_base, dram_base, dram_base + dram_size};
+
+    // ---------------------------------------------------------------------
+    // Cold-boot logical (0,0). Other Tensix cores stay in whatever state
+    // they were in (typically reset on a fresh power-up). Multi-core boot
+    // can be added later by looping this block over a set of cores.
+    // ---------------------------------------------------------------------
+    auto fw = resolve_firmware_paths(
+        // tt-metal source root is needed for auto-discovery; rtoptions is
+        // initialised lazily and may not have set its root_dir at this point,
+        // so honour TT_METAL_RUNTIME_ROOT explicitly with a sensible default.
+        []() -> std::string {
+            if (const char* p = std::getenv("TT_METAL_RUNTIME_ROOT")) return p;
+            return "/home/kyamaguchi/tt-metal";
+        }());
+
+    constexpr uint32_t kLogX = 0, kLogY = 0;
+    auto core = soc_logical_to_translated(soc_desc, kLogX, kLogY);
+
+    assert_tensix_reset(*dev->umd_driver, dev->chip_id, core);
+
+    load_tensix_firmware(*dev->umd_driver, *dev->hal, dev->chip_id, core, fw.brisc,  kBrisc);
+    load_tensix_firmware(*dev->umd_driver, *dev->hal, dev->chip_id, core, fw.ncrisc, kNcrisc);
+    load_tensix_firmware(*dev->umd_driver, *dev->hal, dev->chip_id, core, fw.trisc0, kTrisc0);
+    load_tensix_firmware(*dev->umd_driver, *dev->hal, dev->chip_id, core, fw.trisc1, kTrisc1);
+    load_tensix_firmware(*dev->umd_driver, *dev->hal, dev->chip_id, core, fw.trisc2, kTrisc2);
+
+    zero_fill_bank_tables       (*dev->umd_driver, *dev->hal, dev->chip_id, core);
+    init_tensix_core_info_minimal(*dev->umd_driver, *dev->hal, dev->chip_id, core, kLogX, kLogY);
+    init_tensix_mailboxes        (*dev->umd_driver, *dev->hal, dev->chip_id, core);
+
+    deassert_brisc_reset(*dev->umd_driver, dev->chip_id, core);
+    wait_tensix_init_done(*dev->umd_driver, *dev->hal, dev->chip_id, core, /*timeout_ms=*/10000);
 
     return dev;
 }
 
 void device_close(Device& dev) {
-    if (dev.tt_device) {
-        tt::tt_metal::CloseDevice(dev.tt_device);
-        dev.tt_device = nullptr;
-        dev.cluster   = nullptr;
-        dev.hal       = nullptr;
-        dev.umd_driver = nullptr;
-    }
+    // No CloseDevice/IDevice to tear down — MetalContext stays alive for the
+    // process. Clear the borrowed pointers so dangling use is loud.
+    dev.cluster    = nullptr;
+    dev.hal        = nullptr;
+    dev.umd_driver = nullptr;
 }
 
 tt::xy_pair logical_to_virtual(const Device& dev, const CoreCoord& logical) {
-    tt::tt_metal::CoreCoord virt =
-        dev.tt_device->worker_core_from_logical_core({logical.x, logical.y});
-    return TtCoreCoord{virt.x, virt.y};
+    const auto& soc_desc = dev.cluster->get_soc_desc(dev.chip_id);
+    auto t = soc_logical_to_translated(soc_desc, logical.x, logical.y);
+    return TtCoreCoord{t.x, t.y};
 }
 
 static tt::umd::CoreCoord tensix_translated(const Device& dev, const CoreCoord& core) {

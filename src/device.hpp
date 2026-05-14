@@ -21,7 +21,6 @@ class Cluster;
 }  // namespace tt
 namespace tt::tt_metal {
 class Hal;
-class IDevice;
 }  // namespace tt::tt_metal
 
 namespace tt::foil {
@@ -48,15 +47,14 @@ struct DramAllocator {
     void reset();
 };
 
-// Device handle. Firmware init is delegated to tt-metal's CreateDevice().
-// cluster and hal are borrowed references from MetalContext (valid while tt_device is alive).
+// Device handle. As of Phase B2 step 8, firmware init is performed in
+// device_open() via UMD direct (no tt::tt_metal::CreateDevice / IDevice).
+// `cluster` and `hal` are borrowed from MetalContext, which is a process-
+// level singleton and stays alive across device_open/device_close pairs.
 struct Device {
     uint32_t chip_id{0};
 
-    // Owned: call CloseDevice() in device_close().
-    tt::tt_metal::IDevice* tt_device{nullptr};
-
-    // Borrowed from MetalContext — valid while tt_device is alive.
+    // Borrowed from MetalContext — valid for the lifetime of the process.
     tt::Cluster*                cluster{nullptr};
     const tt::tt_metal::Hal*    hal{nullptr};
 
