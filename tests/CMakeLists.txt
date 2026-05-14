@@ -29,6 +29,12 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_brisc_ncrisc PRIVATE TT::Foil)
     add_test(NAME test_brisc_ncrisc COMMAND test_brisc_ncrisc)
 
+    # Tensix CORE_INFO mailbox init (Phase B2 step 4b)
+    add_executable(test_core_info_init test_core_info_init.cpp)
+    target_include_directories(test_core_info_init PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(test_core_info_init PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_core_info_init COMMAND test_core_info_init)
+
     # Tensix mailbox boot-time init (Phase B2 step 4)
     add_executable(test_mailbox_init test_mailbox_init.cpp)
     target_include_directories(test_mailbox_init PRIVATE "${CMAKE_SOURCE_DIR}/src")
