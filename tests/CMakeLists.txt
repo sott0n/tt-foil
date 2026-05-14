@@ -28,4 +28,12 @@ if(TT_FOIL_HW_TESTS)
     add_executable(test_brisc_ncrisc test_brisc_ncrisc.cpp)
     target_link_libraries(test_brisc_ncrisc PRIVATE TT::Foil)
     add_test(NAME test_brisc_ncrisc COMMAND test_brisc_ncrisc)
+
+    # UMD direct open + L1 round trip (Phase B2 step 2)
+    # No tt-metal CreateDevice: opens umd::Cluster directly. Must not run
+    # alongside another process that has the same chip open.
+    add_executable(test_umd_open test_umd_open.cpp)
+    target_include_directories(test_umd_open PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(test_umd_open PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_umd_open COMMAND test_umd_open)
 endif()
