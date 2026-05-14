@@ -29,6 +29,12 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_brisc_ncrisc PRIVATE TT::Foil)
     add_test(NAME test_brisc_ncrisc COMMAND test_brisc_ncrisc)
 
+    # Tensix bank-routing scratch zero-fill (Phase B2 step 5)
+    add_executable(test_bank_tables_init test_bank_tables_init.cpp)
+    target_include_directories(test_bank_tables_init PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(test_bank_tables_init PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_bank_tables_init COMMAND test_bank_tables_init)
+
     # Tensix CORE_INFO mailbox init (Phase B2 step 4b)
     add_executable(test_core_info_init test_core_info_init.cpp)
     target_include_directories(test_core_info_init PRIVATE "${CMAKE_SOURCE_DIR}/src")
