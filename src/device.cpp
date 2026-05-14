@@ -39,6 +39,9 @@ namespace tt::foil {
 
 using TtCoreCoord = tt::xy_pair;  // tt::tt_metal::CoreCoord = tt::xy_pair
 
+Device::Device() = default;
+Device::~Device() = default;
+
 // ---- Allocator helpers ----
 
 uint64_t L1Allocator::alloc(std::size_t bytes, uint32_t alignment) {
@@ -134,8 +137,20 @@ std::unique_ptr<Device> device_open(int pcie_device_index, const std::string& /*
     // ---------------------------------------------------------------------
     auto& ctx   = tt::tt_metal::MetalContext::instance();
     dev->cluster    = &ctx.get_cluster();
-    dev->hal        = &ctx.hal();
     dev->umd_driver = dev->cluster->get_driver().get();
+
+    // Phase B3 step 1: own the HAL ourselves rather than borrowing from
+    // MetalContext. Defaults mirror MetalEnvImpl::initialize_base_objects()
+    // for a single Blackhole MMIO chip (metal_env.cpp:138-145).
+    dev->owned_hal = std::make_unique<tt::tt_metal::Hal>(
+        tt::ARCH::BLACKHOLE,
+        /*is_base_routing_fw_enabled=*/false,
+        /*enable_2_erisc_mode=*/false,
+        /*profiler_dram_bank_size_per_risc_bytes=*/0,
+        /*enable_dram_backed_cq=*/false,
+        /*is_simulator=*/false,
+        /*enable_blackhole_dram_programmable_cores=*/false);
+    dev->hal = dev->owned_hal.get();
 
     const auto& soc_desc = dev->cluster->get_soc_desc(dev->chip_id);
 

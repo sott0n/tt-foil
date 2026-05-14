@@ -49,13 +49,20 @@ struct DramAllocator {
 
 // Device handle. As of Phase B2 step 8, firmware init is performed in
 // device_open() via UMD direct (no tt::tt_metal::CreateDevice / IDevice).
-// `cluster` and `hal` are borrowed from MetalContext, which is a process-
-// level singleton and stays alive across device_open/device_close pairs.
+// `cluster` is still borrowed from MetalContext for UMD driver access;
+// `hal` is owned by this Device and constructed directly via `new Hal(...)`
+// (Phase B3 step 1).
 struct Device {
     uint32_t chip_id{0};
 
     // Borrowed from MetalContext — valid for the lifetime of the process.
     tt::Cluster*                cluster{nullptr};
+
+    // Owned: instantiated in device_open(), destroyed with Device.
+    std::unique_ptr<tt::tt_metal::Hal> owned_hal;
+
+    // Convenience alias — same object as owned_hal.get(). Lets the rest of
+    // the codebase keep its `dev->hal->...` shape unchanged.
     const tt::tt_metal::Hal*    hal{nullptr};
 
     // UMD-direct primitives (Phase B1): cached at device_open from
@@ -82,6 +89,13 @@ struct Device {
 
     L1Allocator& l1_for_core(const CoreCoord& logical_core);
     L1Allocator& kernel_config_for_core(const CoreCoord& logical_core);
+
+    // Defined in device.cpp where tt::tt_metal::Hal is a complete type
+    // (unique_ptr destructor requires it).
+    Device();
+    ~Device();
+    Device(const Device&)            = delete;
+    Device& operator=(const Device&) = delete;
 };
 
 // Open device via tt-metal CreateDevice() (handles FW init).

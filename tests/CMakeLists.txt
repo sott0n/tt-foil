@@ -10,6 +10,11 @@ add_executable(test_bump_alloc test_bump_alloc.cpp)
 target_link_libraries(test_bump_alloc PRIVATE TT::Foil tt_foil_llrt)
 add_test(NAME test_bump_alloc COMMAND test_bump_alloc)
 
+# Unit test: standalone HAL instantiation (Phase B3 probe)
+add_executable(test_hal_standalone test_hal_standalone.cpp)
+target_link_libraries(test_hal_standalone PRIVATE TT::Foil tt_foil_llrt)
+add_test(NAME test_hal_standalone COMMAND test_hal_standalone)
+
 # Unit test: firmware ELF discovery (no hardware required)
 add_executable(test_firmware_paths test_firmware_paths.cpp)
 target_include_directories(test_firmware_paths PRIVATE "${CMAKE_SOURCE_DIR}/src")
