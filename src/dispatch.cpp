@@ -12,15 +12,17 @@
 #include <vector>
 
 // tt-metal headers
-#include "llrt/tt_cluster.hpp"
 #include "llrt/hal.hpp"
 #include "llrt/tt_memory.h"
 
 // HAL-generated dev_msgs (new StructBuffer/View API)
 #include "hal/generated/dev_msgs.hpp"
 
-// UMD pair type
+// UMD direct API (Phase B1): bypass tt::Cluster for all dispatch I/O.
+#include <umd/device/cluster.hpp>
+#include <umd/device/driver_atomics.hpp>
 #include <umd/device/types/xy_pair.hpp>
+#include <umd/device/types/core_coordinates.hpp>
 
 // NUM_CIRCULAR_BUFFERS = 64 on Blackhole; must match circular_buffer_constants.h
 #include "tt-metalium/circular_buffer_constants.h"
@@ -32,11 +34,13 @@ namespace tt::foil {
 // ---------------------------------------------------------------------------
 void dispatch_execute(Device& dev, Kernel& kernel, int timeout_ms) {
     const tt::tt_metal::Hal& hal = *dev.hal;
-    tt::Cluster& cluster         = *dev.cluster;
+    tt::umd::Cluster& driver     = *dev.umd_driver;
     const uint32_t chip          = dev.chip_id;
 
     // Virtual (translated) core coordinate resolved at kernel_load() time.
-    tt::xy_pair virt{kernel.virt_x, kernel.virt_y};
+    tt::umd::CoreCoord cc{
+        kernel.virt_x, kernel.virt_y,
+        tt::CoreType::TENSIX, tt::CoordSystem::TRANSLATED};
 
     // Dev-msgs factory for TENSIX core type
     const auto& dev_msgs_factory =
@@ -48,11 +52,10 @@ void dispatch_execute(Device& dev, Kernel& kernel, int timeout_ms) {
     // This mirrors llrt::write_binary_to_address: target address is explicit, not from span.
     for (const auto& lr : kernel.riscs) {
         lr.mem->process_spans([&](std::vector<uint32_t>::const_iterator mem_ptr, uint64_t /*addr*/, uint32_t len_words) {
-            cluster.write_core(
+            driver.write_to_device(
                 &*mem_ptr,
-                len_words * sizeof(uint32_t),
-                tt_cxy_pair(chip, virt),
-                lr.kernel_text_addr);
+                static_cast<std::size_t>(len_words) * sizeof(uint32_t),
+                chip, cc, lr.kernel_text_addr);
         });
     }
 
@@ -63,11 +66,10 @@ void dispatch_execute(Device& dev, Kernel& kernel, int timeout_ms) {
         }
         uint64_t rta_addr = kernel.rta_base_addr +
             lr.processor_index * static_cast<uint64_t>(kMaxRtaWords * sizeof(uint32_t));
-        cluster.write_core(
+        driver.write_to_device(
             lr.runtime_args.data(),
-            static_cast<uint32_t>(lr.runtime_args.size() * sizeof(uint32_t)),
-            tt_cxy_pair(chip, virt),
-            rta_addr);
+            lr.runtime_args.size() * sizeof(uint32_t),
+            chip, cc, rta_addr);
     }
 
     // ---- Step 3: Build launch_msg using the new StructBuffer/View API ----
@@ -124,10 +126,9 @@ void dispatch_execute(Device& dev, Kernel& kernel, int timeout_ms) {
         tt_metal::HalProgrammableCoreType::TENSIX,
         tt_metal::HalL1MemAddrType::LAUNCH);
 
-    cluster.write_core_immediate(
+    driver.write_to_device_reg(
         launch_msg_buf.data(), static_cast<uint32_t>(launch_msg_buf.size()),
-        tt_cxy_pair(chip, virt),
-        launch_addr);
+        chip, cc, launch_addr);
 
     // Memory fence: ensure launch_msg is visible before go_msg.
     tt_driver_atomics::sfence();
@@ -143,21 +144,20 @@ void dispatch_execute(Device& dev, Kernel& kernel, int timeout_ms) {
     uint32_t go_val = hal.make_go_msg_u32(
         static_cast<uint8_t>(tt_metal::dev_msgs::RUN_MSG_GO), 0, 0, 0);
 
-    cluster.write_core_immediate(
+    driver.write_to_device_reg(
         &go_val, sizeof(go_val),
-        tt_cxy_pair(chip, virt),
-        go_entry_addr);
+        chip, cc, go_entry_addr);
 
-    cluster.l1_barrier(chip);
+    driver.l1_membar(chip);
 
     // ---- Step 6: Poll go_msg until RUN_MSG_DONE ----
     auto go_msg_buf = dev_msgs_factory.create<tt_metal::dev_msgs::go_msg_t>();
     auto start = std::chrono::steady_clock::now();
     while (true) {
-        cluster.read_core(
-            go_msg_buf.data(), static_cast<uint32_t>(go_msg_buf.size()),
-            tt_cxy_pair(chip, virt),
-            go_entry_addr);
+        driver.read_from_device(
+            go_msg_buf.data(),
+            chip, cc, go_entry_addr,
+            static_cast<std::size_t>(go_msg_buf.size()));
 
         uint8_t sig = go_msg_buf.view().signal();
         if (sig == tt_metal::dev_msgs::RUN_MSG_DONE) {

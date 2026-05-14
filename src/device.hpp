@@ -10,11 +10,15 @@
 
 // UMD xy_pair = tt::tt_metal::CoreCoord (needed as return type below)
 #include <umd/device/types/xy_pair.hpp>
+#include <umd/device/types/core_coordinates.hpp>
 
 // Forward declarations — complete types provided in device.cpp
 namespace tt {
 class Cluster;
+namespace umd {
+class Cluster;
 }
+}  // namespace tt
 namespace tt::tt_metal {
 class Hal;
 class IDevice;
@@ -55,6 +59,16 @@ struct Device {
     // Borrowed from MetalContext — valid while tt_device is alive.
     tt::Cluster*                cluster{nullptr};
     const tt::tt_metal::Hal*    hal{nullptr};
+
+    // UMD-direct primitives (Phase B1): cached at device_open from
+    // cluster->get_driver(). All host<->core L1/DRAM traffic and barriers go
+    // straight through this driver, bypassing tt::Cluster.
+    tt::umd::Cluster*           umd_driver{nullptr};
+
+    // Translated coord + offset of DRAM channel 0's preferred worker core.
+    // Cached at device_open so write_dram/read_dram don't need tt::Cluster.
+    tt::umd::CoreCoord          dram0_core{};
+    uint64_t                    dram0_offset{0};
 
     // Per-core L1 bump allocators, keyed by (x,y)
     std::unordered_map<uint64_t, L1Allocator> l1_allocs;

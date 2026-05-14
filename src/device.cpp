@@ -14,9 +14,15 @@
 // Full cluster and HAL headers (needed for member function calls in this file)
 #include "llrt/tt_cluster.hpp"
 #include "llrt/hal.hpp"
+#include "llrt/metal_soc_descriptor.hpp"
 
-// UMD types
+// UMD direct API (Phase B1)
+#include <umd/device/cluster.hpp>
 #include <umd/device/types/xy_pair.hpp>
+#include <umd/device/types/core_coordinates.hpp>
+
+// NOC enum for soc_desc DRAM lookup
+#include "tt-metalium/kernel_types.hpp"
 
 #include "tt_foil/runtime.hpp"  // for CoreCoord
 
@@ -110,6 +116,19 @@ std::unique_ptr<Device> device_open(int pcie_device_index, const std::string& /*
     dev->cluster = &ctx.get_cluster();
     dev->hal     = &ctx.hal();
 
+    // Cache the underlying UMD driver so host<->core I/O can bypass tt::Cluster.
+    dev->umd_driver = dev->cluster->get_driver().get();
+
+    // Pre-translate DRAM channel 0's preferred worker core into UMD's
+    // CoordSystem::TRANSLATED, plus the per-view address offset.
+    {
+        const auto& soc_desc = dev->cluster->get_soc_desc(dev->chip_id);
+        ::CoreCoord dram_xy = soc_desc.get_preferred_worker_core_for_dram_view(0, tt_metal::NOC::NOC_0);
+        dev->dram0_core = tt::umd::CoreCoord{
+            dram_xy.x, dram_xy.y, tt::CoreType::DRAM, tt::CoordSystem::TRANSLATED};
+        dev->dram0_offset = soc_desc.get_address_offset(0);
+    }
+
     // Initialise DRAM bump allocator from HAL.
     uint64_t dram_base = dev->hal->get_dev_addr(tt_metal::HalDramMemAddrType::UNRESERVED);
     uint64_t dram_size = dev->hal->get_dev_size(tt_metal::HalDramMemAddrType::UNRESERVED);
@@ -124,6 +143,7 @@ void device_close(Device& dev) {
         dev.tt_device = nullptr;
         dev.cluster   = nullptr;
         dev.hal       = nullptr;
+        dev.umd_driver = nullptr;
     }
 }
 
@@ -133,22 +153,28 @@ tt::xy_pair logical_to_virtual(const Device& dev, const CoreCoord& logical) {
     return TtCoreCoord{virt.x, virt.y};
 }
 
-void write_l1(Device& dev, const CoreCoord& core, uint64_t addr, const void* src, std::size_t size) {
+static tt::umd::CoreCoord tensix_translated(const Device& dev, const CoreCoord& core) {
     TtCoreCoord virt = logical_to_virtual(dev, core);
-    dev.cluster->write_core(src, static_cast<uint32_t>(size), tt_cxy_pair(dev.chip_id, virt), addr);
+    return tt::umd::CoreCoord{
+        virt.x, virt.y, tt::CoreType::TENSIX, tt::CoordSystem::TRANSLATED};
+}
+
+void write_l1(Device& dev, const CoreCoord& core, uint64_t addr, const void* src, std::size_t size) {
+    auto cc = tensix_translated(dev, core);
+    dev.umd_driver->write_to_device(src, size, dev.chip_id, cc, addr);
 }
 
 void read_l1(Device& dev, const CoreCoord& core, uint64_t addr, void* dst, std::size_t size) {
-    TtCoreCoord virt = logical_to_virtual(dev, core);
-    dev.cluster->read_core(dst, static_cast<uint32_t>(size), tt_cxy_pair(dev.chip_id, virt), addr);
+    auto cc = tensix_translated(dev, core);
+    dev.umd_driver->read_from_device(dst, dev.chip_id, cc, addr, size);
 }
 
 void write_dram(Device& dev, uint64_t addr, const void* src, std::size_t size) {
-    dev.cluster->write_dram_vec(src, static_cast<uint32_t>(size), dev.chip_id, /*channel=*/0, addr);
+    dev.umd_driver->write_to_device(src, size, dev.chip_id, dev.dram0_core, addr + dev.dram0_offset);
 }
 
 void read_dram(Device& dev, uint64_t addr, void* dst, std::size_t size) {
-    dev.cluster->read_dram_vec(dst, static_cast<uint32_t>(size), dev.chip_id, /*channel=*/0, addr);
+    dev.umd_driver->read_from_device(dst, dev.chip_id, dev.dram0_core, addr + dev.dram0_offset, size);
 }
 
 }  // namespace tt::foil
