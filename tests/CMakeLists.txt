@@ -29,6 +29,12 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_brisc_ncrisc PRIVATE TT::Foil)
     add_test(NAME test_brisc_ncrisc COMMAND test_brisc_ncrisc)
 
+    # Tensix mailbox boot-time init (Phase B2 step 4)
+    add_executable(test_mailbox_init test_mailbox_init.cpp)
+    target_include_directories(test_mailbox_init PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(test_mailbox_init PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_mailbox_init COMMAND test_mailbox_init)
+
     # Firmware ELF load equivalence vs tt-metal (Phase B2 step 3)
     add_executable(test_firmware_load test_firmware_load.cpp)
     target_include_directories(test_firmware_load PRIVATE "${CMAKE_SOURCE_DIR}/src")

@@ -19,6 +19,7 @@ add_library(tt_foil STATIC
     src/dispatch.cpp
     src/firmware_paths.cpp
     src/firmware_load.cpp
+    src/mailbox_init.cpp
     src/umd_boot.cpp
     src/runtime_impl.cpp
 )
