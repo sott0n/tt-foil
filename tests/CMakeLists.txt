@@ -29,6 +29,12 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_brisc_ncrisc PRIVATE TT::Foil)
     add_test(NAME test_brisc_ncrisc COMMAND test_brisc_ncrisc)
 
+    # End-to-end cold boot via UMD direct (Phase B2 steps 6 + 7)
+    add_executable(test_cold_boot test_cold_boot.cpp)
+    target_include_directories(test_cold_boot PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(test_cold_boot PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_cold_boot COMMAND test_cold_boot)
+
     # Tensix bank-routing scratch zero-fill (Phase B2 step 5)
     add_executable(test_bank_tables_init test_bank_tables_init.cpp)
     target_include_directories(test_bank_tables_init PRIVATE "${CMAKE_SOURCE_DIR}/src")
