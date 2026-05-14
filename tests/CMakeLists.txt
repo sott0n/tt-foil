@@ -10,6 +10,12 @@ add_executable(test_bump_alloc test_bump_alloc.cpp)
 target_link_libraries(test_bump_alloc PRIVATE TT::Foil tt_foil_llrt)
 add_test(NAME test_bump_alloc COMMAND test_bump_alloc)
 
+# Unit test: firmware ELF discovery (no hardware required)
+add_executable(test_firmware_paths test_firmware_paths.cpp)
+target_include_directories(test_firmware_paths PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(test_firmware_paths PRIVATE TT::Foil)
+add_test(NAME test_firmware_paths COMMAND test_firmware_paths)
+
 # Integration test: add two numbers (requires Blackhole hardware)
 # Disabled by default; enable with -DTT_FOIL_HW_TESTS=ON
 option(TT_FOIL_HW_TESTS "Build hardware integration tests" OFF)

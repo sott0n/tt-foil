@@ -17,6 +17,7 @@ add_library(tt_foil STATIC
     src/buffer.cpp
     src/kernel.cpp
     src/dispatch.cpp
+    src/firmware_paths.cpp
     src/runtime_impl.cpp
 )
 add_library(TT::Foil ALIAS tt_foil)
