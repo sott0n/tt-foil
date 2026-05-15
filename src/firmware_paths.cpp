@@ -5,6 +5,7 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -46,30 +47,10 @@ FirmwarePaths build_paths(const fs::path& root) {
 
 }  // namespace
 
-FirmwarePaths resolve_firmware_paths(const std::string& tt_metal_root) {
-    // 1. Explicit env var wins.
-    if (const char* env = std::getenv("TT_FOIL_FIRMWARE_DIR"); env && *env) {
-        fs::path root{env};
-        if (!has_full_set(root)) {
-            throw std::runtime_error(
-                "tt-foil: TT_FOIL_FIRMWARE_DIR=" + std::string{env} +
-                " does not contain the expected RISC firmware ELFs "
-                "(brisc/brisc_weakened.elf, ncrisc/ncrisc_weakened.elf, "
-                "trisc{0,1,2}/trisc{0,1,2}.elf)");
-        }
-        return build_paths(root);
-    }
-
-    // 2. Auto-discover under tt_metal/pre-compiled/. Pick the most recently
-    //    modified candidate with the full ELF set — that's the directory the
-    //    current tt-metal build is using (it was touched last).
-    fs::path scan = fs::path{tt_metal_root} / "tt_metal" / "pre-compiled";
-    if (!fs::is_directory(scan)) {
-        throw std::runtime_error(
-            "tt-foil: no firmware: TT_FOIL_FIRMWARE_DIR unset and "
-            + scan.string() + " is not a directory");
-    }
-
+// Pick the most-recently-modified subdir of `scan` that contains a full
+// RISC firmware ELF set, or std::nullopt if none.
+static std::optional<fs::path> newest_full_set(const fs::path& scan) {
+    if (!fs::is_directory(scan)) return std::nullopt;
     fs::path best;
     fs::file_time_type best_mtime{};
     bool found = false;
@@ -83,13 +64,65 @@ FirmwarePaths resolve_firmware_paths(const std::string& tt_metal_root) {
             found = true;
         }
     }
-    if (!found) {
-        throw std::runtime_error(
-            "tt-foil: no pre-compiled firmware dir with full RISC ELF set "
-            "found under " + scan.string() +
-            " (set TT_FOIL_FIRMWARE_DIR to override)");
+    return found ? std::optional<fs::path>{best} : std::nullopt;
+}
+
+FirmwarePaths resolve_firmware_paths(const std::string& tt_metal_root) {
+    // 1. Explicit env var wins.
+    if (const char* env = std::getenv("TT_FOIL_FIRMWARE_DIR"); env && *env) {
+        fs::path root{env};
+        if (!has_full_set(root)) {
+            throw std::runtime_error(
+                "tt-foil: TT_FOIL_FIRMWARE_DIR=" + std::string{env} +
+                " does not contain the expected RISC firmware ELFs "
+                "(brisc/brisc.elf, ncrisc/ncrisc.elf, "
+                "trisc{0,1,2}/trisc{0,1,2}.elf)");
+        }
+        return build_paths(root);
     }
-    return build_paths(best);
+
+    // 2. Prefer tt-metal's JIT firmware cache. The pre-compiled
+    //    tt_metal/pre-compiled/ tree can diverge from what tt-metal actually
+    //    loads at runtime (different build hash → different brisc.elf bytes).
+    //    Loading stale pre-compiled firmware leaves BRISC's setup_local_cb
+    //    writes silently dropped, which hangs cb_reserve_back in the
+    //    next kernel. Prefer ~/.cache/tt-metal-cache/<hash>/firmware/ which
+    //    matches the firmware tt-metal builds and uses.
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        fs::path cache_root = fs::path{home} / ".cache" / "tt-metal-cache";
+        if (fs::is_directory(cache_root)) {
+            // Each cache key is a subdir; firmware lives under <key>/firmware/.
+            fs::path best;
+            fs::file_time_type best_mtime{};
+            bool found = false;
+            for (const auto& entry : fs::directory_iterator{cache_root}) {
+                if (!entry.is_directory()) continue;
+                fs::path candidate = entry.path() / "firmware";
+                if (!has_full_set(candidate)) continue;
+                auto mtime = fs::last_write_time(candidate);
+                if (!found || mtime > best_mtime) {
+                    best = candidate;
+                    best_mtime = mtime;
+                    found = true;
+                }
+            }
+            if (found) return build_paths(best);
+        }
+    }
+
+    // 3. Fallback: auto-discover under tt_metal/pre-compiled/. Pick the
+    //    most recently modified candidate with the full ELF set. This may
+    //    be stale relative to what tt-metal builds; if it doesn't work,
+    //    set TT_FOIL_FIRMWARE_DIR explicitly.
+    fs::path scan = fs::path{tt_metal_root} / "tt_metal" / "pre-compiled";
+    if (auto best = newest_full_set(scan); best.has_value()) {
+        return build_paths(*best);
+    }
+    throw std::runtime_error(
+        "tt-foil: no firmware ELFs found. Searched: "
+        "$HOME/.cache/tt-metal-cache/<hash>/firmware/ and "
+        + scan.string() +
+        "/<hash>/. Set TT_FOIL_FIRMWARE_DIR to override.");
 }
 
 const std::string& firmware_elf(const FirmwarePaths& paths, FwRisc risc) {
