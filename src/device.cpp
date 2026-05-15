@@ -5,22 +5,21 @@
 
 #include <stdexcept>
 
-// MetalContext — cluster and HAL accessors. Implicitly initialised on first
-// `instance()` call; no need to go through CreateDevice anymore.
+// MetalContext — borrowed for UMD driver access (HAL is owned, not borrowed).
 #include "impl/context/metal_context.hpp"
 
-// Full cluster and HAL headers (needed for member function calls in this file)
+// Full cluster + HAL headers
 #include "llrt/tt_cluster.hpp"
 #include "llrt/hal.hpp"
 #include "llrt/metal_soc_descriptor.hpp"
 
-// UMD direct API (Phase B1)
+// UMD direct API
 #include <umd/device/cluster.hpp>
 #include <umd/device/soc_descriptor.hpp>
 #include <umd/device/types/xy_pair.hpp>
 #include <umd/device/types/core_coordinates.hpp>
 
-// NOC enum for soc_desc DRAM lookup
+// NOC enum for DRAM lookup
 #include "tt-metalium/kernel_types.hpp"
 
 #include "tt_foil/runtime.hpp"  // for CoreCoord
@@ -114,9 +113,7 @@ L1Allocator& Device::l1_for_core(const CoreCoord& logical_core) {
 
 // ---- Public device API ----
 
-// Translate a logical Tensix coord to UMD's TRANSLATED coord system via the
-// soc descriptor. This replaces the IDevice::worker_core_from_logical_core
-// call we used to make before dropping CreateDevice.
+// Translate a logical Tensix coord to UMD's TRANSLATED coord system.
 static tt::umd::CoreCoord soc_logical_to_translated(
     const metal_SocDescriptor& soc_desc, uint32_t logical_x, uint32_t logical_y) {
     tt::umd::CoreCoord logical{
@@ -128,20 +125,12 @@ std::unique_ptr<Device> device_open(int pcie_device_index, const std::string& /*
     auto dev = std::make_unique<Device>();
     dev->chip_id = static_cast<uint32_t>(pcie_device_index);
 
-    // ---------------------------------------------------------------------
-    // Phase B2 step 8: cold-boot the chip ourselves, no CreateDevice.
-    //
-    // MetalContext::instance() implicitly constructs MetalEnv, which in turn
-    // builds a tt::Cluster (=> umd::Cluster) and a Hal — without touching
-    // device firmware. We borrow the driver pointer and HAL from there.
-    // ---------------------------------------------------------------------
     auto& ctx   = tt::tt_metal::MetalContext::instance();
     dev->cluster    = &ctx.get_cluster();
     dev->umd_driver = dev->cluster->get_driver().get();
 
-    // Phase B3 step 1: own the HAL ourselves rather than borrowing from
-    // MetalContext. Defaults mirror MetalEnvImpl::initialize_base_objects()
-    // for a single Blackhole MMIO chip (metal_env.cpp:138-145).
+    // HAL: instantiated directly (B3 step 1), defaults mirror MetalEnvImpl
+    // for a single Blackhole MMIO chip.
     dev->owned_hal = std::make_unique<tt::tt_metal::Hal>(
         tt::ARCH::BLACKHOLE,
         /*is_base_routing_fw_enabled=*/false,
@@ -203,10 +192,11 @@ std::unique_ptr<Device> device_open(int pcie_device_index, const std::string& /*
 }
 
 void device_close(Device& dev) {
-    // No CloseDevice/IDevice to tear down — MetalContext stays alive for the
-    // process. Clear the borrowed pointers so dangling use is loud.
-    dev.cluster    = nullptr;
+    // HAL is owned; UMD cluster is borrowed via MetalContext (process-level
+    // singleton). Drop owned HAL; clear borrowed pointers.
+    dev.owned_hal.reset();
     dev.hal        = nullptr;
+    dev.cluster    = nullptr;
     dev.umd_driver = nullptr;
 }
 

@@ -47,27 +47,26 @@ struct DramAllocator {
     void reset();
 };
 
-// Device handle. As of Phase B2 step 8, firmware init is performed in
-// device_open() via UMD direct (no tt::tt_metal::CreateDevice / IDevice).
-// `cluster` is still borrowed from MetalContext for UMD driver access;
-// `hal` is owned by this Device and constructed directly via `new Hal(...)`
-// (Phase B3 step 1).
+// Device handle. As of Phase B3 step 1, HAL is owned by Device directly
+// (no longer borrowed from MetalContext::hal()). umd::Cluster is still
+// borrowed from MetalContext::instance().get_cluster().get_driver() — owning
+// our own umd::Cluster requires also stopping ll_api::memory(XIP) from
+// implicitly initialising MetalContext (it does so for an XIP-dump debug
+// path), which means bundling tt_memory.cpp locally. That work is B3-2 +
+// B3-3 combined; see commit log.
 struct Device {
     uint32_t chip_id{0};
 
     // Borrowed from MetalContext — valid for the lifetime of the process.
     tt::Cluster*                cluster{nullptr};
 
-    // Owned: instantiated in device_open(), destroyed with Device.
+    // Owned by Device — destructor defined in device.cpp.
     std::unique_ptr<tt::tt_metal::Hal> owned_hal;
 
-    // Convenience alias — same object as owned_hal.get(). Lets the rest of
-    // the codebase keep its `dev->hal->...` shape unchanged.
+    // Convenience alias into owned_hal.
     const tt::tt_metal::Hal*    hal{nullptr};
 
-    // UMD-direct primitives (Phase B1): cached at device_open from
-    // cluster->get_driver(). All host<->core L1/DRAM traffic and barriers go
-    // straight through this driver, bypassing tt::Cluster.
+    // UMD driver borrowed from cluster->get_driver().
     tt::umd::Cluster*           umd_driver{nullptr};
 
     // Translated coord + offset of DRAM channel 0's preferred worker core.
