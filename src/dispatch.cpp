@@ -128,6 +128,36 @@ void dispatch_stage_setup(
         chip, cc, launch_addr);
 }
 
+// Slow-dispatch reset: send RUN_MSG_RESET_READ_PTR_FROM_HOST before each
+// program launch so firmware resets its launch_msg_rd_ptr to 0 and the
+// go_message_index to 0. Without this, firmware enters the kernel-launch
+// path but its CB-setup writes to BRISC's local cb_interface[] are
+// somehow not observable to the kernel that runs immediately after —
+// possibly because firmware caches some state from the previous launch
+// (or the post-cold-boot uninitialized state) that the RESET path
+// invalidates. Matches tt-metal's send_reset_go_signal flow in
+// llrt/llrt.cpp.
+void dispatch_stage_send_reset(
+    Kernel& kernel,
+    const tt::tt_metal::Hal& hal,
+    tt::umd::Cluster& driver,
+    uint32_t chip) {
+    auto cc = kernel_translated_coord(kernel);
+    uint64_t go_entry_addr = hal.get_dev_noc_addr(
+        tt_metal::HalProgrammableCoreType::TENSIX,
+        tt_metal::HalL1MemAddrType::GO_MSG);
+    uint32_t reset_val = hal.make_go_msg_u32(
+        static_cast<uint8_t>(tt_metal::dev_msgs::RUN_MSG_RESET_READ_PTR_FROM_HOST),
+        0, 0, 0);
+    driver.write_to_device_reg(&reset_val, sizeof(reset_val), chip, cc, go_entry_addr);
+    driver.l1_membar(chip);
+    uint64_t go_idx_addr = hal.get_dev_addr(
+        tt_metal::HalProgrammableCoreType::TENSIX,
+        tt_metal::HalL1MemAddrType::GO_MSG_INDEX);
+    uint32_t zero = 0;
+    driver.write_to_device_reg(&zero, sizeof(zero), chip, cc, go_idx_addr);
+}
+
 // Stage 2: fire RUN_MSG_GO on this kernel's core.
 void dispatch_stage_fire_go(
     Kernel& kernel,
@@ -203,11 +233,23 @@ void dispatch_execute_multi(
     tt::umd::Cluster& driver     = *dev.umd_driver;
     const uint32_t chip          = dev.chip_id;
 
+    // Stage 0: send RUN_MSG_RESET_READ_PTR_FROM_HOST to each core's
+    // GO_MSG, then zero GO_MSG_INDEX. Mirrors tt-metal's slow-dispatch
+    // send_reset_go_signal (llrt.cpp:115). Without this BRISC firmware's
+    // CB-setup writes don't become visible to the kernel that runs
+    // right after — see the long comment in test_tile_copy.cpp for the
+    // diagnostic trail.
+    for (Kernel* k : kernels) dispatch_stage_send_reset(*k, hal, driver, chip);
+    driver.l1_membar(chip);
+
     // Stage 1: write ELF + RTA + launch_msg for every kernel.
     for (Kernel* k : kernels) dispatch_stage_setup(dev, *k, hal, driver, chip);
 
-    // Memory fence so the launch_msgs are visible before any GO.
+    // Host memory fence + device L1 barrier so all setup writes (kernel
+    // ELF, RTA, launch_msg, and the CB blob from register_cbs) have
+    // landed on the chip before firmware sees the GO.
     tt_driver_atomics::sfence();
+    driver.l1_membar(chip);
 
     // Stage 2: fire RUN_MSG_GO on every kernel. Issuing all GOs before any
     // DONE check is what makes producer/consumer kernels actually meet on

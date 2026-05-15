@@ -94,19 +94,45 @@
 //     - Setup being skipped (kernel jump implies setup ran)
 //     - Kernel-side clobber (do_crt1 only touches [0xffb00c70..0xffb00c88))
 //
+// Plan C (this round): cross-checked against a tt-metal slow-dispatch
+// run on the SAME chip. `unit_tests_api --gtest_filter=*TestDataCopyWithUpdatedCircularBufferConfig*`
+// passes under `TT_METAL_SLOW_DISPATCH_MODE=1` on chip 3 — confirming
+// that tt-metal's slow-dispatch path correctly sets up cb_interface[]
+// and the firmware CB setup loop at 0x3f70 in brisc.elf does work in
+// some flow. Read tt-metal's LaunchProgram (tt_metal.cpp:817) and the
+// only structural deltas vs tt-foil's dispatch_execute are:
+//
+//   1. send_reset_go_signal(RUN_MSG_RESET_READ_PTR_FROM_HOST) before
+//      every program launch (llrt.cpp:115). Firmware resets
+//      launch_msg_rd_ptr=0 in its wait loop on seeing this signal.
+//   2. dram_barrier + l1_barrier between ConfigureDeviceWithProgram
+//      (CB blob write etc.) and write_launch_msg_to_core
+//      (launch_msg+GO write).
+//   3. Cold-boot multicast of an "initial" launch_msg + go_msg=RUN_MSG_INIT
+//      to all 8 launch[] slots on every Tensix core
+//      (risc_firmware_initializer.cpp:900-944).
+//
+// Tried (1) and (2) in this round: dispatch_execute now sends the
+// RESET_FROM_HOST signal + zeros GO_MSG_INDEX, and l1_membars before
+// the GO write. Hang persists.
+//
 // Hypotheses still on the table:
+//   - (3) cold-boot multicast of init launch_msg + go_msg=INIT. Even
+//     though firmware doesn't read launch_msg before GO (verified in
+//     brisc.cc/ncrisc.cc/trisc.cc init paths), this might prime some
+//     other state we're missing.
+//   - tt-metal's RiscFirmwareInitializer does additional steps before
+//     the launch_msg multicast (clear DRAM, clear ETH launch_msgs,
+//     etc.). Could one of these matter for Tensix CB setup?
 //   - The pre-built brisc.elf comes from a tt-metal revision that
 //     diverges from the source on this branch — some later code on the
 //     same kernel-launch path performs an additional store loop that
-//     re-zeros cb_interface[]. (Worth grepping the brisc.elf binary
-//     for stores into 0xffb004... ranges past the setup loop.)
-//   - tt-metal's CreateDevice runs a step we don't (some additional
-//     mailbox or scratch init that primes the firmware's BSS or stops
-//     it from re-zeroing it).
+//     re-zeros cb_interface[]. (Indirect stores not caught by the
+//     simple `objdump | grep ffb004` we did.)
 //   - BRISC's local data memory has some posted-write / coherency
 //     quirk on tt-bh-tensix that drops these specific writes. Unlikely
 //     but worth ruling out by writing the same values from BRISC
-//     kernel-side (we confirmed kernel-side writes survive; firmware
+//     kernel-side (confirmed: kernel-side writes survive; firmware
 //     writes don't).
 //
 // Until this is resolved the test is gated under TT_FOIL_HW_TESTS and
