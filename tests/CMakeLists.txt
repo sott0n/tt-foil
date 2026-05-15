@@ -82,6 +82,22 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_matmul_kt PRIVATE TT::Foil tt_foil_llrt)
     add_test(NAME test_matmul_kt COMMAND test_matmul_kt)
 
+    # General Mt×Kt × Kt×Nt single-core matmul (v5-3) — outer-product
+    # schedule with one DST-resident accumulator per output tile.  Tile
+    # counts must match what the kernel ELFs were compiled with.
+    if(NOT DEFINED MM_MT)
+        set(MM_MT 2)
+    endif()
+    if(NOT DEFINED MM_NT)
+        set(MM_NT 2)
+    endif()
+    add_executable(test_matmul_mnk test_matmul_mnk.cpp)
+    target_include_directories(test_matmul_mnk PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_compile_definitions(test_matmul_mnk PRIVATE
+        MM_MT=${MM_MT} MM_KT=${MM_KT} MM_NT=${MM_NT})
+    target_link_libraries(test_matmul_mnk PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_matmul_mnk COMMAND test_matmul_mnk)
+
     # Multi-core boot via device_open (v3-1)
     add_executable(test_multi_core_boot test_multi_core_boot.cpp)
     target_include_directories(test_multi_core_boot PRIVATE "${CMAKE_SOURCE_DIR}/src")
