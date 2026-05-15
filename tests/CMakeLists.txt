@@ -64,6 +64,12 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_tile_copy PRIVATE TT::Foil tt_foil_llrt)
     add_test(NAME test_tile_copy COMMAND test_tile_copy)
 
+    # bf16 ReLU through the SFPU (v5.5) — 5-RISC pipeline, single tile.
+    add_executable(test_relu test_relu.cpp)
+    target_include_directories(test_relu PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(test_relu PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_relu COMMAND test_relu)
+
     # Single-tile bf16 matmul (v5-1) — full 5-RISC + 2-input + matmul_tiles
     add_executable(test_matmul_1tile test_matmul_1tile.cpp)
     target_include_directories(test_matmul_1tile PRIVATE "${CMAKE_SOURCE_DIR}/src")
