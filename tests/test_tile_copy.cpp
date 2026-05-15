@@ -116,24 +116,40 @@
 // RESET_FROM_HOST signal + zeros GO_MSG_INDEX, and l1_membars before
 // the GO write. Hang persists.
 //
+// More experiments in this round:
+//   - Verified (G) is already done — init_tensix_mailboxes already
+//     writes 8 zero launch[] entries + go_msg=RUN_MSG_INIT + 0 to
+//     LAUNCH_MSG_BUFFER_RD_PTR + 0 to GO_MSG_INDEX, matching tt-metal's
+//     write_initial_go_launch_msg in risc_firmware_initializer.cpp.
+//   - Ran tt-metal's slow-dispatch CB test
+//     (TensixTestDataCopyWithUpdatedCircularBufferConfig) on the same
+//     chip 3 immediately before tt-foil's test_tile_copy. tt-foil
+//     still hangs in cb_reserve_back, so tt-foil cold-boot is
+//     actively wiping the working state tt-metal leaves.
+//   - Skipped zero_fill_bank_tables to test if our zero-filling of
+//     BANK_TO_NOC_SCRATCH / LOGICAL_TO_VIRTUAL_SCRATCH was clobbering
+//     firmware's init-time copies. Hang still occurs — so the bank
+//     tables aren't the trigger.
+//
 // Hypotheses still on the table:
-//   - (3) cold-boot multicast of init launch_msg + go_msg=INIT. Even
-//     though firmware doesn't read launch_msg before GO (verified in
-//     brisc.cc/ncrisc.cc/trisc.cc init paths), this might prime some
-//     other state we're missing.
-//   - tt-metal's RiscFirmwareInitializer does additional steps before
-//     the launch_msg multicast (clear DRAM, clear ETH launch_msgs,
-//     etc.). Could one of these matter for Tensix CB setup?
+//   - tt-metal's RiscFirmwareInitializer.initialize_firmware also
+//     writes:
+//       (a) actual bank-to-noc tables (not zero) via
+//           initialize_device_bank_to_noc_tables
+//       (b) actual worker logical→virtual map via
+//           initialize_worker_logical_to_virtual_tables
+//       (c) jit_build_config.fw_launch_addr_value to fw_launch_addr
+//           (a JAL stub at L1 byte 0 for BRISC startup)
+//     We only zero-fill (a) and (b), and never write (c). Each of
+//     these could affect firmware behavior in subtle ways.
 //   - The pre-built brisc.elf comes from a tt-metal revision that
 //     diverges from the source on this branch — some later code on the
 //     same kernel-launch path performs an additional store loop that
-//     re-zeros cb_interface[]. (Indirect stores not caught by the
-//     simple `objdump | grep ffb004` we did.)
+//     re-zeros cb_interface[].
 //   - BRISC's local data memory has some posted-write / coherency
-//     quirk on tt-bh-tensix that drops these specific writes. Unlikely
-//     but worth ruling out by writing the same values from BRISC
-//     kernel-side (confirmed: kernel-side writes survive; firmware
-//     writes don't).
+//     quirk on tt-bh-tensix that drops the specific firmware-side
+//     writes (confirmed: kernel-side writes to the same addresses
+//     survive).
 //
 // Until this is resolved the test is gated under TT_FOIL_HW_TESTS and
 // will time out at first launch.
