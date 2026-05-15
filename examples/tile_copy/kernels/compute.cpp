@@ -14,12 +14,18 @@
 
 #include "api/compute/compute_kernel_api.h"
 #include "api/compute/common.h"
+#include "api/compute/compute_kernel_hw_startup.h"
 #include "api/compute/tile_move_copy.h"
 
 void kernel_main() {
     constexpr uint32_t cb_in    = 0;
     constexpr uint32_t cb_out   = 16;
     constexpr uint32_t one_tile = 1;
+
+    // Configure hardware on all three TRISCs (UNPACK/MATH/PACK). Without
+    // this MATH's pack-sync state and PACK's dest-init never run, and the
+    // pipeline silently hangs at tile_regs_wait. Must be the first call.
+    compute_kernel_hw_startup(cb_in, cb_out);
 
     copy_tile_init(cb_in);
 

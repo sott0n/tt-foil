@@ -58,6 +58,12 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_multi_kernel PRIVATE TT::Foil)
     add_test(NAME test_multi_kernel COMMAND test_multi_kernel)
 
+    # End-to-end tile copy via all 5 Tensix RISCs (v4-6)
+    add_executable(test_tile_copy test_tile_copy.cpp)
+    target_include_directories(test_tile_copy PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(test_tile_copy PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_tile_copy COMMAND test_tile_copy)
+
     # Multi-core boot via device_open (v3-1)
     add_executable(test_multi_core_boot test_multi_core_boot.cpp)
     target_include_directories(test_multi_core_boot PRIVATE "${CMAKE_SOURCE_DIR}/src")
