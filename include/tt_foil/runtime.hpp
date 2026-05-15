@@ -101,6 +101,9 @@ struct RiscBinary {
     enum class RiscId {
         BRISC  = 0,  // data movement processor 0
         NCRISC = 1,  // data movement processor 1
+        TRISC0 = 2,  // compute UNPACK
+        TRISC1 = 3,  // compute MATH
+        TRISC2 = 4,  // compute PACK
     };
     RiscId risc;
     std::string elf_path;  // path to a pre-compiled RISC-V ELF

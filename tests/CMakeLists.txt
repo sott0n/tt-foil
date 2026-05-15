@@ -11,6 +11,12 @@ add_executable(test_bump_alloc test_bump_alloc.cpp)
 target_link_libraries(test_bump_alloc PRIVATE TT::Foil tt_foil_llrt)
 add_test(NAME test_bump_alloc COMMAND test_bump_alloc)
 
+# Unit test: RiscId → HAL index mapping (v4-1)
+add_executable(test_risc_ids test_risc_ids.cpp)
+target_include_directories(test_risc_ids PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(test_risc_ids PRIVATE TT::Foil tt_foil_llrt)
+add_test(NAME test_risc_ids COMMAND test_risc_ids)
+
 # Unit test: standalone HAL instantiation (Phase B3 probe)
 add_executable(test_hal_standalone test_hal_standalone.cpp)
 target_link_libraries(test_hal_standalone PRIVATE TT::Foil tt_foil_llrt)
