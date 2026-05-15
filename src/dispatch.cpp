@@ -109,6 +109,15 @@ void dispatch_stage_setup(
         // otherwise misread the RTA region as CB config).
         kernel_config.min_remote_cb_start_index() =
             static_cast<uint8_t>(NUM_CIRCULAR_BUFFERS);
+
+        // Local CB blob, populated by register_cbs() (v4-3/v4-4). When no
+        // CBs were registered we leave the fields at their defaults so
+        // firmware's mask-driven loop is a no-op (mask == 0).
+        if (kernel.cb_alloc.valid) {
+            kernel_config.local_cb_offset() =
+                static_cast<uint16_t>(kernel.cb_alloc.local_cb_offset);
+            kernel_config.local_cb_mask() = kernel.cb_alloc.local_cb_mask;
+        }
     }
 
     uint64_t launch_addr = hal.get_dev_noc_addr(

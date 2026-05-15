@@ -18,11 +18,13 @@
 // bytes — the >>4 happens on the device.
 //
 // The launch_msg fields
-//   kernel_config.local_cb_offset        — byte offset of the blob from kcfg_base
-//   kernel_config.min_local_cb_start_index — lowest cb_index covered
-//   kernel_config.local_cb_mask          — bitmask of populated cb indices,
-//                                          shifted right by min_local_cb_start_index
+//   kernel_config.local_cb_offset — byte offset of the blob from kcfg_base
+//   kernel_config.local_cb_mask   — 64-bit bitmask of populated cb indices;
+//                                   firmware walks bit i → descriptor at
+//                                   blob[i].
 // drive the per-CB setup loop in firmware. dispatch wires those at launch.
+// (There is no "min local cb start index" launch_msg field — only the
+// remote-CB path has one. The blob must cover [0 .. max_used_cb_index].)
 
 #pragma once
 
@@ -53,8 +55,7 @@ struct CbConfig {
 struct CbAllocation {
     uint64_t blob_l1_addr{0};       // absolute L1 address of the CB blob (debug)
     uint32_t local_cb_offset{0};    // byte offset from kernel_config_base
-    uint32_t local_cb_mask{0};      // bitmask of populated cb indices, *unshifted*
-    uint8_t  min_local_cb_start_index{0};
+    uint64_t local_cb_mask{0};      // bitmask of populated cb indices, bit i ↔ CB i
     bool     valid{false};          // true iff any CBs were registered
 };
 
@@ -64,9 +65,9 @@ struct CbAllocation {
 // allocator state and kernel.core both need to exist) and before
 // `execute()`.
 //
-// Indices in `cbs` need not be contiguous; entries in [min_idx, max_idx]
-// that aren't listed are written as zeros so firmware's bounds-aware loop
-// skips them via the mask.
+// Indices in `cbs` need not be contiguous; the blob covers [0, max_idx] and
+// any unlisted slot is written as zeros so firmware's mask-driven loop
+// skips it.
 void register_cbs(
     Device& dev,
     Kernel& kernel,

@@ -64,14 +64,18 @@ int main() try {
     tt::foil::register_cbs(*dev, *kernel, cbs);
 
     const auto& a = kernel->cb_alloc;
-    std::printf("test_cb_config: blob L1=0x%lx offset=0x%x mask=0x%x min_idx=%u\n",
-                a.blob_l1_addr, a.local_cb_offset, a.local_cb_mask, a.min_local_cb_start_index);
+    std::printf("test_cb_config: blob L1=0x%lx offset=0x%x mask=0x%lx\n",
+                a.blob_l1_addr, a.local_cb_offset,
+                static_cast<unsigned long>(a.local_cb_mask));
 
     bool ok = a.valid;
     if (!ok) std::fprintf(stderr, "  cb_alloc.valid == false\n");
-    if (a.min_local_cb_start_index != 0)   { std::fprintf(stderr, "  min_idx=%u expected 0\n",   a.min_local_cb_start_index); ok = false; }
-    if (a.local_cb_mask != ((1u << 0) | (1u << 16))) {
-        std::fprintf(stderr, "  mask=0x%x expected 0x10001\n", a.local_cb_mask); ok = false;
+    const uint64_t expected_mask = (uint64_t(1) << 0) | (uint64_t(1) << 16);
+    if (a.local_cb_mask != expected_mask) {
+        std::fprintf(stderr, "  mask=0x%lx expected 0x%lx\n",
+                     static_cast<unsigned long>(a.local_cb_mask),
+                     static_cast<unsigned long>(expected_mask));
+        ok = false;
     }
 
     // Read back the blob — 17 descriptors × 16 B = 272 B.

@@ -34,8 +34,16 @@ void register_cbs(
         return;
     }
 
-    // Find min/max indices and validate uniqueness.
-    uint8_t min_idx = 255, max_idx = 0;
+    // Find max index and validate uniqueness.
+    //
+    // The firmware (circular_buffer_init.h::setup_local_cb_read_write_interfaces)
+    // walks descriptors starting from `cb_l1_base` and indexes them by the
+    // absolute CB index — i.e. the blob must lay out descriptor[i] at
+    // offset i * 16 bytes for every CB id `i` that appears in the mask. There
+    // is no "min start index" launch_msg field for the local CB blob (only
+    // `min_remote_cb_start_index` exists, which we set to NUM_CIRCULAR_BUFFERS
+    // elsewhere to skip the remote path). So our blob must cover [0 .. max_idx].
+    uint8_t max_idx = 0;
     uint64_t seen_mask = 0;
     for (const auto& c : cbs) {
         if (c.cb_index >= 32) {
@@ -52,19 +60,18 @@ void register_cbs(
                 std::to_string(c.cb_index) + " listed twice");
         }
         seen_mask |= uint64_t(1) << c.cb_index;
-        min_idx = std::min(min_idx, c.cb_index);
         max_idx = std::max(max_idx, c.cb_index);
     }
 
-    // Blob covers cb indices [min_idx, max_idx]; gaps are zero descriptors so
-    // the firmware's mask-driven loop skips them.
-    const uint32_t num_descriptors = static_cast<uint32_t>(max_idx - min_idx + 1);
+    // Blob covers cb indices [0, max_idx]; unused slots are zero descriptors
+    // which the firmware skips via the mask.
+    const uint32_t num_descriptors = static_cast<uint32_t>(max_idx) + 1u;
     const uint32_t blob_words      = num_descriptors * kUint32WordsPerCb;
     const uint32_t blob_bytes      = blob_words * sizeof(uint32_t);
 
     std::vector<uint32_t> blob(blob_words, 0);
     for (const auto& c : cbs) {
-        const uint32_t rel_idx = static_cast<uint32_t>(c.cb_index - min_idx);
+        const uint32_t rel_idx = static_cast<uint32_t>(c.cb_index);
         uint32_t* slot = blob.data() + rel_idx * kUint32WordsPerCb;
         slot[0] = static_cast<uint32_t>(c.fifo_addr);  // raw bytes; TRISC >>4 at read
         slot[1] = c.fifo_size;
@@ -99,8 +106,7 @@ void register_cbs(
     CbAllocation a;
     a.blob_l1_addr             = blob_addr;
     a.local_cb_offset          = local_cb_offset;
-    a.local_cb_mask            = static_cast<uint32_t>(seen_mask);
-    a.min_local_cb_start_index = min_idx;
+    a.local_cb_mask            = seen_mask;
     a.valid                    = true;
     kernel.cb_alloc = a;
 }
