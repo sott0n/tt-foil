@@ -70,6 +70,18 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_matmul_1tile PRIVATE TT::Foil tt_foil_llrt)
     add_test(NAME test_matmul_1tile COMMAND test_matmul_1tile)
 
+    # K-loop bf16 matmul (v5-2) — DST_ACCUM_MODE=true, Kt partial products
+    # summed exactly in fp32 DST regs.  MM_KT must match the value the
+    # kernel ELFs were compiled with (default 4).
+    if(NOT DEFINED MM_KT)
+        set(MM_KT 4)
+    endif()
+    add_executable(test_matmul_kt test_matmul_kt.cpp)
+    target_include_directories(test_matmul_kt PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_compile_definitions(test_matmul_kt PRIVATE MM_KT=${MM_KT})
+    target_link_libraries(test_matmul_kt PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_matmul_kt COMMAND test_matmul_kt)
+
     # Multi-core boot via device_open (v3-1)
     add_executable(test_multi_core_boot test_multi_core_boot.cpp)
     target_include_directories(test_multi_core_boot PRIVATE "${CMAKE_SOURCE_DIR}/src")

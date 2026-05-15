@@ -1,37 +1,30 @@
 // SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
 // SPDX-License-Identifier: Apache-2.0
 //
-// v5-1: single-tile bf16 matmul through all 5 Tensix RISCs.
+// v5-2: K-loop bf16 matmul. M = N = 32 (one output tile),
+// K = Kt × 32 (Kt tiles in the reduction dim). DST_ACCUM_MODE=true so
+// Kt partial products sum exactly in fp32 DST registers, then a single
+// pack rounds the final result to bf16.
 //
-// Pipeline (mirrors tile_copy + 2nd input + matmul_tiles):
-//   BRISC  (reader)  : L1 a_buf → CB c_0, L1 b_buf → CB c_1
-//   TRISC0/1/2       : mm_init → matmul_tiles → pack to CB c_16
-//   NCRISC (writer)  : CB c_16 → L1 out_buf
+// Pipeline:
+//   BRISC  (reader)  : pushes Kt A tiles + Kt B tiles into CB c_0 / c_1
+//   TRISC0/1/2       : mm_init → for kt in Kt: matmul_tiles(...,0) → pack
+//   NCRISC (writer)  : drains CB c_16 to L1 out_buf
 //
-// One bf16 32×32 matrix on each input, one bf16 32×32 result. Host fills
-// A and B with deterministic patterns, computes a reference matmul in
-// float, quantises to bf16, and compares against device output with a
-// small absolute tolerance to absorb HiFi4 rounding.
-//
-// Tile layout: tt-metal bf16 tiles are 4 faces of 16×16 each:
-//   face 0 = rows[0..16),  cols[0..16)
-//   face 1 = rows[0..16),  cols[16..32)
-//   face 2 = rows[16..32), cols[0..16)
-//   face 3 = rows[16..32), cols[16..32)
-// Within a face, elements are row-major. This is the layout matmul_tiles
-// expects on UNPACK and produces on PACK.
+// Both the kernel ELFs and this test bake Kt at compile time. Default is
+// Kt=4 (so K = 128).  To rebuild for a different Kt:
+//   MM_KT=8 ./examples/matmul_kt/build_kernels.sh
+//   cmake --build build -DMM_KT=8 --target test_matmul_kt
 //
 // Usage:
-//   TT_FOIL_KERNEL_DIR=examples/matmul_1tile/prebuilt \
-//   TT_FOIL_DEVICE=3 ./test_matmul_1tile
+//   TT_FOIL_KERNEL_DIR=examples/matmul_kt/prebuilt \
+//   TT_FOIL_DEVICE=3 ./test_matmul_kt
 
 #include <array>
-#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -39,6 +32,10 @@
 #include "tt_foil/runtime.hpp"
 #include "cb_config.hpp"
 #include "tile_utils.hpp"
+
+#ifndef MM_KT
+#define MM_KT 4
+#endif
 
 namespace {
 
@@ -49,15 +46,18 @@ using tt::foil::test::kTileWords;
 using tt::foil::test::f32_to_bf16;
 using tt::foil::test::bf16_to_f32;
 
+constexpr uint32_t kKt = MM_KT;
+constexpr uint32_t kK  = kKt * kTileW;   // total K dimension
+
 std::string required_env(const char* name) {
     const char* val = std::getenv(name);
     if (!val) throw std::runtime_error(std::string("Missing env var: ") + name);
     return val;
 }
 
-// Reference: C = A * B in float, with each accumulation rounded to bf16
-// (closest fidelity model to what HiFi4 produces is fp32 accum then bf16
-// round at the end — that's what we use, and we set tolerance accordingly).
+// Reference: C = A * B in fp32, then bf16-round at the end.  This matches
+// the device pipeline well when DST_ACCUM_MODE=true (fp32 accumulation in
+// DST regs).  A is row-major M×K (32×kK), B is row-major K×N (kK×32).
 void matmul_reference(const std::vector<uint16_t>& a_rm,
                       const std::vector<uint16_t>& b_rm,
                       std::vector<uint16_t>& c_rm) {
@@ -65,12 +65,44 @@ void matmul_reference(const std::vector<uint16_t>& a_rm,
     for (uint32_t i = 0; i < kTileH; ++i) {
         for (uint32_t j = 0; j < kTileW; ++j) {
             float acc = 0.0f;
-            for (uint32_t k = 0; k < kTileW; ++k) {
-                acc += bf16_to_f32(a_rm[i * kTileW + k]) *
+            for (uint32_t k = 0; k < kK; ++k) {
+                acc += bf16_to_f32(a_rm[i * kK + k]) *
                        bf16_to_f32(b_rm[k * kTileW + j]);
             }
             c_rm[i * kTileW + j] = f32_to_bf16(acc);
         }
+    }
+}
+
+// Tile A (row-major M×K, M=32, K=kKt*32) into a stream of kKt 32×32 tiles
+// laid out in K-tile order: tile 0 is A[:, 0:32], tile 1 is A[:, 32:64], …
+void tile_A_stream(const std::vector<uint16_t>& a_rm, std::vector<uint16_t>& out) {
+    out.clear();
+    out.reserve(static_cast<size_t>(kKt) * kTileWords);
+    std::vector<uint16_t> block(kTileH * kTileW);
+    for (uint32_t kt = 0; kt < kKt; ++kt) {
+        for (uint32_t r = 0; r < kTileH; ++r) {
+            for (uint32_t c = 0; c < kTileW; ++c) {
+                block[r * kTileW + c] = a_rm[r * kK + kt * kTileW + c];
+            }
+        }
+        tt::foil::test::row_major_to_tile(block.data(), out);
+    }
+}
+
+// Tile B (row-major K×N, K=kKt*32, N=32) into a stream of kKt 32×32 tiles
+// in K-tile order: tile 0 is B[0:32, :], tile 1 is B[32:64, :], …
+void tile_B_stream(const std::vector<uint16_t>& b_rm, std::vector<uint16_t>& out) {
+    out.clear();
+    out.reserve(static_cast<size_t>(kKt) * kTileWords);
+    std::vector<uint16_t> block(kTileH * kTileW);
+    for (uint32_t kt = 0; kt < kKt; ++kt) {
+        for (uint32_t r = 0; r < kTileH; ++r) {
+            for (uint32_t c = 0; c < kTileW; ++c) {
+                block[r * kTileW + c] = b_rm[(kt * kTileH + r) * kTileW + c];
+            }
+        }
+        tt::foil::test::row_major_to_tile(block.data(), out);
     }
 }
 
@@ -81,21 +113,29 @@ int main() try {
     const char* dev_env = std::getenv("TT_FOIL_DEVICE");
     int pcie_index = dev_env ? std::stoi(dev_env) : 0;
 
+    const uint32_t a_bytes  = kKt * kTileBytes;
+    const uint32_t b_bytes  = kKt * kTileBytes;
+
     // ---- Host inputs ---------------------------------------------------
-    // A: small ramp, B: small ramp on the other axis, both bf16. Small
-    // enough that K=32 sums stay well within bf16's representable range.
-    std::vector<uint16_t> a_rm(kTileWords);
-    std::vector<uint16_t> b_rm(kTileWords);
+    // A: small magnitude, varies with row+k; B: varies with k+col.
+    // Total magnitude after K=kK multiplies-add stays under ~10 so bf16
+    // accuracy is OK (we'd see saturation noise above ~256).
+    std::vector<uint16_t> a_rm(kTileH * kK);
+    std::vector<uint16_t> b_rm(kK * kTileW);
     for (uint32_t r = 0; r < kTileH; ++r) {
+        for (uint32_t k = 0; k < kK; ++k) {
+            a_rm[r * kK + k] = f32_to_bf16(0.005f * static_cast<float>((r + 1) * 1u + (k % 7)));
+        }
+    }
+    for (uint32_t k = 0; k < kK; ++k) {
         for (uint32_t c = 0; c < kTileW; ++c) {
-            a_rm[r * kTileW + c] = f32_to_bf16(0.01f * static_cast<float>(r + 1));
-            b_rm[r * kTileW + c] = f32_to_bf16(0.01f * static_cast<float>(c + 1));
+            b_rm[k * kTileW + c] = f32_to_bf16(0.005f * static_cast<float>((c + 1) * 1u + (k % 5)));
         }
     }
 
-    std::vector<uint16_t> a_tile, b_tile;
-    tt::foil::test::row_major_to_tile(a_rm.data(), a_tile);
-    tt::foil::test::row_major_to_tile(b_rm.data(), b_tile);
+    std::vector<uint16_t> a_stream, b_stream;
+    tile_A_stream(a_rm, a_stream);
+    tile_B_stream(b_rm, b_stream);
 
     // ---- Reference -----------------------------------------------------
     std::vector<uint16_t> c_ref_rm;
@@ -105,15 +145,15 @@ int main() try {
     auto dev = tt::foil::open_device(pcie_index, "", {{0, 0}});
     tt::foil::CoreCoord core{0, 0};
 
-    auto buf_a       = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, kTileBytes, core);
-    auto buf_b       = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, kTileBytes, core);
+    auto buf_a       = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, a_bytes,     core);
+    auto buf_b       = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, b_bytes,     core);
     auto buf_out     = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, kTileBytes, core);
     auto buf_cb_a    = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, kTileBytes, core);
     auto buf_cb_b    = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, kTileBytes, core);
     auto buf_cb_out  = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, kTileBytes, core);
 
-    tt::foil::write_buffer(*dev, *buf_a, a_tile.data(), kTileBytes);
-    tt::foil::write_buffer(*dev, *buf_b, b_tile.data(), kTileBytes);
+    tt::foil::write_buffer(*dev, *buf_a, a_stream.data(), a_bytes);
+    tt::foil::write_buffer(*dev, *buf_b, b_stream.data(), b_bytes);
     std::vector<uint16_t> zero(kTileWords, 0);
     tt::foil::write_buffer(*dev, *buf_out, zero.data(), kTileBytes);
 
@@ -127,6 +167,8 @@ int main() try {
     }};
     auto kernel = tt::foil::load_kernel(*dev, bins, core);
 
+    // CBs hold 1 tile each — reader pushes a tile, compute consumes it,
+    // reader pushes the next one. Backpressure naturally serialises.
     std::array<tt::foil::CbConfig, 3> cbs = {{
         {0,  buf_cb_a->device_addr,   kTileBytes, 1, kTileBytes},
         {1,  buf_cb_b->device_addr,   kTileBytes, 1, kTileBytes},
@@ -134,9 +176,10 @@ int main() try {
     }};
     tt::foil::register_cbs(*dev, *kernel, cbs);
 
-    std::array<uint32_t, 2> ra_brisc  = {
+    std::array<uint32_t, 3> ra_brisc  = {
         static_cast<uint32_t>(buf_a->device_addr),
         static_cast<uint32_t>(buf_b->device_addr),
+        kKt,
     };
     std::array<uint32_t, 1> ra_ncrisc = {static_cast<uint32_t>(buf_out->device_addr)};
     tt::foil::set_runtime_args(*dev, *kernel, R::RiscId::BRISC,  ra_brisc);
@@ -151,13 +194,10 @@ int main() try {
     tt::foil::test::tile_to_row_major(c_tile.data(), c_dev_rm.data());
 
     // ---- Compare -------------------------------------------------------
-    // HiFi4 bf16 matmul accumulates in DST regs.  With
-    // DST_ACCUM_MODE=false (our v5-1 setting), DST is fp16-ish — so
-    // intermediate rounds are coarser than the fp32 reference and a few
-    // ULPs of drift are expected.  Worst observed on initial v5-1 bring-up
-    // was 0.03125 (1 bf16 ULP at the ~1.0 magnitude range).  Tolerance
-    // 0.05 covers that with margin; v5-2 will revisit with
-    // DST_ACCUM_MODE=true once we add K-loop accumulation.
+    // With fp32 DST accum, the device output should match the fp32 host
+    // reference within ~1 bf16 ULP at the result magnitude.  Our inputs
+    // give results in roughly [0.1, 5.0] range; bf16 ULP there is up to
+    // ~0.04.  Tolerance 0.05 keeps margin without hiding real bugs.
     const float kAbsTol = 0.05f;
     uint32_t bad = 0;
     uint32_t first_bad = kTileWords;
@@ -175,22 +215,23 @@ int main() try {
 
     if (bad != 0) {
         std::fprintf(stderr,
-            "test_matmul_1tile: %u/%u mismatches; first at idx %u "
+            "test_matmul_kt(Kt=%u): %u/%u mismatches; first at idx %u "
             "(row=%u col=%u): got=%.5f expected=%.5f, worst abs diff=%.5f\n",
-            bad, kTileWords, first_bad, first_bad / kTileW, first_bad % kTileW,
+            kKt, bad, kTileWords, first_bad,
+            first_bad / kTileW, first_bad % kTileW,
             bf16_to_f32(c_dev_rm[first_bad]),
             bf16_to_f32(c_ref_rm[first_bad]),
             worst);
         tt::foil::close_device(std::move(dev));
-        std::puts("test_matmul_1tile: FAIL");
+        std::puts("test_matmul_kt: FAIL");
         return 1;
     }
 
-    std::printf("test_matmul_1tile: PASS  (worst abs diff=%.5f, tol=%.5f)\n",
-                worst, kAbsTol);
+    std::printf("test_matmul_kt: PASS  (Kt=%u, K=%u, worst abs diff=%.5f, tol=%.5f)\n",
+                kKt, kK, worst, kAbsTol);
     tt::foil::close_device(std::move(dev));
     return 0;
 } catch (const std::exception& e) {
-    std::fprintf(stderr, "test_matmul_1tile: FAIL — %s\n", e.what());
+    std::fprintf(stderr, "test_matmul_kt: FAIL — %s\n", e.what());
     return 1;
 }
