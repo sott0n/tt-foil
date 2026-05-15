@@ -3,8 +3,8 @@ build/
 generated/
 .cpmcache/
 
-# Example kernel build outputs
-examples/add_two_numbers/prebuilt/
+# Example kernel build outputs (all examples/*/prebuilt/)
+examples/*/prebuilt/
 
 # Editor / OS noise
 *.swp
