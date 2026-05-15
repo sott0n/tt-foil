@@ -24,9 +24,15 @@ GXX="$TT/build_Release/libexec/tt-metalium/runtime/sfpi/compiler/bin/riscv-tt-el
 LIB="$TT/runtime/hw/lib/blackhole"
 LDDIR="$TT/runtime/hw/toolchain/blackhole"
 
-# Resolve the firmware directory containing *_weakened.elf objects. Prefer
-# tt-metal's JIT cache (matches what tt-metal runtime loads) over the
-# possibly-stale tt_metal/pre-compiled/ tree.
+# Resolve the firmware directory containing *_weakened.elf objects.
+# Prefer tt-foil's self-built firmware (Plan L), then tt-metal's JIT cache,
+# then the (possibly-stale) tt_metal/pre-compiled/ tree.
+if [[ -z "${TT_METAL_PRECOMPILED:-}" ]]; then
+    REPO_ROOT="$(cd "$HERE/../.." && pwd)"
+    if [[ -d "$REPO_ROOT/build/firmware/brisc" ]]; then
+        TT_METAL_PRECOMPILED="$REPO_ROOT/build/firmware"
+    fi
+fi
 if [[ -z "${TT_METAL_PRECOMPILED:-}" ]]; then
     TT_METAL_PRECOMPILED=$(ls -1dt "$HOME"/.cache/tt-metal-cache/*/firmware 2>/dev/null | head -n1)
 fi

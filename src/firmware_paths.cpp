@@ -81,7 +81,25 @@ FirmwarePaths resolve_firmware_paths(const std::string& tt_metal_root) {
         return build_paths(root);
     }
 
-    // 2. Prefer tt-metal's JIT firmware cache. The pre-compiled
+    // 2. tt-foil's own firmware build artifact (Plan L).  When the
+    //    TT_FOIL_BUILD_FIRMWARE CMake option is on (default), the build
+    //    produces a self-contained <build>/firmware/ tree from the tt-metal
+    //    source — no tt-metal runtime invocation required.  This is the
+    //    preferred source going forward; the JIT-cache and pre-compiled
+    //    fallbacks below exist for environments that opt out of the
+    //    self-build or want to pin firmware externally.
+    if (const char* env = std::getenv("TT_FOIL_BUILD_FIRMWARE_DIR"); env && *env) {
+        fs::path root{env};
+        if (has_full_set(root)) return build_paths(root);
+    }
+#ifdef TT_FOIL_FIRMWARE_BUILD_DIR
+    {
+        fs::path root{TT_FOIL_FIRMWARE_BUILD_DIR};
+        if (has_full_set(root)) return build_paths(root);
+    }
+#endif
+
+    // 3. Prefer tt-metal's JIT firmware cache. The pre-compiled
     //    tt_metal/pre-compiled/ tree can diverge from what tt-metal actually
     //    loads at runtime (different build hash → different brisc.elf bytes).
     //    Loading stale pre-compiled firmware leaves BRISC's setup_local_cb

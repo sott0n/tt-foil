@@ -60,20 +60,32 @@ re-links it. **Do not switch to `<llrt/tt_memory.h>` — the upstream version
 calls `MetalContext::instance()` from a debug-dump path** and that triggers a
 fresh `umd::Cluster` open against every PCIe chip.
 
-### Firmware ELFs must match what tt-metal builds (v4 lesson)
+### Firmware ELFs: tt-foil self-build (Plan L)
 `firmware_paths.cpp` resolves in this order:
 1. `$TT_FOIL_FIRMWARE_DIR` (explicit override)
-2. `$HOME/.cache/tt-metal-cache/<hash>/firmware/` (newest)
-3. `$TT_METAL_RUNTIME_ROOT/tt_metal/pre-compiled/<hash>/` (fallback)
+2. `$TT_FOIL_BUILD_FIRMWARE_DIR`, or the path baked in via
+   `TT_FOIL_FIRMWARE_BUILD_DIR` at CMake configure time
+   (`<build>/firmware/` when `TT_FOIL_BUILD_FIRMWARE=ON`, default)
+3. `$HOME/.cache/tt-metal-cache/<hash>/firmware/` (newest, when present)
+4. `$TT_METAL_RUNTIME_ROOT/tt_metal/pre-compiled/<hash>/` (fallback)
 
-**Prefer (2).** The pre-compiled tree can diverge from what tt-metal's
-`BuildEnvManager` builds at runtime — different build hash → different
-`brisc.elf` bytes. Loading the stale pre-compiled BRISC firmware breaks
-`setup_local_cb_read_write_interfaces` in a subtle way: the kernel runs
+(2) is the default source. `scripts/build_firmware.sh` (invoked by the
+`tt_foil_firmware` CMake target) compiles `brisc.cc`, `ncrisc.cc`, and
+`trisc.cc` (3× for UNPACK/MATH/PACK) via SFPI g++, then runs
+`tools/tt_foil_weaken` to weaken all data symbols except
+`__fw_export_*` and `__global_pointer$` — mirroring tt-metal's
+`JitBuildState::weaken()`. The result is a `<build>/firmware/` tree with
+the same `<risc>/<risc>.elf` + `<risc>/<risc>_weakened.elf` layout as
+tt-metal's JIT cache, so the existing kernel build flow drops in
+unchanged.
+
+Lesson from v4: firmware ELFs and the `*_weakened.elf` the kernel was
+linked against must come from the same build. Mismatched bytes silently
+break `setup_local_cb_read_write_interfaces` — the kernel runs
 end-to-end but every CB interface reads as zero, so `cb_reserve_back`
-hangs forever. The `build_kernels.sh` scripts use the same priority for
-the `*_weakened.elf` they link against, so the kernel↔firmware ABI stays
-consistent.
+hangs forever. The `build_kernels.sh` scripts under `examples/*/` use
+the same priority order, so by default they link against tt-foil's
+self-built `build/firmware/`.
 
 ### Cores must be booted at `open_device` time
 `open_device(pcie_idx, fw_dir, cores)` boots each entry in `cores` (default
@@ -167,9 +179,10 @@ TT_FOIL_KERNEL_DIR=examples/.../prebuilt \
 ./build/tests/test_<name>
 ```
 
-`TT_FOIL_FIRMWARE_DIR` is optional — auto-discovery picks the cache
-firmware first. Set it explicitly only when you need a specific build
-hash or have moved the cache out of `$HOME/.cache/tt-metal-cache/`.
+`TT_FOIL_FIRMWARE_DIR` is optional — auto-discovery picks tt-foil's own
+`<build>/firmware/` first (built by the `tt_foil_firmware` CMake target).
+Set it explicitly only when you need to pin against a different build or
+have moved the build tree.
 
 ## Dispatch protocol summary
 
@@ -216,13 +229,13 @@ step 7 for every core (so cores boot in parallel on the device side).
 
 ## Common surprises / FAQ
 
-**"`cb_reserve_back` hangs in TRISC-compute kernels"** — you're loading
-firmware from `tt_metal/pre-compiled/` while tt-metal at runtime uses
-`~/.cache/tt-metal-cache/`. The two trees have different build hashes
-and different `brisc.elf` bytes. The pre-compiled `setup_local_cb_*`
-writes silently fail to reach `cb_interface[]`. Run any tt-metal example
-once to populate the cache, then re-run tt-foil — `firmware_paths.cpp`
-auto-prefers the cache. Set `TT_FOIL_FIRMWARE_DIR` to force a path.
+**"`cb_reserve_back` hangs in TRISC-compute kernels"** — kernel ELF was
+linked against a `*_weakened.elf` that doesn't match the firmware
+actually loaded onto the chip (different build hashes →
+`setup_local_cb_*` writes silently miss `cb_interface[]`). Rebuild
+kernels with `examples/*/build_kernels.sh` and make sure they pick the
+same firmware tree tt-foil's `firmware_paths.cpp` will resolve at
+runtime — by default both are `<tt-foil-build>/firmware/`.
 
 **"GO_MSG poll times out"** — usually `BarrierAddressParams` wasn't set on
 the umd::Cluster, or the chip is in a stale state from a previous run that
@@ -292,8 +305,8 @@ HAL addresses pulled at runtime (Blackhole Tensix):
   worth modifying, single-kernel forwards.
 - **Add a new example**: copy `examples/tile_copy/build_kernels.sh` if you
   need TRISC; otherwise `examples/noc_passthrough/build_kernels.sh`.
-  Both already have the `~/.cache/tt-metal-cache/.../firmware/` preference
-  baked in.
+  Both already have the `<tt-foil-build>/firmware/ > JIT cache > pre-compiled`
+  preference baked in.
 
 ## Commit hygiene
 

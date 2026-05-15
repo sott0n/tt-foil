@@ -30,12 +30,18 @@ LDDIR="$TT/runtime/hw/toolchain/blackhole"
 # Resolve the firmware directory containing the *_weakened.elf objects we
 # need to link kernels against. Default order:
 #   1. $TT_METAL_PRECOMPILED if set.
-#   2. tt-metal's JIT firmware cache at $HOME/.cache/tt-metal-cache/<hash>/firmware/.
-#      This is what tt-metal runtime actually loads — picking the matching
-#      weakened.elf here keeps the kernel↔firmware ABI consistent (mismatched
-#      copies silently break CB setup in BRISC firmware).
-#   3. Fall back to tt_metal/pre-compiled/<hash>/. May be stale relative to
-#      what tt-metal builds; only used when no cache is available.
+#   2. tt-foil's self-built firmware at <repo>/build/firmware/  (Plan L —
+#      the preferred source; produced by scripts/build_firmware.sh from the
+#      tt-metal source tree, no tt-metal runtime invocation required).
+#   3. tt-metal's JIT firmware cache at $HOME/.cache/tt-metal-cache/<hash>/firmware/.
+#      Fall-back when tt-foil's firmware build hasn't run yet.
+#   4. tt_metal/pre-compiled/<hash>/. May be stale; last resort.
+if [[ -z "${TT_METAL_PRECOMPILED:-}" ]]; then
+    REPO_ROOT="$(cd "$HERE/../.." && pwd)"
+    if [[ -d "$REPO_ROOT/build/firmware/brisc" ]]; then
+        TT_METAL_PRECOMPILED="$REPO_ROOT/build/firmware"
+    fi
+fi
 if [[ -z "${TT_METAL_PRECOMPILED:-}" ]]; then
     TT_METAL_PRECOMPILED=$(ls -1dt "$HOME"/.cache/tt-metal-cache/*/firmware 2>/dev/null \
                             | head -n1)

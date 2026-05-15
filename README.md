@@ -32,12 +32,13 @@ small set of Tensix cores.
 else (HAL, llrt subset, ELF parser) is statically linked into tt-foil. No
 `libtt_metal.so`, no `MetalContext`, no `tt::Cluster`.
 
-tt-metal is needed at **build time** (for headers, the SFPI cross-compiler,
-HAL .cpp sources, and the UMD library itself), and currently also at
-**first-run time** because the firmware ELFs (`brisc.elf` etc.) come from
-tt-metal's JIT cache — see [Firmware ELF
-selection](#firmware-elf-selection). Removing that first-run requirement
-(having tt-foil build firmware itself, SFPI-direct) is a known follow-up.
+tt-metal is needed only at **build time** (for headers, the SFPI
+cross-compiler, HAL .cpp sources, and the UMD library itself). tt-foil
+compiles the 5 RISC firmware ELFs (`brisc.elf`, `ncrisc.elf`,
+`trisc{0,1,2}.elf`) from the tt-metal source tree directly during its own
+CMake build, so **no prior tt-metal run is required** on the host. See
+[Firmware ELF selection](#firmware-elf-selection) for the resolution
+order.
 
 ```
                 tt-metal repo
@@ -58,8 +59,9 @@ build outputs ──→ libtt_foil.a              ← static
                 ↓ (run)
 
 runtime deps  ──→ libtt-umd.so              ← only dynamic dep
-                  firmware ELFs from        ← from tt-metal's JIT cache
-                  ~/.cache/tt-metal-cache/    (today; tt-foil-built post-L)
+                  firmware ELFs from        ← built by tt-foil at CMake time
+                  <build>/firmware/           from tt-metal source (no JIT-cache
+                                              dependency)
                   user kernel ELFs          ← from your build_kernels.sh
 ```
 
@@ -83,13 +85,11 @@ Runs on Blackhole (Device=3 verified). End-to-end tests pass with only
 - CMake 3.21+
 - C++20 compiler (GCC 11+ or Clang 14+)
 - Blackhole PCIe device
-- A built tt-metal source tree on disk (for headers + firmware ELFs + the
-  SFPI cross-compiler — tt-foil bundles the .cpp it needs but the tree is
-  still the source of headers and firmware artifacts)
-- For TRISC compute: at least one prior tt-metal run on this machine, so
-  the JIT firmware cache at `~/.cache/tt-metal-cache/<hash>/firmware/` is
-  populated. tt-foil picks that up automatically — see [Firmware ELF
-  selection](#firmware-elf-selection) below.
+- A built tt-metal source tree on disk (for headers, firmware/kernel
+  source, SFPI cross-compiler, and `libtt-umd.so` — tt-foil bundles the
+  .cpp it needs but the tree is still the source of those artifacts). No
+  prior tt-metal *run* is required: tt-foil compiles the RISC firmware
+  itself.
 
 ## Getting Started
 
@@ -100,23 +100,19 @@ git clone https://github.com/tenstorrent/tt-metal.git
 cd tt-metal
 cmake -B build_Release -DCMAKE_BUILD_TYPE=Release
 cmake --build build_Release -j$(nproc) --target tt_metal
-# Run any tt-metal example/test once on a real Blackhole — this populates
-# ~/.cache/tt-metal-cache/<hash>/firmware/ with JIT-built firmware ELFs
-# that tt-foil prefers over the in-tree pre-compiled/ tree.
-TT_METAL_SLOW_DISPATCH_MODE=1 ARCH_NAME=blackhole TT_METAL_HOME=$(pwd) \
-  build_Release/test/tt_metal/unit_tests_api \
-  --gtest_filter='*TestDataCopyWithUpdatedCircularBufferConfig*'
 ```
 
 This produces:
 
 - `build_Release/lib/libtt-umd.so` (the only dynamic dep tt-foil links)
 - `build_Release/include/` (UMD, tt_stl, tt-logger, enchantum, fmt, spdlog headers)
-- `~/.cache/tt-metal-cache/<hash>/firmware/{brisc,ncrisc,trisc0,trisc1,trisc2}/*.elf`
-  (boot firmware — tt-foil's preferred source)
-- `tt_metal/pre-compiled/<hash>/...` (fallback firmware tree)
 - `build_Release/libexec/tt-metalium/runtime/sfpi/compiler/bin/riscv-tt-elf-g++`
-  (kernel cross-compiler)
+  (cross-compiler used for both tt-foil's firmware and kernel builds)
+
+tt-foil's own CMake build then produces the 5 firmware ELFs at
+`<tt-foil-build>/firmware/{brisc,ncrisc,trisc0,trisc1,trisc2}/*.elf` (plus
+`*_weakened.elf` companions for kernel linking). No prior tt-metal run is
+required.
 
 ### 2. Build tt-foil
 
@@ -190,20 +186,24 @@ tt::foil::close_device(std::move(dev));
 
 1. `$TT_FOIL_FIRMWARE_DIR` if set (must contain
    `brisc/brisc.elf`, `ncrisc/ncrisc.elf`, `trisc{0,1,2}/trisc{0,1,2}.elf`).
-2. The newest matching dir under `$HOME/.cache/tt-metal-cache/<hash>/firmware/`.
-3. Fallback: the newest matching dir under
+2. `$TT_FOIL_BUILD_FIRMWARE_DIR` if set, or the path baked in at CMake
+   configure time when `TT_FOIL_BUILD_FIRMWARE=ON` (default) —
+   `<tt-foil-build>/firmware/`. **This is the default source**: tt-foil
+   compiles each firmware ELF directly from `tt_metal/hw/firmware/src/
+   tt-1xx/{brisc,ncrisc,trisc}.cc` via SFPI g++, runs
+   `tools/tt_foil_weaken` to produce the `*_weakened.elf` companion, and
+   stores the result in this tree.
+3. The newest matching dir under `$HOME/.cache/tt-metal-cache/<hash>/firmware/`
+   (tt-metal JIT cache, when available).
+4. Fallback: the newest matching dir under
    `$TT_METAL_RUNTIME_ROOT/tt_metal/pre-compiled/<hash>/`.
 
-**Prefer (2).** The pre-compiled tree under tt-metal can diverge from
-the firmware tt-metal itself loads at runtime (different build hash →
-different `brisc.elf` bytes). Loading a stale BRISC firmware silently
-breaks `cb_reserve_back` in TRISC-compute kernels — the kernel runs
-end-to-end but its `cb_interface[]` reads as all-zero because the
-firmware's `setup_local_cb_read_write_interfaces` writes don't reach
-the same `cb_interface` the kernel was linked against. The
-`build_kernels.sh` scripts for all three examples use the same
-preference order for the `*_weakened.elf` they link against, so
-kernel ↔ firmware ABI stays consistent.
+Kernel ↔ firmware ABI consistency matters: a kernel ELF and the firmware
+it runs against must come from the same build (their `*_weakened.elf`
+must match the firmware that actually loads onto the chip). The
+`build_kernels.sh` scripts under `examples/*/` follow the same precedence
+order, so by default they link against tt-foil's self-built
+`build/firmware/`.
 
 ## Examples
 
