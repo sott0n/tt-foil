@@ -35,6 +35,11 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_brisc_ncrisc PRIVATE TT::Foil)
     add_test(NAME test_brisc_ncrisc COMMAND test_brisc_ncrisc)
 
+    # Multi-kernel dispatch over multiple cores (v3-2)
+    add_executable(test_multi_kernel test_multi_kernel.cpp)
+    target_link_libraries(test_multi_kernel PRIVATE TT::Foil)
+    add_test(NAME test_multi_kernel COMMAND test_multi_kernel)
+
     # Multi-core boot via device_open (v3-1)
     add_executable(test_multi_core_boot test_multi_core_boot.cpp)
     target_include_directories(test_multi_core_boot PRIVATE "${CMAKE_SOURCE_DIR}/src")

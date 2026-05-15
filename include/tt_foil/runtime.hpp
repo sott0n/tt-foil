@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <span>
 #include <string>
@@ -126,5 +127,10 @@ void set_runtime_args(
 // Blocking execution: write ELF + args, fire go_msg, poll until DONE.
 // Throws std::runtime_error on timeout.
 void execute(Device& device, Kernel& kernel);
+
+// Multi-kernel launch — every kernel's GO is fired before any DONE check,
+// so producer/consumer kernels actually observe each other on the device.
+// Throws std::runtime_error if any kernel times out.
+void execute(Device& device, std::initializer_list<Kernel*> kernels);
 
 }  // namespace tt::foil

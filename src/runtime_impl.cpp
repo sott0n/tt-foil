@@ -100,4 +100,9 @@ void execute(Device& device, Kernel& kernel) {
     dispatch_execute(device, kernel);
 }
 
+void execute(Device& device, std::initializer_list<Kernel*> kernels) {
+    std::vector<Kernel*> v(kernels.begin(), kernels.end());
+    dispatch_execute_multi(device, std::span<Kernel* const>(v.data(), v.size()));
+}
+
 }  // namespace tt::foil
