@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Unit test for ELF loading — no hardware required.
-// Verifies that ll_api::memory can parse and XIP-transform a pre-built ELF.
+// Verifies that tt::foil::ll_api::memory can parse and XIP-transform a pre-built ELF.
 
 #include <cassert>
 #include <cstdio>
@@ -10,7 +10,7 @@
 #include <stdexcept>
 #include <string>
 
-#include "llrt/tt_memory.h"   // ll_api::memory (from tt-metal submodule)
+#include "llrt_local/tt_memory.h"   // tt::foil::ll_api::memory (from tt-metal submodule)
 
 int main(int argc, char* argv[]) {
     // Accept ELF path as argument; otherwise look for a default test binary.
@@ -29,7 +29,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Load ELF with CONTIGUOUS_XIP mode (same as used by tt-foil at runtime).
-    ll_api::memory mem(elf_path, ll_api::memory::Loading::CONTIGUOUS_XIP);
+    tt::foil::ll_api::memory mem(elf_path, tt::foil::ll_api::memory::Loading::CONTIGUOUS_XIP);
 
     // Basic sanity checks on the loaded binary.
     assert(mem.size() > 0 && "ELF loaded but has no data");

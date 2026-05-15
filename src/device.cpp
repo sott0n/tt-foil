@@ -5,22 +5,14 @@
 
 #include <stdexcept>
 
-// MetalContext — borrowed for UMD driver access (HAL is owned, not borrowed).
-#include "impl/context/metal_context.hpp"
-
-// Full cluster + HAL headers
-#include "llrt/tt_cluster.hpp"
 #include "llrt/hal.hpp"
-#include "llrt/metal_soc_descriptor.hpp"
 
 // UMD direct API
 #include <umd/device/cluster.hpp>
 #include <umd/device/soc_descriptor.hpp>
+#include <umd/device/types/cluster_descriptor_types.hpp>
 #include <umd/device/types/xy_pair.hpp>
 #include <umd/device/types/core_coordinates.hpp>
-
-// NOC enum for DRAM lookup
-#include "tt-metalium/kernel_types.hpp"
 
 #include "tt_foil/runtime.hpp"  // for CoreCoord
 
@@ -115,7 +107,7 @@ L1Allocator& Device::l1_for_core(const CoreCoord& logical_core) {
 
 // Translate a logical Tensix coord to UMD's TRANSLATED coord system.
 static tt::umd::CoreCoord soc_logical_to_translated(
-    const metal_SocDescriptor& soc_desc, uint32_t logical_x, uint32_t logical_y) {
+    const tt::umd::SocDescriptor& soc_desc, uint32_t logical_x, uint32_t logical_y) {
     tt::umd::CoreCoord logical{
         logical_x, logical_y, tt::CoreType::TENSIX, tt::CoordSystem::LOGICAL};
     return soc_desc.translate_coord_to(logical, tt::CoordSystem::TRANSLATED);
@@ -125,12 +117,20 @@ std::unique_ptr<Device> device_open(int pcie_device_index, const std::string& /*
     auto dev = std::make_unique<Device>();
     dev->chip_id = static_cast<uint32_t>(pcie_device_index);
 
-    auto& ctx   = tt::tt_metal::MetalContext::instance();
-    dev->cluster    = &ctx.get_cluster();
-    dev->umd_driver = dev->cluster->get_driver().get();
+    // ---------------------------------------------------------------------
+    // B3-2: own umd::Cluster directly. Defaults mirror what
+    // MetalEnvImpl::initialize_base_objects produces, restricted to the
+    // single PCIe chip we care about.
+    // ---------------------------------------------------------------------
+    {
+        tt::umd::ClusterOptions opts;
+        opts.chip_type = tt::umd::ChipType::SILICON;
+        opts.target_devices = {static_cast<tt::ChipId>(pcie_device_index)};
+        dev->owned_cluster = std::make_unique<tt::umd::Cluster>(std::move(opts));
+        dev->umd_driver = dev->owned_cluster.get();
+    }
 
-    // HAL: instantiated directly (B3 step 1), defaults mirror MetalEnvImpl
-    // for a single Blackhole MMIO chip.
+    // B3-1: own HAL directly.
     dev->owned_hal = std::make_unique<tt::tt_metal::Hal>(
         tt::ARCH::BLACKHOLE,
         /*is_base_routing_fw_enabled=*/false,
@@ -141,15 +141,42 @@ std::unique_ptr<Device> device_open(int pcie_device_index, const std::string& /*
         /*enable_blackhole_dram_programmable_cores=*/false);
     dev->hal = dev->owned_hal.get();
 
-    const auto& soc_desc = dev->cluster->get_soc_desc(dev->chip_id);
-
-    // Pre-translate DRAM channel 0 worker core for write_dram / read_dram.
+    // Barrier address scratch words. tt::Cluster::set_hal() does this for
+    // its UMD; we have to do it ourselves for ours. Without it,
+    // umd::Cluster::l1_membar (called from dispatch_execute) silently
+    // fails to flush and the go_msg poll hangs.
     {
-        ::CoreCoord dram_xy = soc_desc.get_preferred_worker_core_for_dram_view(0, tt_metal::NOC::NOC_0);
-        dev->dram0_core = tt::umd::CoreCoord{
-            dram_xy.x, dram_xy.y, tt::CoreType::DRAM, tt::CoordSystem::TRANSLATED};
-        dev->dram0_offset = soc_desc.get_address_offset(0);
+        tt::umd::BarrierAddressParams bp;
+        bp.tensix_l1_barrier_base = dev->hal->get_dev_addr(
+            tt_metal::HalProgrammableCoreType::TENSIX,
+            tt_metal::HalL1MemAddrType::BARRIER);
+        bp.dram_barrier_base = dev->hal->get_dev_addr(
+            tt_metal::HalDramMemAddrType::BARRIER);
+        bp.eth_l1_barrier_base = dev->hal->get_dev_addr(
+            tt_metal::HalProgrammableCoreType::ACTIVE_ETH,
+            tt_metal::HalL1MemAddrType::BARRIER);
+        dev->umd_driver->set_barrier_address_params(bp);
     }
+
+    const auto& soc_desc = dev->umd_driver->get_soc_descriptor(dev->chip_id);
+
+    // ---------------------------------------------------------------------
+    // DRAM channel 0 preferred worker endpoint.
+    //
+    // metal_SocDescriptor::get_preferred_worker_core_for_dram_view(0, NOC_0)
+    // resolves to channel=0, subchannel = worker_endpoint[0] from the soc
+    // descriptor YAML. For Blackhole `blackhole_140_arch.yaml` this is
+    // worker_endpoint: [2, 1], so NOC 0 → subchannel 2 and address_offset
+    // for channel 0 is 0. Hardcode that rather than parse the YAML; if
+    // tt-metal ever changes the BH DRAM layout these constants follow.
+    // ---------------------------------------------------------------------
+    constexpr uint32_t kBhDramCh0NocZeroSubchannel = 2;
+    constexpr uint64_t kBhDramCh0AddressOffset     = 0;
+    dev->dram0_core = soc_desc.get_dram_core_for_channel(
+        /*dram_chan=*/0,
+        /*subchannel=*/kBhDramCh0NocZeroSubchannel,
+        tt::CoordSystem::TRANSLATED);
+    dev->dram0_offset = kBhDramCh0AddressOffset;
 
     // Init DRAM bump allocator from HAL.
     uint64_t dram_base = dev->hal->get_dev_addr(tt_metal::HalDramMemAddrType::UNRESERVED);
@@ -192,16 +219,15 @@ std::unique_ptr<Device> device_open(int pcie_device_index, const std::string& /*
 }
 
 void device_close(Device& dev) {
-    // HAL is owned; UMD cluster is borrowed via MetalContext (process-level
-    // singleton). Drop owned HAL; clear borrowed pointers.
+    // Drop owned UMD cluster + HAL. Cluster destructor closes PCIe handle.
+    dev.owned_cluster.reset();
     dev.owned_hal.reset();
     dev.hal        = nullptr;
-    dev.cluster    = nullptr;
     dev.umd_driver = nullptr;
 }
 
 tt::xy_pair logical_to_virtual(const Device& dev, const CoreCoord& logical) {
-    const auto& soc_desc = dev.cluster->get_soc_desc(dev.chip_id);
+    const auto& soc_desc = dev.umd_driver->get_soc_descriptor(dev.chip_id);
     auto t = soc_logical_to_translated(soc_desc, logical.x, logical.y);
     return TtCoreCoord{t.x, t.y};
 }

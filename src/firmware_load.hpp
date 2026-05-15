@@ -5,7 +5,7 @@
 //
 // Mirrors tt_metal::llrt::test_load_multicast_write_risc_binary, but unicast
 // to a single core via umd::Cluster::write_to_device. For each span emitted
-// by ll_api::memory::process_spans(), the per-RISC `local_init_addr` from
+// by tt::foil::ll_api::memory::process_spans(), the per-RISC `local_init_addr` from
 // HAL is fed into hal.relocate_dev_addr() to get the actual target address.
 //
 // HAL is taken as a const reference rather than owned here — for B2 we still

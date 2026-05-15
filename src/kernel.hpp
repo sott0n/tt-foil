@@ -11,8 +11,8 @@
 
 #include "tt_foil/runtime.hpp"  // RiscBinary, CoreCoord
 
-// Full header needed for unique_ptr<ll_api::memory> member
-#include "llrt/tt_memory.h"
+// Full header needed for unique_ptr<tt::foil::ll_api::memory> member
+#include "llrt_local/tt_memory.h"
 
 namespace tt::foil {
 
@@ -42,7 +42,7 @@ struct LoadedRisc {
     uint32_t proc_class;
     uint32_t proc_type;
     uint32_t processor_index;  // index into rta_offset[] and kernel_text_offset[]
-    std::unique_ptr<ll_api::memory> mem;
+    std::unique_ptr<tt::foil::ll_api::memory> mem;
     std::vector<uint32_t> runtime_args;
     uint64_t kernel_text_addr{0};  // L1 address where kernel binary is stored (in KERNEL_CONFIG region)
 };

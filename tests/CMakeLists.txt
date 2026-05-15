@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 # Unit test: ELF loading (no hardware required)
 add_executable(test_elf_load test_elf_load.cpp)
+target_include_directories(test_elf_load PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(test_elf_load PRIVATE TT::Foil tt_foil_llrt)
 add_test(NAME test_elf_load COMMAND test_elf_load)
 

@@ -14,7 +14,6 @@
 
 // Forward declarations — complete types provided in device.cpp
 namespace tt {
-class Cluster;
 namespace umd {
 class Cluster;
 }
@@ -47,26 +46,24 @@ struct DramAllocator {
     void reset();
 };
 
-// Device handle. As of Phase B3 step 1, HAL is owned by Device directly
-// (no longer borrowed from MetalContext::hal()). umd::Cluster is still
-// borrowed from MetalContext::instance().get_cluster().get_driver() — owning
-// our own umd::Cluster requires also stopping ll_api::memory(XIP) from
-// implicitly initialising MetalContext (it does so for an XIP-dump debug
-// path), which means bundling tt_memory.cpp locally. That work is B3-2 +
-// B3-3 combined; see commit log.
+// Device handle. As of Phase B3 steps 2 + 3, Device owns both the HAL and
+// the umd::Cluster. Nothing in tt-foil references tt::Cluster or
+// MetalContext anymore; ll_api::memory is bundled locally so kernel ELF
+// loading doesn't drag MetalContext in either. libtt_metal.so is still
+// linked (HAL impl + a few transitive symbols), but the singleton init that
+// used to fight our chip open at kernel_load time no longer happens.
 struct Device {
     uint32_t chip_id{0};
 
-    // Borrowed from MetalContext — valid for the lifetime of the process.
-    tt::Cluster*                cluster{nullptr};
-
-    // Owned by Device — destructor defined in device.cpp.
+    // Owned by Device — destructor defined in device.cpp where the full
+    // types are visible.
     std::unique_ptr<tt::tt_metal::Hal> owned_hal;
+    std::unique_ptr<tt::umd::Cluster>  owned_cluster;
 
-    // Convenience alias into owned_hal.
+    // Convenience aliases into the owned objects above. Keep `umd_driver`
+    // so the rest of the codebase (dispatch.cpp, buffer.cpp, …) doesn't
+    // change shape.
     const tt::tt_metal::Hal*    hal{nullptr};
-
-    // UMD driver borrowed from cluster->get_driver().
     tt::umd::Cluster*           umd_driver{nullptr};
 
     // Translated coord + offset of DRAM channel 0's preferred worker core.

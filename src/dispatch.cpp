@@ -13,7 +13,7 @@
 
 // tt-metal headers
 #include "llrt/hal.hpp"
-#include "llrt/tt_memory.h"
+#include "llrt_local/tt_memory.h"
 
 // HAL-generated dev_msgs (new StructBuffer/View API)
 #include "hal/generated/dev_msgs.hpp"

@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "llrt/hal.hpp"
-#include "llrt/tt_memory.h"
+#include "llrt_local/tt_memory.h"
 
 #include <umd/device/cluster.hpp>
 #include <umd/device/types/core_coordinates.hpp>
@@ -33,7 +33,7 @@ void load_tensix_firmware(
 
     // Firmware ELFs use DISCRETE loading — process_spans yields the original
     // ELF section addresses, which we then relocate.
-    ll_api::memory fw_mem(elf_path, ll_api::memory::Loading::DISCRETE);
+    tt::foil::ll_api::memory fw_mem(elf_path, tt::foil::ll_api::memory::Loading::DISCRETE);
 
     fw_mem.process_spans([&](std::vector<uint32_t>::const_iterator mem_ptr,
                              uint64_t span_addr,

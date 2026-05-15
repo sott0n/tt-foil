@@ -7,7 +7,7 @@
 #include <filesystem>
 #include <stdexcept>
 
-#include "llrt/tt_memory.h"    // ll_api::memory
+#include "llrt_local/tt_memory.h"    // tt::foil::ll_api::memory
 #include "llrt/hal.hpp"        // Hal, HalJitBuildConfig
 
 namespace tt::foil {
@@ -48,7 +48,7 @@ Kernel* kernel_load(
         risc_to_hal_indices(rb.risc, lr.proc_class, lr.proc_type, lr.processor_index);
 
         // Load ELF from disk and apply XIP transformation.
-        lr.mem = std::make_unique<ll_api::memory>(rb.elf_path, ll_api::memory::Loading::CONTIGUOUS_XIP);
+        lr.mem = std::make_unique<tt::foil::ll_api::memory>(rb.elf_path, tt::foil::ll_api::memory::Loading::CONTIGUOUS_XIP);
 
         // Allocate space for kernel text in the KERNEL_CONFIG region.
         // The binary will be written here; firmware calls kernel_config_base + text_offset.
