@@ -13,38 +13,64 @@
 // One bf16 32×32 tile (2 KB). Host fills src with a deterministic
 // pattern, runs the kernel, reads dst back, asserts dst == src.
 //
-// CURRENT STATUS (v4-6): the test hangs in BRISC's cb_reserve_back.
-// Diagnosis (verified by instrumented kernels + L1 read-back):
-//   1. Host-side state is correct:
-//        - launch_msg.kernel_config_base[0] = 0x9e00 (TENSIX MEM_MAP_END)
-//        - launch_msg.local_cb_offset = 0x30b0
-//        - launch_msg.local_cb_mask = 0x10001 (c_0 + c_16)
-//        - launch_msg.enables = 0x1f (all 5 RISCs)
-//        - launch_msg.min_remote_cb_start_index = NUM_CIRCULAR_BUFFERS
-//        - launch_msg.kernel_text_offset[0..4] all populated
-//        - CB descriptor blob at 0xceb0 = [fifo=0x1c200, size=2048,
-//          pages=1, page_size=2048] for c_0, gap zeros 1..15, then c_16
-//   2. BRISC kernel runs (reaches kernel_main, dbg sentinel written).
-//   3. BUT cb_interface[0..16] in BRISC's local data memory (0xffb0046c+)
-//      are entirely zero — firmware's setup_local_cb_read_write_interfaces
-//      did NOT execute its writes, even though brisc.elf disassembly
-//      contains the inline-asm setup loop at 0x3f70 gated only by
-//      `enables & 1`.
-//   4. Manually populating cb_interface[0] from BRISC kernel-side (in
-//      reader.cpp) makes cb_reserve_back / cb_push_back work, confirming
-//      the rest of the BRISC pipeline is fine.
+// CURRENT STATUS (v4-6c): the test hangs in BRISC's cb_reserve_back.
+// Diagnosis collected over three rounds of on-device instrumentation:
 //
-// Root cause still unknown. Most likely candidates:
-//   - A subtle cold-boot prerequisite tt-foil is missing (e.g., a specific
-//     mailbox/scratch init that tt-metal does after BRISC firmware deassert
-//     but before launch_msg dispatch).
-//   - Firmware reads `enables` from a different launch_msg slot than the
-//     one we wrote to. (We always write launch[0]; mailboxes->launch_msg_rd_ptr
-//     is initialized to 0 by BRISC firmware itself — should match.)
+//   Host-side state (verified via L1 read-back):
+//     launch_msg.kernel_config_base[0] = 0x9e00 (TENSIX MEM_MAP_END) ✓
+//     launch_msg.local_cb_offset       = 0x30b0 ✓
+//     launch_msg.local_cb_mask         = 0x10001 (c_0 + c_16) ✓
+//     launch_msg.enables               = 0x1f (all 5 RISCs) ✓
+//     launch_msg.min_remote_cb_start_index = NUM_CIRCULAR_BUFFERS ✓
+//     launch_msg.kernel_text_offset[0..4]  all populated ✓
+//     CB blob at L1 0xceb0 = c_0: [fifo=0x1c200, size=2048, pages=1,
+//       page_size=2048]; gap zeros 1..15; c_16: [fifo=0x1ca00, ...]  ✓
+//     LAUNCH_MSG_BUFFER_RD_PTR (0x6c)  = 0 ✓
+//     GO_MSG_INDEX                     = 0 ✓
+//     go_messages[0].signal            = 0x80 (RUN_MSG_GO) — firmware
+//                                              saw the GO we sent
+//     subordinate_sync                 = 0x80808080 — firmware sent
+//                                              RUN_SYNC_MSG_GO to ncrisc
+//                                              + all 3 triscs, which
+//                                              only happens AFTER it
+//                                              passes run_triscs() and
+//                                              start_ncrisc_kernel_run_early()
+//                                              in brisc.cc main loop
+//                                              (~10 lines before the CB
+//                                              setup call)
 //
-// Until this is resolved, the test is gated under TT_FOIL_HW_TESTS but
-// will time out. The kernel ELFs and CB plumbing are still produced and
-// verified by test_cb_config.
+//   Device-side state (BRISC kernel-side raw inline-asm `lw` at
+//   0xffb0046c and 0xffb0066c):
+//     cb_interface[0]  = {0,0,0,0,0,0,0,0}  — all zero
+//     cb_interface[16] = {0,0,0,0}          — all zero
+//     Both kernel-entry and kernel-exit sentinels written  — so the
+//     kernel ran end-to-end, and the inline-asm read reached the
+//     instructions; firmware just never wrote to those bytes.
+//
+//   Workaround verified to expose the rest of the pipeline:
+//     Manually populating get_local_cb_interface(0).{fifo_*} from the
+//     BRISC kernel makes cb_reserve_back / cb_push_back work.
+//
+// Synthesis: BRISC firmware reaches the kernel-launch if-block (since
+// subordinate_sync = 0x80808080 requires run_triscs + early_ncrisc,
+// both of which are inside it) AND runs our BRISC kernel (since
+// sentinels land in L1). But somehow `setup_local_cb_read_write_interfaces`
+// — which sits between those two waypoints in brisc.cc — does not
+// produce visible writes to cb_interface[].
+//
+// Hypotheses left to investigate:
+//   - The pre-built brisc.elf we cold-boot was built with different
+//     defines than the source on this branch (DEBUG_NULL_KERNELS?
+//     compute_kernel_sentinel? something that no-ops the setup).
+//     Cross-check via objdump around 0x3f70 in brisc.elf.
+//   - cb_interface writes go through some shadowing memory map
+//     (unlikely on Blackhole local data memory but worth ruling out by
+//     checking if firmware's lui/sw targets a different address than
+//     what `nm` reports).
+//   - Cold-boot is missing a step that primes BRISC's data memory.
+//
+// Until this is resolved the test is gated under TT_FOIL_HW_TESTS and
+// will time out at first launch.
 //
 // Usage:
 //   TT_FOIL_KERNEL_DIR=examples/tile_copy/prebuilt \
@@ -80,13 +106,11 @@ int main() try {
     auto dev = tt::foil::open_device(pcie_index, "", {{0, 0}});
     tt::foil::CoreCoord core{0, 0};
 
-    // ---- L1 buffers: src tile, dst tile, CB rings ----
     auto buf_src    = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, kTileBytes, core);
     auto buf_dst    = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, kTileBytes, core);
     auto buf_cb_in  = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, kTileBytes, core);
     auto buf_cb_out = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, kTileBytes, core);
 
-    // ---- Fill src with a deterministic bf16 pattern ----
     std::vector<uint16_t> src(kTileWords);
     for (uint32_t i = 0; i < kTileWords; ++i) {
         src[i] = static_cast<uint16_t>(i ^ 0xA5A5u);
@@ -96,7 +120,6 @@ int main() try {
     std::vector<uint16_t> zero(kTileWords, 0);
     tt::foil::write_buffer(*dev, *buf_dst, zero.data(), kTileBytes);
 
-    // ---- Load 5-RISC kernel ----
     using R = tt::foil::RiscBinary;
     std::array<R, 5> bins = {{
         {R::RiscId::BRISC,  kernel_dir + "/reader.brisc.elf"},
@@ -107,31 +130,19 @@ int main() try {
     }};
     auto kernel = tt::foil::load_kernel(*dev, bins, core);
 
-    // ---- Register CBs: c_0 (input) + c_16 (output), one tile each ----
     std::array<tt::foil::CbConfig, 2> cbs = {{
-        {/*idx*/ 0,
-         /*fifo_addr*/ buf_cb_in->device_addr,
-         /*size*/      kTileBytes,
-         /*pages*/     1,
-         /*page_size*/ kTileBytes},
-        {/*idx*/ 16,
-         /*fifo_addr*/ buf_cb_out->device_addr,
-         /*size*/      kTileBytes,
-         /*pages*/     1,
-         /*page_size*/ kTileBytes},
+        {0,  buf_cb_in->device_addr,  kTileBytes, 1, kTileBytes},
+        {16, buf_cb_out->device_addr, kTileBytes, 1, kTileBytes},
     }};
     tt::foil::register_cbs(*dev, *kernel, cbs);
 
-    // ---- Runtime args: reader gets src, writer gets dst ----
     std::array<uint32_t, 1> ra_brisc  = {static_cast<uint32_t>(buf_src->device_addr)};
     std::array<uint32_t, 1> ra_ncrisc = {static_cast<uint32_t>(buf_dst->device_addr)};
     tt::foil::set_runtime_args(*dev, *kernel, R::RiscId::BRISC,  ra_brisc);
     tt::foil::set_runtime_args(*dev, *kernel, R::RiscId::NCRISC, ra_ncrisc);
 
-    // ---- Fire ----
     tt::foil::execute(*dev, *kernel);
 
-    // ---- Read back and compare ----
     std::vector<uint16_t> got(kTileWords, 0);
     tt::foil::read_buffer(*dev, *buf_dst, got.data(), kTileBytes);
 
