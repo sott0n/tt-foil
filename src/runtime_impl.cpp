@@ -120,4 +120,14 @@ uint64_t make_noc_unicast_addr(
     return make_noc_unicast_addr(translated, local_l1_addr);
 }
 
+uint64_t make_noc_dram_addr(Device& device, uint64_t dram_offset) {
+    // DRAM channel 0 is pre-resolved (translated coord + address offset)
+    // during device_open — see device.cpp::open_device.  We pack the same
+    // fields the host-side write_dram path uses, so a kernel reading via
+    // noc_async_read at this address lands on the exact byte that
+    // write_buffer(BufferLocation::DRAM) wrote.
+    return make_noc_unicast_addr(device.dram0_core,
+                                 dram_offset + device.dram0_offset);
+}
+
 }  // namespace tt::foil

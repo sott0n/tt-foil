@@ -153,4 +153,10 @@ uint64_t make_noc_unicast_addr(
     CoreCoord logical_dst,
     uint64_t local_l1_addr);
 
+// Pack a 64-bit NOC address for DRAM channel 0. `dram_offset` is the
+// offset returned by allocate_buffer(BufferLocation::DRAM). Kernels
+// receive this 64-bit value via RTA (split hi/lo) and feed it to
+// noc_async_read / noc_async_write.
+uint64_t make_noc_dram_addr(Device& device, uint64_t dram_offset);
+
 }  // namespace tt::foil

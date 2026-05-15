@@ -82,6 +82,13 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_matmul_kt PRIVATE TT::Foil tt_foil_llrt)
     add_test(NAME test_matmul_kt COMMAND test_matmul_kt)
 
+    # Host-side DRAM round trip (v5-4 smoke) — write_buffer + read_buffer
+    # on BufferLocation::DRAM.  Runs before the kernel-side DRAM matmul so
+    # we catch host I/O bugs separately.
+    add_executable(test_dram_roundtrip test_dram_roundtrip.cpp)
+    target_link_libraries(test_dram_roundtrip PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_dram_roundtrip COMMAND test_dram_roundtrip)
+
     # General Mt×Kt × Kt×Nt single-core matmul (v5-3) — outer-product
     # schedule with one DST-resident accumulator per output tile.  Tile
     # counts must match what the kernel ELFs were compiled with.
@@ -97,6 +104,15 @@ if(TT_FOIL_HW_TESTS)
         MM_MT=${MM_MT} MM_KT=${MM_KT} MM_NT=${MM_NT})
     target_link_libraries(test_matmul_mnk PRIVATE TT::Foil tt_foil_llrt)
     add_test(NAME test_matmul_mnk COMMAND test_matmul_mnk)
+
+    # DRAM-backed matmul (v5-4) — same Mt×Kt×Nt schedule, A/B/C in DRAM.
+    # Lifts the L1 capacity wall from v5-3.
+    add_executable(test_matmul_dram test_matmul_dram.cpp)
+    target_include_directories(test_matmul_dram PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_compile_definitions(test_matmul_dram PRIVATE
+        MM_MT=${MM_MT} MM_KT=${MM_KT} MM_NT=${MM_NT})
+    target_link_libraries(test_matmul_dram PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_matmul_dram COMMAND test_matmul_dram)
 
     # Multi-core boot via device_open (v3-1)
     add_executable(test_multi_core_boot test_multi_core_boot.cpp)

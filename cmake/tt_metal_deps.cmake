@@ -62,6 +62,14 @@ find_package(umd REQUIRED
     PATHS "${TT_METAL_BUILD_DIR}/lib/cmake/umd"
     NO_DEFAULT_PATH)
 
+# ---- fmt (vendored by tt-metal's build) ----
+# The HAL/llrt source we compile in references fmt::v11 internals via
+# header expansion; without an explicit link, downstream binaries see
+# undefined references to fmt::v11::detail::assert_fail and similar.
+find_package(fmt REQUIRED
+    PATHS "${TT_METAL_BUILD_DIR}/lib/cmake/fmt"
+    NO_DEFAULT_PATH)
+
 # ---- tt_foil_llrt: includes-only interface ----
 # Phase B3-4: libtt_metal.so is no longer linked. HAL sources are compiled
 # directly into tt_foil (see top-level CMakeLists.txt); ll_api::memory is
@@ -69,6 +77,7 @@ find_package(umd REQUIRED
 add_library(tt_foil_llrt INTERFACE)
 target_link_libraries(tt_foil_llrt INTERFACE
     umd::tt-umd
+    fmt::fmt
 )
 target_include_directories(tt_foil_llrt INTERFACE
     # tt-metal source tree (for llrt/*.hpp, hw/inc/*, hostdevcommon/*,
