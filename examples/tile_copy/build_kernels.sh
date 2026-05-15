@@ -13,10 +13,11 @@
 #                        (default: $TT_METAL_ROOT/tt_metal/pre-compiled/<hash>)
 #
 # Produces:
+#   prebuilt/reader.brisc.elf    (BRISC: L1 → CB c_0)
+#   prebuilt/writer.ncrisc.elf   (NCRISC: CB c_16 → L1)
 #   prebuilt/compute.trisc0.elf  (UNPACK variant)
 #   prebuilt/compute.trisc1.elf  (MATH variant)
 #   prebuilt/compute.trisc2.elf  (PACK variant)
-# (reader/writer BRISC+NCRISC ELFs land in v4-5)
 
 set -euo pipefail
 
@@ -55,6 +56,8 @@ COMMON_CFLAGS=(
     -I"$TT/tt_metal/hw/inc/internal/tt-1xx/blackhole/noc"
     -I"$TT/tt_metal/hw/ckernels/blackhole/metal/common"
     -I"$TT/tt_metal/hw/ckernels/blackhole/metal/llk_io"
+    -I"$TT/tt_metal/hw/ckernels/blackhole/metal/llk_api"
+    -I"$TT/tt_metal/hw/ckernels/blackhole/metal/llk_api/llk_sfpu"
     -I"$TT/tt_metal/tt-llk/tt_llk_blackhole/common/inc"
     -I"$TT/tt_metal/tt-llk/tt_llk_blackhole/llk_lib"
     -I"$TT/tt_metal/tt-llk/common"
@@ -120,14 +123,68 @@ build_compute() {
     local kernel_includes="$BUILD/kernel_includes.hpp"
     echo "#include \"$src\"" > "$kernel_includes"
 
-    # Stub chlkc_list.h on -I path: minimal replacement for tt-metal's JIT-
-    # generated chlkc_list.h. Pulls in the user kernel via kernel_includes
-    # (so kernel_main() resolves) and provides run_kernel() — that's the
-    # entire contract trisck.cc relies on.
+    # Stub chlkc_list.h on -I path: hand-written replacement for tt-metal's
+    # JIT-generated chlkc_list.h + chlkc_descriptors.h. Provides the per-CB
+    # data-format/tile-shape tables that the LLK headers index by CB id
+    # (UNPACK reads unpack_*[cbid], PACK reads pack_*[cbid]). Filled in for
+    # tile_copy's bf16 layout: CB 0 (input) and CB 16 (output) are
+    # Float16_b (=5); all other slots stay 255 (invalid). Then pulls in the
+    # user kernel via kernel_includes so kernel_main() resolves, and
+    # provides run_kernel() — the contract trisck.cc relies on.
     local chlkc_stub="$BUILD/chlkc_list.h"
     cat > "$chlkc_stub" <<'EOF'
 #pragma once
 #include <cstdint>
+
+// ---- chlkc_descriptors.h (scalars) ----
+constexpr bool DST_ACCUM_MODE = false;
+#define DST_SYNC_MODE DstSync::SyncHalf
+constexpr bool APPROX = true;
+constexpr std::int32_t MATH_FIDELITY = 255;
+
+// ---- chlkc_descriptors.h (pack data formats; 5 = Float16_b) ----
+constexpr unsigned char pack_src_format[32] = {
+    5,   255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    5,   255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+};
+constexpr unsigned char pack_dst_format[32] = {
+    5,   255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    5,   255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+};
+
+// ---- chlkc_descriptors.h (pack tile dims; bf16 32×32 = 4 faces of 16×16) ----
+constexpr std::uint8_t  pack_tile_num_faces[32]    = { 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 };
+constexpr std::uint8_t  pack_partial_face[32]      = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+constexpr std::uint8_t  pack_tile_face_r_dim[32]   = { 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16 };
+constexpr std::uint8_t  pack_narrow_tile[32]       = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+constexpr std::uint8_t  pack_tile_r_dim[32]        = { 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32 };
+constexpr std::uint8_t  pack_tile_c_dim[32]        = { 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32 };
+constexpr std::uint16_t pack_tile_size[32]         = { 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088 };
+constexpr std::uint8_t  pack_num_faces_r_dim[32]   = { 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2 };
+constexpr std::uint8_t  pack_num_faces_c_dim[32]   = { 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2 };
+
+// ---- chlkc_descriptors.h (unpack data formats) ----
+constexpr std::int32_t unpack_src_format[32] = {
+    5,   255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    5,   255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+};
+constexpr std::int32_t unpack_dst_format[32] = {
+    5,   255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    5,   255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+};
+
+// ---- chlkc_descriptors.h (unpack tile dims) ----
+constexpr std::uint8_t  unpack_tile_num_faces[32]   = { 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 };
+constexpr std::uint8_t  unpack_partial_face[32]     = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+constexpr std::uint8_t  unpack_tile_face_r_dim[32]  = { 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16 };
+constexpr std::uint8_t  unpack_narrow_tile[32]      = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+constexpr std::uint8_t  unpack_tile_r_dim[32]       = { 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32 };
+constexpr std::uint8_t  unpack_tile_c_dim[32]       = { 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32 };
+constexpr std::uint16_t unpack_tile_size[32]        = { 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088, 1088 };
+constexpr std::uint8_t  unpack_num_faces_r_dim[32]  = { 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2 };
+constexpr std::uint8_t  unpack_num_faces_c_dim[32]  = { 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2 };
+
+// ---- run_kernel(): the contract trisck.cc relies on ----
 #include "kernel_includes.hpp"
 inline std::uint32_t run_kernel() {
     kernel_main();
@@ -144,7 +201,22 @@ EOF
         local elf="$PREBUILT/${out_name}.trisc${i}.elf"
         local risc="trisc${i}"
 
+        # TRISC compute kernels need extra flags beyond the BRISC/NCRISC set:
+        #   -mcpu=tt-bh-tensix    enable the Tensix instruction extension so
+        #                         __builtin_rvtt_* intrinsics lower inline
+        #   -O3                   compute defaults to O3 in tt-metal (not Os
+        #                         like data movement). Required for the
+        #                         constexpr-propagation INSTRUCTION_WORD
+        #                         relies on — Os leaves "n"((x))" constraints
+        #                         unsolved and the build dies with
+        #                         "impossible constraint in 'asm'".
+        #   -ffast-math -ftt-nttp -ftt-constinit -ftt-consteval
+        #                         standard tt-metal compute flags
+        # Later -mcpu / -O3 win over the COMMON_CFLAGS values.
         "$GXX" "${COMMON_CFLAGS[@]}" \
+            -mcpu=tt-bh-tensix -O3 \
+            -ffast-math \
+            -ftt-nttp -ftt-constinit -ftt-consteval \
             -DCOMPILE_FOR_TRISC=$i \
             -DUCK_CHLKC_${VAR} \
             -DTRISC_${VAR} \
@@ -154,7 +226,7 @@ EOF
             -o "$obj"
 
         "$GXX" \
-            -Os -mcpu=tt-bh -fno-tree-loop-distribute-patterns \
+            -O3 -mcpu=tt-bh-tensix -ffast-math \
             -fno-exceptions -fno-use-cxa-atexit -std=c++17 \
             -Wl,-z,max-page-size=16 -Wl,-z,common-page-size=16 -nostartfiles \
             -Wl,--emit-relocs \
@@ -168,4 +240,6 @@ EOF
     done
 }
 
+build_one brisc  0 "$HERE/kernels/reader.cpp" reader.brisc
+build_one ncrisc 1 "$HERE/kernels/writer.cpp" writer.ncrisc
 build_compute "$HERE/kernels/compute.cpp" compute
