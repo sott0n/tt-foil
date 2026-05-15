@@ -7,9 +7,9 @@ Standalone — does NOT link `libtt_metal.so`. Owns its own `umd::Cluster` and
 `tt::tt_metal::Hal` instances; the HAL .cpp sources are compiled into a local
 static lib from the tt-metal source tree.
 
-**Scope:** single chip, multi Tensix core (v3), BRISC + NCRISC, slow-dispatch,
-NOC unicast L1↔L1 between cores. **Not** in scope: TRISC compute, Circular
-Buffers, DRAM interleaved, fast dispatch, mesh.
+**Scope:** single chip, multi Tensix core, BRISC + NCRISC + TRISC0/1/2 (full
+5-RISC), slow-dispatch, NOC unicast L1↔L1 between cores, Circular Buffers.
+**Not** in scope: DRAM interleaved, fast dispatch, mesh, Wormhole/Quasar.
 
 ## Repository layout
 
@@ -19,9 +19,10 @@ src/
   device.{hpp,cpp}                     # umd::Cluster + Hal ownership, multi-core cold boot
   buffer.{hpp,cpp}                     # Bump allocators, write_l1/read_l1, write_dram/read_dram
   kernel.{hpp,cpp}                     # ELF parsing (XIP), per-RISC RTA staging
-  dispatch.{hpp,cpp}                   # setup → fire_go → wait_done stages; multi-kernel variant
+  dispatch.{hpp,cpp}                   # reset → setup → fire_go → wait_done; multi-kernel variant
+  cb_config.{hpp,cpp}                  # CB descriptor blob layout + L1 write (v4)
   firmware_load.{hpp,cpp}              # boot firmware ELF → fw_base (relocate_dev_addr)
-  firmware_paths.{hpp,cpp}             # pre-compiled/<hash>/ discovery + TT_FOIL_FIRMWARE_DIR override
+  firmware_paths.{hpp,cpp}             # ~/.cache > tt_metal/pre-compiled discovery + override
   mailbox_init.{hpp,cpp}               # LAUNCH/GO_MSG(RUN_MSG_INIT)/rd_ptr/go_idx
   core_info_init.{hpp,cpp}             # minimal CORE_INFO (abs_logical_x/y + WORKER magic)
   bank_tables_init.{hpp,cpp}           # BANK_TO_NOC_SCRATCH + LOGICAL_TO_VIRTUAL_SCRATCH zero-fill
@@ -37,6 +38,7 @@ tests/                                 # see below
 examples/
   add_two_numbers/                     # single core, BRISC + NCRISC, no NOC
   noc_passthrough/                     # 2 cores, BRISC producer/consumer, NOC unicast
+  tile_copy/                           # 1 core, 5 RISCs: reader→CB c_0→TRISC copy_tile→CB c_16→writer (v4)
 cmake/tt_metal_deps.cmake              # tt_foil_llrt INTERFACE + tt_foil_hal_local STATIC
 ```
 
@@ -57,6 +59,21 @@ it doesn't fight libtt_metal.so's copy in the unlikely case a downstream
 re-links it. **Do not switch to `<llrt/tt_memory.h>` — the upstream version
 calls `MetalContext::instance()` from a debug-dump path** and that triggers a
 fresh `umd::Cluster` open against every PCIe chip.
+
+### Firmware ELFs must match what tt-metal builds (v4 lesson)
+`firmware_paths.cpp` resolves in this order:
+1. `$TT_FOIL_FIRMWARE_DIR` (explicit override)
+2. `$HOME/.cache/tt-metal-cache/<hash>/firmware/` (newest)
+3. `$TT_METAL_RUNTIME_ROOT/tt_metal/pre-compiled/<hash>/` (fallback)
+
+**Prefer (2).** The pre-compiled tree can diverge from what tt-metal's
+`BuildEnvManager` builds at runtime — different build hash → different
+`brisc.elf` bytes. Loading the stale pre-compiled BRISC firmware breaks
+`setup_local_cb_read_write_interfaces` in a subtle way: the kernel runs
+end-to-end but every CB interface reads as zero, so `cb_reserve_back`
+hangs forever. The `build_kernels.sh` scripts use the same priority for
+the `*_weakened.elf` they link against, so the kernel↔firmware ABI stays
+consistent.
 
 ### Cores must be booted at `open_device` time
 `open_device(pcie_idx, fw_dir, cores)` boots each entry in `cores` (default
@@ -84,6 +101,30 @@ packing on the host. Producer kernels receive the result split into hi/lo
 `get_noc_addr_from_logical_xy` from a kernel** — the worker_logical_to_virtual
 scratch is zero-filled, so it would resolve to (0,0).
 
+### CB blob covers [0..max_idx], not [min_idx..max_idx]
+Firmware's `setup_local_cb_read_write_interfaces` walks descriptors at
+`cb_l1_base + cb_id * 16` and indexes them by absolute CB id. The blob
+must lay out a 16-byte descriptor for every CB id from 0 up to the
+highest one set in `local_cb_mask`; unused slots are zeros. There is no
+`min_local_cb_start_index` field in `launch_msg` (only the remote-CB
+path has one). `src/cb_config.cpp` does the right thing.
+
+### TRISC compute build needs three non-obvious flags
+For `compute.*.elf` (TRISC0/1/2 sharing one source compiled 3× with
+`-DTRISC_UNPACK`/`MATH`/`PACK`):
+- `-mcpu=tt-bh-tensix` (not `tt-bh`) — enables Tensix-extension intrinsics so
+  `__builtin_rvtt_*` lowers inline.
+- `-O3` (not `Os`) — required for `INSTRUCTION_WORD("n")` `asm` constraints
+  to be resolvable at compile time.
+- `-ffast-math -ftt-nttp -ftt-constinit -ftt-consteval` — tt-metal's
+  standard compute flags.
+
+Plus the stub `chlkc_list.h` we ship in `examples/tile_copy/build_kernels.sh`
+substitutes for tt-metal's JIT-generated chlkc files (DST_ACCUM_MODE,
+APPROX, MATH_FIDELITY, and per-CB pack/unpack format + tile-shape
+arrays). For tile_copy this is bf16-fixed; a more general flow would
+plug in real per-program values.
+
 ## The dual-UMD wall (B3 lesson, do not repeat)
 
 `MetalContext::instance()` is lazy-initialised on first call. When it runs it
@@ -105,28 +146,30 @@ All in `tests/`. CMake gates HW tests behind `-DTT_FOIL_HW_TESTS=ON`.
 | ----------------------------- | --- | ----------------------------------------------- |
 | `test_bump_alloc`             | No  | Bump allocator semantics                        |
 | `test_elf_load`               | No  | `ll_api::memory` round-trip (set TT_FOIL_FW_DIR)|
-| `test_firmware_paths`         | No  | `pre-compiled/<hash>` discovery + env override  |
+| `test_firmware_paths`         | No  | Firmware ELF discovery + env override           |
 | `test_hal_standalone`         | No  | `new Hal(BLACKHOLE, ...)` succeeds standalone   |
+| `test_risc_ids`               | No  | RiscId → HAL (class, type, idx) mapping (v4)    |
 | `test_add_kernel`             | Yes | Single BRISC kernel — add two L1 words          |
 | `test_brisc_ncrisc`           | Yes | BRISC + NCRISC concurrent on one core           |
 | `test_umd_open`               | Yes | umd::Cluster direct open + L1 round trip        |
 | `test_multi_core_boot`        | Yes | open_device boots 2 cores to RUN_MSG_DONE       |
 | `test_multi_kernel`           | Yes | Two BRISC kernels on different cores            |
 | `test_noc_passthrough`        | Yes | Producer/consumer via noc_async_write           |
+| `test_cb_config`              | Yes | CB descriptor blob round-trip via L1 (v4)       |
+| `test_tile_copy`              | Yes | End-to-end 5-RISC tile_copy pipeline (v4)       |
 
 Run HW tests on Blackhole with:
 
 ```bash
 TT_METAL_RUNTIME_ROOT=/path/to/tt-metal \
-TT_FOIL_FIRMWARE_DIR=/path/to/tt-metal/tt_metal/pre-compiled/<hash> \
 TT_FOIL_DEVICE=3 \
 TT_FOIL_KERNEL_DIR=examples/.../prebuilt \
 ./build/tests/test_<name>
 ```
 
-`TT_FOIL_FIRMWARE_DIR` matters when more than one `pre-compiled/<hash>/` exists
-— the auto-discovery picks the most recently modified one and that may not be
-the one tt-metal's own `BuildEnvManager` would pick.
+`TT_FOIL_FIRMWARE_DIR` is optional — auto-discovery picks the cache
+firmware first. Set it explicitly only when you need a specific build
+hash or have moved the cache out of `$HOME/.cache/tt-metal-cache/`.
 
 ## Dispatch protocol summary
 
@@ -135,8 +178,15 @@ execute(dev, kernel):  → dispatch_execute_multi(dev, &k, 1)
 execute(dev, {k1,k2}): → dispatch_execute_multi(dev, [k1,k2], 2)
 
 dispatch_execute_multi:
+  reset    for each kernel: write RUN_MSG_RESET_READ_PTR_FROM_HOST to GO_MSG,
+                            then zero GO_MSG_INDEX (matches tt-metal
+                            send_reset_go_signal in llrt.cpp:115)
+  l1_membar
   setup    for each kernel: write ELF + RTA + launch_msg
+                            (launch_msg.kernel_config gets local_cb_offset /
+                             local_cb_mask from kernel.cb_alloc when valid)
   sfence
+  l1_membar
   fire_go  for each kernel: write GO_MSG.signal = RUN_MSG_GO
   l1_membar
   wait     for each kernel: poll GO_MSG.signal == RUN_MSG_DONE
@@ -166,6 +216,14 @@ step 7 for every core (so cores boot in parallel on the device side).
 
 ## Common surprises / FAQ
 
+**"`cb_reserve_back` hangs in TRISC-compute kernels"** — you're loading
+firmware from `tt_metal/pre-compiled/` while tt-metal at runtime uses
+`~/.cache/tt-metal-cache/`. The two trees have different build hashes
+and different `brisc.elf` bytes. The pre-compiled `setup_local_cb_*`
+writes silently fail to reach `cb_interface[]`. Run any tt-metal example
+once to populate the cache, then re-run tt-foil — `firmware_paths.cpp`
+auto-prefers the cache. Set `TT_FOIL_FIRMWARE_DIR` to force a path.
+
 **"GO_MSG poll times out"** — usually `BarrierAddressParams` wasn't set on
 the umd::Cluster, or the chip is in a stale state from a previous run that
 crashed. Re-running once usually fixes the latter; check
@@ -181,6 +239,15 @@ relocations.
 zero-filled. Use the host-side `make_noc_unicast_addr` and pass the 64-bit
 result via RTA instead.
 
+**"TRISC compute kernel won't compile: `impossible constraint in 'asm'`"** —
+you're using `-Os`. Switch the TRISC build to `-O3`. tt-metal's `INSTRUCTION_WORD`
+relies on `"n"((x))` constraints that require constexpr propagation; only
+`-O3` gives the inliner room to do it.
+
+**"TRISC compute link error: `__builtin_rvtt_ttreplay` undefined"** —
+you're using `-mcpu=tt-bh`. Switch to `-mcpu=tt-bh-tensix` for the TRISC
+build only (BRISC/NCRISC keep `tt-bh`).
+
 **"Why is `pre-compiled/<hash>/` numerical?"** — `BuildEnvManager::compute_build_key()`
 hashes dispatch_core_type + num_hw_cqs + harvesting_mask + the SFPI compile-
 hash string. Recomputing it outside tt-metal would couple us to the internal
@@ -195,6 +262,7 @@ From `tt_metal/hw/inc/internal/tt-1xx/blackhole/`:
 | `NOC_ADDR_NODE_ID_BITS`   | 6              | `noc/noc_parameters.h`           |
 | `NOC_ADDR_LOCAL_BITS`     | 36             | `noc/noc_parameters.h`           |
 | `MaxProcessorsPerCoreType`| 5              | `core_config.h`                  |
+| `NUM_CIRCULAR_BUFFERS`    | 64             | `circular_buffer_constants.h`    |
 | `launch_msg_buffer_num_entries` | 8       | `hal/generated/dev_msgs.hpp`     |
 
 HAL addresses pulled at runtime (Blackhole Tensix):
@@ -206,7 +274,7 @@ HAL addresses pulled at runtime (Blackhole Tensix):
 | `CORE_INFO`                 | 0x948     | 248 B                       |
 | `GO_MSG`                    | 0x3F0     | 4 B (signal byte at offset 0)|
 | `GO_MSG_INDEX`              | 0x420     | uint32                      |
-| `KERNEL_CONFIG`             | 0x9E00    | RTA + kernel text region    |
+| `KERNEL_CONFIG`             | 0x9E00    | RTA + kernel text + CB blob |
 | `BANK_TO_NOC_SCRATCH`       | 0x12E00   | 2048 B (zero-fill on boot)  |
 | `LOGICAL_TO_VIRTUAL_SCRATCH`| 0x13600   | 32 B (zero-fill on boot)    |
 
@@ -217,13 +285,15 @@ HAL addresses pulled at runtime (Blackhole Tensix):
 - **Add a new boot step**: put the helper in its own `src/<name>_init.{hpp,cpp}`
   pair matching the existing per-step files; call from `device_open` between
   the firmware load and the BRISC deassert.
-- **Touch dispatch**: the three stages (`dispatch_stage_setup`,
+- **Touch dispatch**: the four stages
+  (`dispatch_stage_send_reset`, `dispatch_stage_setup`,
   `dispatch_stage_fire_go`, `dispatch_stage_wait_done`) are in an anonymous
   namespace in `dispatch.cpp`; `dispatch_execute_multi` is the only caller
   worth modifying, single-kernel forwards.
-- **Add a new example**: copy `examples/noc_passthrough/build_kernels.sh`
-  as the template; it's the up-to-date one that builds against the local
-  SFPI toolchain + firmware-weakened ELFs.
+- **Add a new example**: copy `examples/tile_copy/build_kernels.sh` if you
+  need TRISC; otherwise `examples/noc_passthrough/build_kernels.sh`.
+  Both already have the `~/.cache/tt-metal-cache/.../firmware/` preference
+  baked in.
 
 ## Commit hygiene
 

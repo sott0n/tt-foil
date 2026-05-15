@@ -14,7 +14,7 @@ small set of Tensix cores.
 
 | Feature                       | tt-metal                   | tt-foil                                |
 | ----------------------------- | -------------------------- | -------------------------------------- |
-| Codebase size                 | ~660K lines                | ~2K lines (incl. bundled llrt subset)  |
+| Codebase size                 | ~660K lines                | ~2.5K lines (incl. bundled llrt subset)|
 | JIT kernel compilation        | Yes                        | No — pre-compiled ELFs only            |
 | Dispatch firmware             | Yes                        | No — slow-dispatch via direct mailbox  |
 | `libtt_metal.so` link         | Required                   | **Not linked**                         |
@@ -22,20 +22,21 @@ small set of Tensix cores.
 | Multi-device / Mesh           | Yes                        | No — single chip                       |
 | Multi-Tensix core dispatch    | Yes                        | Yes (v3)                               |
 | NOC inter-core (`noc_async_*`)| Yes                        | Yes (v3, unicast)                      |
-| TRISC compute + CB            | Yes                        | No                                     |
+| TRISC compute + Circular Buffers | Yes                     | Yes (v4)                               |
 | Target hardware               | WH, BH, Quasar             | Blackhole only                         |
 | Runtime dynamic deps          | `libtt_metal.so`, UMD, ... | UMD only (`libtt-umd.so`)              |
 
 ## Status
 
-| Phase      | Highlight                                                     |
-| ---------- | ------------------------------------------------------------- |
-| v1         | Single BRISC kernel on one Tensix core, slow-dispatch         |
-| v2 (A)     | BRISC + NCRISC concurrent on the same core                    |
-| v2 (B1)    | I/O switched to UMD direct (`tt::Cluster` calls dropped)      |
-| v2 (B2)    | `CreateDevice` replaced with in-tree cold-boot sequence       |
-| v2 (B3)    | `libtt_metal.so` link removed — HAL compiled into tt-foil     |
-| v3         | Multi-Tensix boot, multi-kernel dispatch, NOC inter-core L1↔L1|
+| Phase      | Highlight                                                       |
+| ---------- | --------------------------------------------------------------- |
+| v1         | Single BRISC kernel on one Tensix core, slow-dispatch           |
+| v2 (A)     | BRISC + NCRISC concurrent on the same core                      |
+| v2 (B1)    | I/O switched to UMD direct (`tt::Cluster` calls dropped)        |
+| v2 (B2)    | `CreateDevice` replaced with in-tree cold-boot sequence         |
+| v2 (B3)    | `libtt_metal.so` link removed — HAL compiled into tt-foil       |
+| v3         | Multi-Tensix boot, multi-kernel dispatch, NOC inter-core L1↔L1  |
+| v4         | TRISC compute + Circular Buffers — full 5-RISC pipeline, copy_tile MVP |
 
 Runs on Blackhole (Device=3 verified). End-to-end tests pass with only
 `libtt-umd.so` linked.
@@ -45,9 +46,13 @@ Runs on Blackhole (Device=3 verified). End-to-end tests pass with only
 - CMake 3.21+
 - C++20 compiler (GCC 11+ or Clang 14+)
 - Blackhole PCIe device
-- A built tt-metal source tree on disk (for headers + pre-compiled firmware
-  ELFs + the SFPI cross-compiler — tt-foil bundles the .cpp it needs but the
-  tree is still the source of headers and firmware artifacts)
+- A built tt-metal source tree on disk (for headers + firmware ELFs + the
+  SFPI cross-compiler — tt-foil bundles the .cpp it needs but the tree is
+  still the source of headers and firmware artifacts)
+- For TRISC compute: at least one prior tt-metal run on this machine, so
+  the JIT firmware cache at `~/.cache/tt-metal-cache/<hash>/firmware/` is
+  populated. tt-foil picks that up automatically — see [Firmware ELF
+  selection](#firmware-elf-selection) below.
 
 ## Getting Started
 
@@ -58,14 +63,21 @@ git clone https://github.com/tenstorrent/tt-metal.git
 cd tt-metal
 cmake -B build_Release -DCMAKE_BUILD_TYPE=Release
 cmake --build build_Release -j$(nproc) --target tt_metal
+# Run any tt-metal example/test once on a real Blackhole — this populates
+# ~/.cache/tt-metal-cache/<hash>/firmware/ with JIT-built firmware ELFs
+# that tt-foil prefers over the in-tree pre-compiled/ tree.
+TT_METAL_SLOW_DISPATCH_MODE=1 ARCH_NAME=blackhole TT_METAL_HOME=$(pwd) \
+  build_Release/test/tt_metal/unit_tests_api \
+  --gtest_filter='*TestDataCopyWithUpdatedCircularBufferConfig*'
 ```
 
 This produces:
 
 - `build_Release/lib/libtt-umd.so` (the only dynamic dep tt-foil links)
 - `build_Release/include/` (UMD, tt_stl, tt-logger, enchantum, fmt, spdlog headers)
-- `tt_metal/pre-compiled/<hash>/{brisc,ncrisc,trisc0,trisc1,trisc2}/*.elf`
-  (boot firmware)
+- `~/.cache/tt-metal-cache/<hash>/firmware/{brisc,ncrisc,trisc0,trisc1,trisc2}/*.elf`
+  (boot firmware — tt-foil's preferred source)
+- `tt_metal/pre-compiled/<hash>/...` (fallback firmware tree)
 - `build_Release/libexec/tt-metalium/runtime/sfpi/compiler/bin/riscv-tt-elf-g++`
   (kernel cross-compiler)
 
@@ -86,9 +98,11 @@ parent of the build dir.
 ### 3. Pre-compile your kernel
 
 Use the SFPI cross-compiler that ships with tt-metal — see
+[`examples/tile_copy/build_kernels.sh`](examples/tile_copy/build_kernels.sh)
+for the most complete example (BRISC + NCRISC + TRISC0/1/2 with the
+chlkc-stub trick for the compute build). The simpler
 [`examples/add_two_numbers/build_kernels.sh`](examples/add_two_numbers/build_kernels.sh)
-for a working invocation that links against firmware-weakened ELFs and the
-appropriate linker script.
+covers just the data-movement RISCs.
 
 ### 4. Run
 
@@ -130,8 +144,29 @@ tt::foil::close_device(std::move(dev));
 | ------------------------ | -------------------------------------------------------- |
 | `TT_METAL_RUNTIME_ROOT`  | tt-metal source root (firmware ELF auto-discovery)       |
 | `TT_FOIL_DEVICE`         | PCIe device index, e.g. `3` (default: `0`)               |
-| `TT_FOIL_FIRMWARE_DIR`   | Explicit `pre-compiled/<hash>/` dir; overrides auto-find |
+| `TT_FOIL_FIRMWARE_DIR`   | Explicit firmware dir; overrides auto-discovery          |
 | `TT_FOIL_KERNEL_DIR`     | Directory containing your kernel ELFs (test convention)  |
+
+### Firmware ELF selection
+
+`tt-foil` resolves firmware ELFs in this order:
+
+1. `$TT_FOIL_FIRMWARE_DIR` if set (must contain
+   `brisc/brisc.elf`, `ncrisc/ncrisc.elf`, `trisc{0,1,2}/trisc{0,1,2}.elf`).
+2. The newest matching dir under `$HOME/.cache/tt-metal-cache/<hash>/firmware/`.
+3. Fallback: the newest matching dir under
+   `$TT_METAL_RUNTIME_ROOT/tt_metal/pre-compiled/<hash>/`.
+
+**Prefer (2).** The pre-compiled tree under tt-metal can diverge from
+the firmware tt-metal itself loads at runtime (different build hash →
+different `brisc.elf` bytes). Loading a stale BRISC firmware silently
+breaks `cb_reserve_back` in TRISC-compute kernels — the kernel runs
+end-to-end but its `cb_interface[]` reads as all-zero because the
+firmware's `setup_local_cb_read_write_interfaces` writes don't reach
+the same `cb_interface` the kernel was linked against. The
+`build_kernels.sh` scripts for all three examples use the same
+preference order for the `*_weakened.elf` they link against, so
+kernel ↔ firmware ABI stays consistent.
 
 ## Examples
 
@@ -139,6 +174,7 @@ tt::foil::close_device(std::move(dev));
 | ---------------------------------------------------------- | ---------------------------------------------------------- |
 | [`examples/add_two_numbers/`](examples/add_two_numbers/)   | Single core, BRISC kernel reads two L1 words and adds them |
 | [`examples/noc_passthrough/`](examples/noc_passthrough/)   | Two cores, BRISC producer/consumer via `noc_async_write` + busy-loop sync |
+| [`examples/tile_copy/`](examples/tile_copy/)               | One core, 5 RISCs: BRISC reader → CB c_0 → TRISC `copy_tile` → CB c_16 → NCRISC writer |
 
 Each example has a `build_kernels.sh` that produces the ELFs under
 `prebuilt/`. Run the corresponding test under `tests/` to exercise it end to
@@ -178,7 +214,13 @@ void read_buffer (Device& device, Buffer& buf, void* dst,        std::size_t byt
 
 ```cpp
 struct RiscBinary {
-    enum class RiscId { BRISC = 0, NCRISC = 1 };
+    enum class RiscId {
+        BRISC  = 0,  // data movement processor 0
+        NCRISC = 1,  // data movement processor 1
+        TRISC0 = 2,  // compute UNPACK
+        TRISC1 = 3,  // compute MATH
+        TRISC2 = 4,  // compute PACK
+    };
     RiscId risc;
     std::string elf_path;
 };
@@ -192,6 +234,31 @@ void set_runtime_args(
     Device& device, Kernel& kernel, RiscBinary::RiscId risc,
     std::span<const uint32_t> args);
 ```
+
+### Circular Buffers (v4)
+
+Pre-compute the descriptor blob on the host; firmware reads it at
+launch time and populates each RISC's `cb_interface[]`.
+
+```cpp
+// In src/cb_config.hpp (internal — pull in directly for now).
+struct CbConfig {
+    uint8_t  cb_index;     // 0..31; convention: c_0..c_7 inputs, c_16..c_23 outputs
+    uint64_t fifo_addr;    // L1 byte address where the ring lives
+    uint32_t fifo_size;    // total ring size in bytes (= num_pages * page_size)
+    uint32_t num_pages;    // tile-slot count
+    uint32_t page_size;    // bytes per slot
+};
+
+void register_cbs(
+    Device& device, Kernel& kernel,
+    std::span<const CbConfig> cbs);
+```
+
+`register_cbs` allocates the blob in the kernel-config region for that
+core, writes it to L1, and stores the resulting `CbAllocation` on the
+kernel. `execute()` wires `local_cb_offset` / `local_cb_mask` into the
+launch_msg from there.
 
 ### Execution
 
@@ -225,9 +292,10 @@ tt-foil/
 │   ├── device.{hpp,cpp}            # umd::Cluster + Hal ownership, multi-core cold boot
 │   ├── buffer.{hpp,cpp}            # Bump allocators, UMD-direct read/write
 │   ├── kernel.{hpp,cpp}            # ELF parsing (XIP), per-RISC RTA staging
-│   ├── dispatch.{hpp,cpp}          # Slow-dispatch: setup → fire_go → wait_done
+│   ├── dispatch.{hpp,cpp}          # Slow-dispatch: reset → setup → fire_go → wait_done
+│   ├── cb_config.{hpp,cpp}         # CB descriptor blob layout + L1 write (v4)
 │   ├── firmware_load.{hpp,cpp}     # Boot firmware ELF → L1 (per-RISC reloc)
-│   ├── firmware_paths.{hpp,cpp}    # pre-compiled/<hash>/ discovery + override
+│   ├── firmware_paths.{hpp,cpp}    # Cache > pre-compiled discovery + env override
 │   ├── mailbox_init.{hpp,cpp}      # LAUNCH/GO_MSG/rd_ptr/go_idx boot writes
 │   ├── core_info_init.{hpp,cpp}    # CORE_INFO mailbox minimal init
 │   ├── bank_tables_init.{hpp,cpp}  # BANK_TO_NOC + LOGICAL_TO_VIRTUAL zero-fill
@@ -263,11 +331,16 @@ Pass 2: poll GO_MSG.signal until RUN_MSG_DONE per core
 ### Dispatch protocol (`execute`)
 
 ```
+Stage 0: for each kernel: send RUN_MSG_RESET_READ_PTR_FROM_HOST + zero GO_MSG_INDEX
+         (matches tt-metal slow-dispatch send_reset_go_signal)
+l1_membar()
+
 Stage 1: for each kernel:
            write kernel ELF (XIP) to kernel_text_addr in KERNEL_CONFIG region
            write runtime args to per-RISC RTA slots
-           build + write launch_msg (DISPATCH_MODE_HOST)
+           build + write launch_msg (DISPATCH_MODE_HOST, CB fields from cb_alloc)
 sfence()
+l1_membar()
 
 Stage 2: for each kernel: write GO_MSG.signal = RUN_MSG_GO
 l1_membar()
@@ -275,9 +348,8 @@ l1_membar()
 Stage 3: for each kernel: poll GO_MSG.signal until RUN_MSG_DONE
 ```
 
-## Out of scope (vs v4 and beyond)
+## Out of scope (vs v5 and beyond)
 
-- TRISC (compute) kernels and Circular Buffers
 - DRAM interleaved / sharded buffers
 - `get_noc_addr_from_logical_xy` (worker_logical_to_virtual table is zero-fill)
 - Multicast NOC writes
