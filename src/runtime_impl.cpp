@@ -10,6 +10,9 @@
 #include "buffer.hpp"
 #include "kernel.hpp"
 #include "dispatch.hpp"
+#include "noc_addr.hpp"
+
+#include <umd/device/types/core_coordinates.hpp>
 
 #include <stdexcept>
 
@@ -103,6 +106,18 @@ void execute(Device& device, Kernel& kernel) {
 void execute(Device& device, std::initializer_list<Kernel*> kernels) {
     std::vector<Kernel*> v(kernels.begin(), kernels.end());
     dispatch_execute_multi(device, std::span<Kernel* const>(v.data(), v.size()));
+}
+
+// ---- NOC address helper ----
+
+uint64_t make_noc_unicast_addr(
+    Device& device,
+    CoreCoord logical_dst,
+    uint64_t local_l1_addr) {
+    auto virt = logical_to_virtual(device, logical_dst);
+    tt::umd::CoreCoord translated{
+        virt.x, virt.y, tt::CoreType::TENSIX, tt::CoordSystem::TRANSLATED};
+    return make_noc_unicast_addr(translated, local_l1_addr);
 }
 
 }  // namespace tt::foil

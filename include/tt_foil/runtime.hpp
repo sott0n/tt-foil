@@ -133,4 +133,21 @@ void execute(Device& device, Kernel& kernel);
 // Throws std::runtime_error if any kernel times out.
 void execute(Device& device, std::initializer_list<Kernel*> kernels);
 
+// ---------------------------------------------------------------------------
+// NOC unicast address helper (multi-core kernels)
+// ---------------------------------------------------------------------------
+
+// Pack a 64-bit NOC unicast destination address suitable for a device-side
+// noc_async_write_one_packet() call. `logical_dst` is the logical CoreCoord
+// (same coord space the host uses with allocate_buffer / load_kernel), and
+// `local_l1_addr` is the byte offset into that core's L1.
+//
+// Blackhole layout: bits [47:42] = NOC y, [41:36] = NOC x, [35:0] = local.
+// Pre-computing this on the host means producer/consumer kernels don't need
+// to read the worker_logical_to_virtual scratch (which tt-foil zero-fills).
+uint64_t make_noc_unicast_addr(
+    Device& device,
+    CoreCoord logical_dst,
+    uint64_t local_l1_addr);
+
 }  // namespace tt::foil

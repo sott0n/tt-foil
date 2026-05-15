@@ -23,13 +23,8 @@
 
 #include "tt_foil/runtime.hpp"
 
-// soc_desc → translated coord lookup for the consumer (host needs it to
-// build the NOC unicast address the producer will write to).
-#include "device.hpp"
-#include "noc_addr.hpp"
-#include <umd/device/cluster.hpp>
-#include <umd/device/soc_descriptor.hpp>
-#include <umd/device/types/core_coordinates.hpp>
+// (Only the public header is needed — make_noc_unicast_addr is exposed
+// there now, no need to reach into device internals from a test.)
 
 static std::string required_env(const char* name) {
     const char* val = std::getenv(name);
@@ -69,15 +64,9 @@ int main() try {
     tt::foil::write_buffer(*dev, *flag_dst,     &zero, sizeof(zero));
     tt::foil::write_buffer(*dev, *result_buf,   &zero, sizeof(zero));
 
-    // -- NOC dst addresses (consumer translated coord, packed via make_noc_unicast_addr) --
-    const auto& soc_desc = dev->umd_driver->get_soc_descriptor(dev->chip_id);
-    tt::umd::CoreCoord c_logical{cc.x, cc.y, tt::CoreType::TENSIX, tt::CoordSystem::LOGICAL};
-    auto c_translated = soc_desc.translate_coord_to(c_logical, tt::CoordSystem::TRANSLATED);
-    std::printf("test_noc_passthrough: consumer logical (%u,%u) → translated (%zu,%zu)\n",
-                cc.x, cc.y, c_translated.x, c_translated.y);
-
-    uint64_t sum_noc  = tt::foil::make_noc_unicast_addr(c_translated, sum_dst->device_addr);
-    uint64_t flag_noc = tt::foil::make_noc_unicast_addr(c_translated, flag_dst->device_addr);
+    // -- NOC dst addresses (public helper handles logical→translated lookup) --
+    uint64_t sum_noc  = tt::foil::make_noc_unicast_addr(*dev, cc, sum_dst->device_addr);
+    uint64_t flag_noc = tt::foil::make_noc_unicast_addr(*dev, cc, flag_dst->device_addr);
     std::printf("test_noc_passthrough: sum  NOC dst = 0x%016lx\n", sum_noc);
     std::printf("test_noc_passthrough: flag NOC dst = 0x%016lx\n", flag_noc);
 

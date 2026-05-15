@@ -1,114 +1,163 @@
 # tt-foil
 
-A lightweight C++ runtime for running pre-compiled kernels on a single Blackhole Tensix core. Designed for embedding into larger systems where the full tt-metal stack is too heavy.
+A lightweight C++ runtime for running pre-compiled kernels on a Tenstorrent
+Blackhole chip. Designed for **embedding** into larger systems where the full
+tt-metal stack is too heavy.
 
 ## Why
 
-The standard tt-metal runtime is ~660K lines and includes JIT compilation, dispatch firmware, profiling, multi-device mesh support, and Python bindings. For embedding use cases, most of this is unnecessary. tt-foil provides only what is needed to load a pre-compiled kernel and run it.
+The standard tt-metal runtime is ~660K lines and includes JIT kernel compilation,
+fast-dispatch firmware, profiling, multi-device mesh support, and Python bindings.
+For embedding use cases most of that is unnecessary. tt-foil keeps only what's
+needed to cold-boot a chip, load pre-compiled kernels, and dispatch them across a
+small set of Tensix cores.
 
-| Feature | tt-metal | tt-foil |
-|---|---|---|
-| Codebase size | ~660K lines | ~1.5K lines |
-| JIT kernel compilation | Yes | No (pre-compiled only) |
-| Dispatch firmware | Yes | No (slow-dispatch via direct mailbox write) |
-| Multi-device / Mesh | Yes | No (single chip) |
-| Python bindings | Yes | No |
-| Target hardware | WH, BH, Quasar | Blackhole only (v1) |
+| Feature                       | tt-metal                   | tt-foil                                |
+| ----------------------------- | -------------------------- | -------------------------------------- |
+| Codebase size                 | ~660K lines                | ~2K lines (incl. bundled llrt subset)  |
+| JIT kernel compilation        | Yes                        | No — pre-compiled ELFs only            |
+| Dispatch firmware             | Yes                        | No — slow-dispatch via direct mailbox  |
+| `libtt_metal.so` link         | Required                   | **Not linked**                         |
+| `MetalContext` / IDevice      | Required                   | **Not used** — own UMD + HAL directly  |
+| Multi-device / Mesh           | Yes                        | No — single chip                       |
+| Multi-Tensix core dispatch    | Yes                        | Yes (v3)                               |
+| NOC inter-core (`noc_async_*`)| Yes                        | Yes (v3, unicast)                      |
+| TRISC compute + CB            | Yes                        | No                                     |
+| Target hardware               | WH, BH, Quasar             | Blackhole only                         |
+| Runtime dynamic deps          | `libtt_metal.so`, UMD, ... | UMD only (`libtt-umd.so`)              |
+
+## Status
+
+| Phase      | Highlight                                                     |
+| ---------- | ------------------------------------------------------------- |
+| v1         | Single BRISC kernel on one Tensix core, slow-dispatch         |
+| v2 (A)     | BRISC + NCRISC concurrent on the same core                    |
+| v2 (B1)    | I/O switched to UMD direct (`tt::Cluster` calls dropped)      |
+| v2 (B2)    | `CreateDevice` replaced with in-tree cold-boot sequence       |
+| v2 (B3)    | `libtt_metal.so` link removed — HAL compiled into tt-foil     |
+| v3         | Multi-Tensix boot, multi-kernel dispatch, NOC inter-core L1↔L1|
+
+Runs on Blackhole (Device=3 verified). End-to-end tests pass with only
+`libtt-umd.so` linked.
 
 ## Requirements
 
 - CMake 3.21+
 - C++20 compiler (GCC 11+ or Clang 14+)
 - Blackhole PCIe device
-- Pre-built tt-metal management firmware binaries
-- Pre-compiled RISC-V kernel ELF(s)
+- A built tt-metal source tree on disk (for headers + pre-compiled firmware
+  ELFs + the SFPI cross-compiler — tt-foil bundles the .cpp it needs but the
+  tree is still the source of headers and firmware artifacts)
 
 ## Getting Started
 
-### 1. Clone with submodule
+### 1. Build tt-metal once (for headers + firmware artifacts)
+
+```bash
+git clone https://github.com/tenstorrent/tt-metal.git
+cd tt-metal
+cmake -B build_Release -DCMAKE_BUILD_TYPE=Release
+cmake --build build_Release -j$(nproc) --target tt_metal
+```
+
+This produces:
+
+- `build_Release/lib/libtt-umd.so` (the only dynamic dep tt-foil links)
+- `build_Release/include/` (UMD, tt_stl, tt-logger, enchantum, fmt, spdlog headers)
+- `tt_metal/pre-compiled/<hash>/{brisc,ncrisc,trisc0,trisc1,trisc2}/*.elf`
+  (boot firmware)
+- `build_Release/libexec/tt-metalium/runtime/sfpi/compiler/bin/riscv-tt-elf-g++`
+  (kernel cross-compiler)
+
+### 2. Build tt-foil
 
 ```bash
 git clone https://github.com/tenstorrent/tt-foil.git
 cd tt-foil
-git submodule update --init --recursive third_party/tt-metal/tt_metal/third_party/umd
-```
-
-> Note: Only the UMD portion of the submodule needs to be initialized for the build.
-
-### 2. Build
-
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake -B build -DTT_METAL_BUILD_DIR=/path/to/tt-metal/build_Release \
+               -DTT_FOIL_HW_TESTS=ON
 cmake --build build -j$(nproc)
 ```
 
-### 3. Prepare firmware
+`TT_METAL_BUILD_DIR` can also be passed via env var. If both `TT_METAL_BUILD_DIR`
+and `TT_METAL_SOURCE_DIR` are unset, tt-foil infers the source root from the
+parent of the build dir.
 
-tt-foil does not compile firmware. Build tt-metal once to produce the firmware ELFs:
+### 3. Pre-compile your kernel
 
-```bash
-# In the tt-metal repo
-cmake -B build && cmake --build build --target firmware
-```
+Use the SFPI cross-compiler that ships with tt-metal — see
+[`examples/add_two_numbers/build_kernels.sh`](examples/add_two_numbers/build_kernels.sh)
+for a working invocation that links against firmware-weakened ELFs and the
+appropriate linker script.
 
-The firmware files needed are: `brisc.elf`, `ncrisc.elf`, `trisc0.elf`, `trisc1.elf`, `trisc2.elf`.
-
-### 4. Pre-compile your kernel
-
-Kernels run on the BRISC or NCRISC RISC-V processors inside Tensix. Compile with the tt-metal device-side toolchain:
-
-```bash
-riscv32-unknown-elf-g++ \
-  -march=rv32imc -mabi=ilp32 -O2 \
-  -fno-exceptions -fno-rtti \
-  -I third_party/tt-metal/tt_metal/hw/inc \
-  -I third_party/tt-metal/tt_metal/hw/inc/hostdev \
-  my_kernel.cpp -o my_kernel.elf
-```
-
-See [`examples/add_two_numbers/kernels/add_brisc.cpp`](examples/add_two_numbers/kernels/add_brisc.cpp) for a minimal example.
-
-### 5. Run
+### 4. Run
 
 ```cpp
 #include "tt_foil/runtime.hpp"
 
-auto dev = tt::foil::open_device(0, "/path/to/firmware");
+// Open chip 3 and cold-boot logical core (0,0).
+auto dev = tt::foil::open_device(3, "", {{0, 0}});
 
 tt::foil::CoreCoord core{0, 0};
-auto buf = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, 4, core);
+auto a_buf = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, 4, core);
+auto r_buf = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, 4, core);
 
-uint32_t value = 42;
-tt::foil::write_buffer(*dev, *buf, &value, 4);
+uint32_t v = 42;
+tt::foil::write_buffer(*dev, *a_buf, &v, 4);
 
 std::array<tt::foil::RiscBinary, 1> bins = {{
     {tt::foil::RiscBinary::RiscId::BRISC, "my_kernel.elf"},
 }};
 auto kernel = tt::foil::load_kernel(*dev, bins, core);
 
-std::vector<uint32_t> args = {static_cast<uint32_t>(buf->device_addr)};
+std::vector<uint32_t> args = {
+    static_cast<uint32_t>(a_buf->device_addr),
+    static_cast<uint32_t>(r_buf->device_addr),
+};
 tt::foil::set_runtime_args(*dev, *kernel, tt::foil::RiscBinary::RiscId::BRISC, args);
 
 tt::foil::execute(*dev, *kernel);
 
 uint32_t result = 0;
-tt::foil::read_buffer(*dev, *buf, &result, 4);
+tt::foil::read_buffer(*dev, *r_buf, &result, 4);
 
 tt::foil::close_device(std::move(dev));
 ```
 
+### Required env vars at run time
+
+| Env var                  | Meaning                                                  |
+| ------------------------ | -------------------------------------------------------- |
+| `TT_METAL_RUNTIME_ROOT`  | tt-metal source root (firmware ELF auto-discovery)       |
+| `TT_FOIL_DEVICE`         | PCIe device index, e.g. `3` (default: `0`)               |
+| `TT_FOIL_FIRMWARE_DIR`   | Explicit `pre-compiled/<hash>/` dir; overrides auto-find |
+| `TT_FOIL_KERNEL_DIR`     | Directory containing your kernel ELFs (test convention)  |
+
+## Examples
+
+| Example                                                    | What it shows                                              |
+| ---------------------------------------------------------- | ---------------------------------------------------------- |
+| [`examples/add_two_numbers/`](examples/add_two_numbers/)   | Single core, BRISC kernel reads two L1 words and adds them |
+| [`examples/noc_passthrough/`](examples/noc_passthrough/)   | Two cores, BRISC producer/consumer via `noc_async_write` + busy-loop sync |
+
+Each example has a `build_kernels.sh` that produces the ELFs under
+`prebuilt/`. Run the corresponding test under `tests/` to exercise it end to
+end.
+
 ## API Reference
 
-All functions are in `namespace tt::foil`. Include `<tt_foil/runtime.hpp>`.
+All in `namespace tt::foil`. Include `<tt_foil/runtime.hpp>`.
 
 ### Device
 
 ```cpp
-// Open PCIe device. firmware_dir contains brisc.elf, ncrisc.elf, trisc*.elf.
-std::unique_ptr<Device> open_device(int pcie_device_index = 0,
-                                    const std::string& firmware_dir = "");
+// Open PCIe chip and cold-boot the requested Tensix cores.
+std::shared_ptr<Device> open_device(
+    int pcie_device_index = 0,
+    const std::string& firmware_dir = "",
+    std::vector<CoreCoord> cores = {{0, 0}});
 
-void close_device(std::unique_ptr<Device> device);
+void close_device(std::shared_ptr<Device> device);
 ```
 
 ### Buffer
@@ -116,13 +165,13 @@ void close_device(std::unique_ptr<Device> device);
 ```cpp
 enum class BufferLocation { L1, DRAM };
 
-std::unique_ptr<Buffer> allocate_buffer(Device& device, BufferLocation loc,
-                                        std::size_t size_bytes,
-                                        CoreCoord logical_core = {});
-void free_buffer(std::unique_ptr<Buffer> buffer);
+std::shared_ptr<Buffer> allocate_buffer(
+    Device& device, BufferLocation loc,
+    std::size_t size_bytes,
+    CoreCoord logical_core = {});  // L1: which core's L1; DRAM: ignored
 
 void write_buffer(Device& device, Buffer& buf, const void* src, std::size_t bytes);
-void read_buffer(Device& device, Buffer& buf, void* dst, std::size_t bytes);
+void read_buffer (Device& device, Buffer& buf, void* dst,        std::size_t bytes);
 ```
 
 ### Kernel
@@ -134,60 +183,107 @@ struct RiscBinary {
     std::string elf_path;
 };
 
-// Load pre-compiled ELFs from disk (all disk I/O happens here).
-std::unique_ptr<Kernel> load_kernel(Device& device,
-                                    std::span<const RiscBinary> binaries,
-                                    CoreCoord logical_core);
+std::shared_ptr<Kernel> load_kernel(
+    Device& device,
+    std::span<const RiscBinary> binaries,
+    CoreCoord logical_core);
 
-// Set 32-bit runtime args for a RISC. Max 64 words per RISC.
-void set_runtime_args(Device& device, Kernel& kernel,
-                      RiscBinary::RiscId risc,
-                      std::span<const uint32_t> args);
+void set_runtime_args(
+    Device& device, Kernel& kernel, RiscBinary::RiscId risc,
+    std::span<const uint32_t> args);
 ```
 
 ### Execution
 
 ```cpp
-// Blocking execution. Throws std::runtime_error on timeout (default 5 s).
+// Single kernel.
 void execute(Device& device, Kernel& kernel);
+
+// Multi-kernel — all GOs are fired before any DONE check, so
+// producer/consumer kernels actually meet on the device.
+void execute(Device& device, std::initializer_list<Kernel*> kernels);
+```
+
+### NOC unicast addressing (multi-core)
+
+```cpp
+// Pack a 64-bit NOC unicast destination address for a noc_async_write
+// targeting another core's L1. Pass to the producer kernel as two
+// 32-bit runtime args (lo, hi).
+uint64_t make_noc_unicast_addr(
+    Device& device,
+    CoreCoord logical_dst,
+    uint64_t local_l1_addr);
 ```
 
 ## Architecture
 
 ```
 tt-foil/
-├── include/tt_foil/runtime.hpp   # Public API
+├── include/tt_foil/runtime.hpp     # Public API
 ├── src/
-│   ├── device.cpp                # UMD Cluster + HAL init, firmware loading
-│   ├── buffer.cpp                # Bump allocator, DMA transfer wrappers
-│   ├── kernel.cpp                # ELF loading (XIP), runtime arg storage
-│   ├── dispatch.cpp              # Slow-dispatch: ELF write + mailbox + poll
-│   └── runtime_impl.cpp          # Public API delegation
-└── third_party/tt-metal/         # git submodule (UMD, HAL, llrt subset only)
+│   ├── device.{hpp,cpp}            # umd::Cluster + Hal ownership, multi-core cold boot
+│   ├── buffer.{hpp,cpp}            # Bump allocators, UMD-direct read/write
+│   ├── kernel.{hpp,cpp}            # ELF parsing (XIP), per-RISC RTA staging
+│   ├── dispatch.{hpp,cpp}          # Slow-dispatch: setup → fire_go → wait_done
+│   ├── firmware_load.{hpp,cpp}     # Boot firmware ELF → L1 (per-RISC reloc)
+│   ├── firmware_paths.{hpp,cpp}    # pre-compiled/<hash>/ discovery + override
+│   ├── mailbox_init.{hpp,cpp}      # LAUNCH/GO_MSG/rd_ptr/go_idx boot writes
+│   ├── core_info_init.{hpp,cpp}    # CORE_INFO mailbox minimal init
+│   ├── bank_tables_init.{hpp,cpp}  # BANK_TO_NOC + LOGICAL_TO_VIRTUAL zero-fill
+│   ├── reset.{hpp,cpp}             # assert/deassert + INIT mailbox poll
+│   ├── noc_addr.{hpp,cpp}          # Host-side NOC unicast addr packing
+│   ├── umd_boot.{hpp,cpp}          # UMD Cluster direct open helper
+│   ├── runtime_impl.cpp            # Public API thin delegation
+│   └── llrt_local/                 # ll_api::memory + tt_elffile + HAL stubs
+│       └── (vendored from tt_metal/llrt; ll_api namespace renamed)
+└── (no submodule — tt-metal is a sibling directory, located via CMake var)
 ```
 
-**Dispatch protocol (DISPATCH_MODE_HOST):**
-1. Write kernel ELF binary to `fw_base_addr` in core L1
-2. Write runtime args to RTA region in L1
-3. Write `launch_msg` with `mode = DISPATCH_MODE_HOST`
-4. Write `go_msg.signal = RUN_MSG_GO`
-5. Poll `go_msg.signal` until `RUN_MSG_DONE`
+The static library `tt_foil` links a separate `tt_foil_hal_local` static, which
+compiles `tt_metal/llrt/hal.cpp` + the Blackhole HAL .cpp files straight from
+the tt-metal source tree. `libtt_metal.so` itself is not linked at runtime.
 
-## Scope (v1)
+### Cold-boot sequence (`device_open`)
 
-**Supported:**
-- Single Blackhole chip (one PCIe device)
-- Single Tensix core target per kernel
-- BRISC and NCRISC data movement kernels
-- L1 and DRAM buffer allocation
-- Up to 64 × 32-bit runtime arguments per RISC
+Per requested logical core, in two passes:
 
-**Not supported (future work):**
-- Circular buffers → required for Compute (TRISC) kernels
-- Multi-core kernels
-- Multi-chip / Mesh
-- Subset of Tensix cores (pseudo-embedding mode)
+```
+Pass 1: assert all RISCs reset
+        load brisc.elf, ncrisc.elf, trisc0/1/2.elf to fw_base_addr
+        zero-fill BANK_TO_NOC_SCRATCH + LOGICAL_TO_VIRTUAL_SCRATCH
+        write minimal CORE_INFO (abs_logical_x/y + magic=WORKER)
+        write LAUNCH (8 × zero launch_msg_t), GO_MSG.signal=RUN_MSG_INIT, ptrs=0
+        deassert BRISC reset
+
+Pass 2: poll GO_MSG.signal until RUN_MSG_DONE per core
+        (BRISC firmware brings NCRISC + TRISCs up via subordinate_sync)
+```
+
+### Dispatch protocol (`execute`)
+
+```
+Stage 1: for each kernel:
+           write kernel ELF (XIP) to kernel_text_addr in KERNEL_CONFIG region
+           write runtime args to per-RISC RTA slots
+           build + write launch_msg (DISPATCH_MODE_HOST)
+sfence()
+
+Stage 2: for each kernel: write GO_MSG.signal = RUN_MSG_GO
+l1_membar()
+
+Stage 3: for each kernel: poll GO_MSG.signal until RUN_MSG_DONE
+```
+
+## Out of scope (vs v4 and beyond)
+
+- TRISC (compute) kernels and Circular Buffers
+- DRAM interleaved / sharded buffers
+- `get_noc_addr_from_logical_xy` (worker_logical_to_virtual table is zero-fill)
+- Multicast NOC writes
+- Multi-chip / mesh
 - Fast dispatch (dispatch firmware)
+- Wormhole / Quasar (Blackhole-only by design)
 - JIT kernel compilation
 
 ## License

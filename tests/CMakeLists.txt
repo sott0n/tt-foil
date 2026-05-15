@@ -37,8 +37,7 @@ if(TT_FOIL_HW_TESTS)
 
     # NOC inter-core passthrough end-to-end (v3-3..v3-5)
     add_executable(test_noc_passthrough test_noc_passthrough.cpp)
-    target_include_directories(test_noc_passthrough PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_link_libraries(test_noc_passthrough PRIVATE TT::Foil tt_foil_llrt)
+    target_link_libraries(test_noc_passthrough PRIVATE TT::Foil)
     add_test(NAME test_noc_passthrough COMMAND test_noc_passthrough)
 
     # Multi-kernel dispatch over multiple cores (v3-2)
