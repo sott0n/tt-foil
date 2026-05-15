@@ -14,6 +14,9 @@
 // Full header needed for unique_ptr<tt::foil::ll_api::memory> member
 #include "llrt_local/tt_memory.h"
 
+// CbAllocation lives on Kernel; v4-3 / v4-4 use it to populate launch_msg.
+#include "cb_config.hpp"
+
 namespace tt::foil {
 
 struct Device;
@@ -67,6 +70,12 @@ struct Kernel {
     // Address is allocated from the core's L1 bump allocator at load_kernel() time.
     uint64_t rta_base_addr{0};
     uint32_t rta_region_size{0};  // total bytes reserved for all RTA arrays
+
+    // Circular Buffer config blob — populated by register_cbs(); read by
+    // dispatch_execute to fill launch_msg.kernel_config.local_cb_* fields.
+    // .valid == false means no CBs registered → dispatch leaves those fields
+    // at their default (mask=0, min_index=NUM_CIRCULAR_BUFFERS).
+    CbAllocation cb_alloc;
 };
 
 // Resolve a RiscId to HAL processor_class + processor_type indices, plus the

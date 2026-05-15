@@ -24,6 +24,7 @@ add_library(tt_foil STATIC
     src/bank_tables_init.cpp
     src/reset.cpp
     src/noc_addr.cpp
+    src/cb_config.cpp
     src/umd_boot.cpp
     src/runtime_impl.cpp
     # Bundled tt-metal llrt sources (Phase B3-2 + B3-3): copied from

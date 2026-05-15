@@ -46,6 +46,13 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_noc_passthrough PRIVATE TT::Foil)
     add_test(NAME test_noc_passthrough COMMAND test_noc_passthrough)
 
+    # CB config blob layout (v4-3) — uses HW to validate L1 round-trip but
+    # doesn't run any TRISC firmware
+    add_executable(test_cb_config test_cb_config.cpp)
+    target_include_directories(test_cb_config PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(test_cb_config PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_cb_config COMMAND test_cb_config)
+
     # Multi-kernel dispatch over multiple cores (v3-2)
     add_executable(test_multi_kernel test_multi_kernel.cpp)
     target_link_libraries(test_multi_kernel PRIVATE TT::Foil)
