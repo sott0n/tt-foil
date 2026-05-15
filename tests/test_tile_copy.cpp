@@ -13,15 +13,38 @@
 // One bf16 32×32 tile (2 KB). Host fills src with a deterministic
 // pattern, runs the kernel, reads dst back, asserts dst == src.
 //
-// CURRENT STATUS (v4-6): the test hangs in BRISC's cb_reserve_back. The
-// LocalCBInterface for CB 0 reads as fifo_num_pages=0 despite the
-// launch_msg fields and the CB descriptor blob being correctly populated
-// in L1 (verified end-to-end). This means tt-metal firmware's
-// setup_local_cb_read_write_interfaces is either not running on BRISC or
-// running but failing to write the per-CB struct in BRISC's data memory.
-// Root cause unclear; the most likely candidates are a firmware version
-// mismatch (the pre-built brisc.elf we cold-boot vs the brisc_weakened.elf
-// we link kernels against) or a missing cold-boot init step in tt-foil.
+// CURRENT STATUS (v4-6): the test hangs in BRISC's cb_reserve_back.
+// Diagnosis (verified by instrumented kernels + L1 read-back):
+//   1. Host-side state is correct:
+//        - launch_msg.kernel_config_base[0] = 0x9e00 (TENSIX MEM_MAP_END)
+//        - launch_msg.local_cb_offset = 0x30b0
+//        - launch_msg.local_cb_mask = 0x10001 (c_0 + c_16)
+//        - launch_msg.enables = 0x1f (all 5 RISCs)
+//        - launch_msg.min_remote_cb_start_index = NUM_CIRCULAR_BUFFERS
+//        - launch_msg.kernel_text_offset[0..4] all populated
+//        - CB descriptor blob at 0xceb0 = [fifo=0x1c200, size=2048,
+//          pages=1, page_size=2048] for c_0, gap zeros 1..15, then c_16
+//   2. BRISC kernel runs (reaches kernel_main, dbg sentinel written).
+//   3. BUT cb_interface[0..16] in BRISC's local data memory (0xffb0046c+)
+//      are entirely zero — firmware's setup_local_cb_read_write_interfaces
+//      did NOT execute its writes, even though brisc.elf disassembly
+//      contains the inline-asm setup loop at 0x3f70 gated only by
+//      `enables & 1`.
+//   4. Manually populating cb_interface[0] from BRISC kernel-side (in
+//      reader.cpp) makes cb_reserve_back / cb_push_back work, confirming
+//      the rest of the BRISC pipeline is fine.
+//
+// Root cause still unknown. Most likely candidates:
+//   - A subtle cold-boot prerequisite tt-foil is missing (e.g., a specific
+//     mailbox/scratch init that tt-metal does after BRISC firmware deassert
+//     but before launch_msg dispatch).
+//   - Firmware reads `enables` from a different launch_msg slot than the
+//     one we wrote to. (We always write launch[0]; mailboxes->launch_msg_rd_ptr
+//     is initialized to 0 by BRISC firmware itself — should match.)
+//
+// Until this is resolved, the test is gated under TT_FOIL_HW_TESTS but
+// will time out. The kernel ELFs and CB plumbing are still produced and
+// verified by test_cb_config.
 //
 // Usage:
 //   TT_FOIL_KERNEL_DIR=examples/tile_copy/prebuilt \
@@ -64,8 +87,6 @@ int main() try {
     auto buf_cb_out = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, kTileBytes, core);
 
     // ---- Fill src with a deterministic bf16 pattern ----
-    // Identity copy doesn't care about the value's meaning; we just need
-    // distinct bytes so a stale-zero dst can't accidentally match.
     std::vector<uint16_t> src(kTileWords);
     for (uint32_t i = 0; i < kTileWords; ++i) {
         src[i] = static_cast<uint16_t>(i ^ 0xA5A5u);
