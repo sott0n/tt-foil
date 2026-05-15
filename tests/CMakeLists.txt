@@ -70,6 +70,12 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_relu PRIVATE TT::Foil tt_foil_llrt)
     add_test(NAME test_relu COMMAND test_relu)
 
+    # bf16 eltwise add_tiles (v5.6) — 2-input compute, single tile, FPU.
+    add_executable(test_add_tiles test_add_tiles.cpp)
+    target_include_directories(test_add_tiles PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(test_add_tiles PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_add_tiles COMMAND test_add_tiles)
+
     # Single-tile bf16 matmul (v5-1) — full 5-RISC + 2-input + matmul_tiles
     add_executable(test_matmul_1tile test_matmul_1tile.cpp)
     target_include_directories(test_matmul_1tile PRIVATE "${CMAKE_SOURCE_DIR}/src")
