@@ -35,41 +35,19 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_brisc_ncrisc PRIVATE TT::Foil)
     add_test(NAME test_brisc_ncrisc COMMAND test_brisc_ncrisc)
 
-    # End-to-end cold boot via UMD direct (Phase B2 steps 6 + 7)
-    add_executable(test_cold_boot test_cold_boot.cpp)
-    target_include_directories(test_cold_boot PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_link_libraries(test_cold_boot PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_cold_boot COMMAND test_cold_boot)
-
-    # Tensix bank-routing scratch zero-fill (Phase B2 step 5)
-    add_executable(test_bank_tables_init test_bank_tables_init.cpp)
-    target_include_directories(test_bank_tables_init PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_link_libraries(test_bank_tables_init PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_bank_tables_init COMMAND test_bank_tables_init)
-
-    # Tensix CORE_INFO mailbox init (Phase B2 step 4b)
-    add_executable(test_core_info_init test_core_info_init.cpp)
-    target_include_directories(test_core_info_init PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_link_libraries(test_core_info_init PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_core_info_init COMMAND test_core_info_init)
-
-    # Tensix mailbox boot-time init (Phase B2 step 4)
-    add_executable(test_mailbox_init test_mailbox_init.cpp)
-    target_include_directories(test_mailbox_init PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_link_libraries(test_mailbox_init PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_mailbox_init COMMAND test_mailbox_init)
-
-    # Firmware ELF load equivalence vs tt-metal (Phase B2 step 3)
-    add_executable(test_firmware_load test_firmware_load.cpp)
-    target_include_directories(test_firmware_load PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_link_libraries(test_firmware_load PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_firmware_load COMMAND test_firmware_load)
-
-    # UMD direct open + L1 round trip (Phase B2 step 2)
-    # No tt-metal CreateDevice: opens umd::Cluster directly. Must not run
-    # alongside another process that has the same chip open.
+    # UMD direct open + L1 round trip — opens umd::Cluster directly, no
+    # tt-metal symbols required.
     add_executable(test_umd_open test_umd_open.cpp)
     target_include_directories(test_umd_open PRIVATE "${CMAKE_SOURCE_DIR}/src")
     target_link_libraries(test_umd_open PRIVATE TT::Foil tt_foil_llrt)
     add_test(NAME test_umd_open COMMAND test_umd_open)
+
+    # The Phase B2 step-by-step tests (test_cold_boot, test_firmware_load,
+    # test_mailbox_init, test_core_info_init, test_bank_tables_init) were
+    # development scaffolding that linked against tt-metal's CreateDevice +
+    # MetalContext to byte-compare our writes against tt-metal's. With B3-4
+    # those symbols are no longer linked. The production-equivalent
+    # verification — full cold boot via device_open() + kernel launch — is
+    # covered by test_add_kernel and test_brisc_ncrisc above. The .cpp files
+    # remain on disk for reference but are no longer in the build.
 endif()

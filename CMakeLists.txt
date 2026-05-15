@@ -46,6 +46,7 @@ target_link_libraries(tt_foil
         umd::tt-umd
     PRIVATE
         tt_foil_llrt
+        tt_foil_hal_local
 )
 
 if(TT_FOIL_BUILD_TESTS)

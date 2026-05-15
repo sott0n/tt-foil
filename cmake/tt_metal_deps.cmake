@@ -62,25 +62,22 @@ find_package(umd REQUIRED
     PATHS "${TT_METAL_BUILD_DIR}/lib/cmake/umd"
     NO_DEFAULT_PATH)
 
-# ---- libtt_metal.so (contains llrt, HAL, cluster) ----
-add_library(tt_metal_prebuilt SHARED IMPORTED)
-set_target_properties(tt_metal_prebuilt PROPERTIES
-    IMPORTED_LOCATION "${TT_METAL_BUILD_DIR}/lib/libtt_metal.so"
-    IMPORTED_SONAME   "libtt_metal.so"
-)
-
-# ---- tt_foil_llrt: interface that exposes headers + pre-built symbols ----
-# No source files — all symbols come from libtt_metal.so and libtt-umd.so.
+# ---- tt_foil_llrt: includes-only interface ----
+# Phase B3-4: libtt_metal.so is no longer linked. HAL sources are compiled
+# directly into tt_foil (see top-level CMakeLists.txt); ll_api::memory is
+# bundled under src/llrt_local/. The only runtime dependency now is UMD.
 add_library(tt_foil_llrt INTERFACE)
 target_link_libraries(tt_foil_llrt INTERFACE
-    tt_metal_prebuilt
     umd::tt-umd
 )
 target_include_directories(tt_foil_llrt INTERFACE
-    # tt-metal source tree (for llrt/*.hpp, hw/inc/*, hostdevcommon/*)
+    # tt-metal source tree (for llrt/*.hpp, hw/inc/*, hostdevcommon/*,
+    # hal/*.hpp + generated dev_msgs)
     "${TT_METAL_ROOT}"
     "${TT_METAL_ROOT}/tt_metal"
     "${TT_METAL_ROOT}/tt_metal/llrt"
+    "${TT_METAL_ROOT}/tt_metal/llrt/hal"
+    "${TT_METAL_ROOT}/tt_metal/llrt/hal/tt-1xx"
     "${TT_METAL_ROOT}/tt_metal/hw/inc"
     "${TT_METAL_ROOT}/tt_metal/hw/inc/hostdev"
     "${TT_METAL_ROOT}/tt_metal/hw/inc/internal/tt-1xx/blackhole"
@@ -88,7 +85,8 @@ target_include_directories(tt_foil_llrt INTERFACE
     "${TT_METAL_ROOT}/tt_metal/api"
     "${TT_METAL_ROOT}/tt_metal/api/tt-metalium"
     "${TT_METAL_ROOT}/tt_metal/impl"
-    # tt-metal build tree (for installed headers: tt_stl, tt-logger, enchantum, fmt)
+    # tt-metal build tree (for installed headers: tt_stl, tt-logger,
+    # enchantum, fmt, spdlog)
     "${TT_METAL_BUILD_DIR}/include"
     # tt_stl source tree (enum.hpp and others not installed to build/include)
     "${TT_METAL_ROOT}/tt_stl"
@@ -98,5 +96,23 @@ target_compile_definitions(tt_foil_llrt INTERFACE
     SPDLOG_FMT_EXTERNAL
 )
 
-# Also create a HAL::1xx alias for compatibility with existing code
-add_library(HAL::1xx ALIAS tt_metal_prebuilt)
+# tt_foil_hal_local: static lib with HAL sources compiled from the tt-metal
+# tree. Lives separately from tt_foil so include dirs and properties stay
+# focused; tt_foil PRIVATE-links it.
+add_library(tt_foil_hal_local STATIC
+    "${TT_METAL_ROOT}/tt_metal/llrt/hal.cpp"
+    "${TT_METAL_ROOT}/tt_metal/llrt/hal/tt-1xx/hal_1xx_common.cpp"
+    "${TT_METAL_ROOT}/tt_metal/llrt/hal/tt-1xx/blackhole/bh_hal.cpp"
+    "${TT_METAL_ROOT}/tt_metal/llrt/hal/tt-1xx/blackhole/bh_hal_tensix.cpp"
+    "${TT_METAL_ROOT}/tt_metal/llrt/hal/tt-1xx/blackhole/bh_hal_active_eth.cpp"
+    "${TT_METAL_ROOT}/tt_metal/llrt/hal/tt-1xx/blackhole/bh_hal_idle_eth.cpp"
+    "${TT_METAL_ROOT}/tt_metal/llrt/hal/tt-1xx/blackhole/bh_hal_dram.cpp"
+    # Blackhole-only build: stub out the WH/QA initialisers that hal.cpp
+    # still references via its arch switch.
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/llrt_local/hal_stubs.cpp"
+)
+target_link_libraries(tt_foil_hal_local PUBLIC tt_foil_llrt)
+set_target_properties(tt_foil_hal_local PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# Convenience alias to match existing references.
+add_library(HAL::1xx ALIAS tt_foil_hal_local)
