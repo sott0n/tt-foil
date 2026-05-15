@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 // UMD xy_pair = tt::tt_metal::CoreCoord (needed as return type below)
 #include <umd/device/types/xy_pair.hpp>
@@ -81,6 +82,11 @@ struct Device {
     // DRAM bump allocator (channel 0)
     DramAllocator dram_alloc;
 
+    // Cores that were cold-booted at device_open time. kernel_load() only
+    // accepts cores listed here. Order matches the `cores` argument to
+    // open_device() — preserved so error messages can refer back to it.
+    std::vector<CoreCoord> booted_cores;
+
     static uint64_t core_key(uint32_t x, uint32_t y) { return (static_cast<uint64_t>(x) << 32) | y; }
 
     L1Allocator& l1_for_core(const CoreCoord& logical_core);
@@ -94,10 +100,14 @@ struct Device {
     Device& operator=(const Device&) = delete;
 };
 
-// Open device via tt-metal CreateDevice() (handles FW init).
-std::unique_ptr<Device> device_open(int pcie_device_index, const std::string& firmware_dir);
+// Open UMD + cold-boot the requested Tensix cores. `cores` must contain at
+// least one entry. Throws std::runtime_error on any per-core boot failure.
+std::unique_ptr<Device> device_open(
+    int pcie_device_index,
+    const std::string& firmware_dir,
+    std::vector<CoreCoord> cores);
 
-// Close device via tt-metal CloseDevice().
+// Tear down: drop owned UMD cluster + HAL, clear pointers.
 void device_close(Device& dev);
 
 // Resolve a logical Tensix core to a virtual coordinate understood by UMD.

@@ -17,9 +17,12 @@ namespace tt::foil {
 
 // ---- Device ----
 
-std::shared_ptr<Device> open_device(int pcie_device_index, const std::string& firmware_dir) {
+std::shared_ptr<Device> open_device(
+    int pcie_device_index,
+    const std::string& firmware_dir,
+    std::vector<CoreCoord> cores) {
     return std::shared_ptr<Device>(
-        device_open(pcie_device_index, firmware_dir).release(),
+        device_open(pcie_device_index, firmware_dir, std::move(cores)).release(),
         [](Device* d) { device_close(*d); delete d; });
 }
 

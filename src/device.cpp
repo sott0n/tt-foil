@@ -113,9 +113,19 @@ static tt::umd::CoreCoord soc_logical_to_translated(
     return soc_desc.translate_coord_to(logical, tt::CoordSystem::TRANSLATED);
 }
 
-std::unique_ptr<Device> device_open(int pcie_device_index, const std::string& /*firmware_dir*/) {
+std::unique_ptr<Device> device_open(
+    int pcie_device_index,
+    const std::string& /*firmware_dir*/,
+    std::vector<CoreCoord> cores) {
+
+    if (cores.empty()) {
+        throw std::runtime_error(
+            "tt-foil: device_open requires at least one Tensix core to boot");
+    }
+
     auto dev = std::make_unique<Device>();
     dev->chip_id = static_cast<uint32_t>(pcie_device_index);
+    dev->booted_cores = cores;
 
     // ---------------------------------------------------------------------
     // B3-2: own umd::Cluster directly. Defaults mirror what
@@ -184,36 +194,52 @@ std::unique_ptr<Device> device_open(int pcie_device_index, const std::string& /*
     dev->dram_alloc = DramAllocator{dram_base, dram_base, dram_base + dram_size};
 
     // ---------------------------------------------------------------------
-    // Cold-boot logical (0,0). Other Tensix cores stay in whatever state
-    // they were in (typically reset on a fresh power-up). Multi-core boot
-    // can be added later by looping this block over a set of cores.
+    // Cold-boot every requested Tensix core. Sequential is fine for the
+    // small core counts an embedded runtime needs; total boot time is
+    // dominated by the per-core 100us INIT poll and a handful of NOC
+    // writes, well under a second for ~10 cores. tt-metal does this
+    // multicast for the full grid, which we don't need.
     // ---------------------------------------------------------------------
     auto fw = resolve_firmware_paths(
         // tt-metal source root is needed for auto-discovery; rtoptions is
-        // initialised lazily and may not have set its root_dir at this point,
-        // so honour TT_METAL_RUNTIME_ROOT explicitly with a sensible default.
+        // initialised lazily and may not have set its root_dir at this
+        // point, so honour TT_METAL_RUNTIME_ROOT explicitly with a sensible
+        // default.
         []() -> std::string {
             if (const char* p = std::getenv("TT_METAL_RUNTIME_ROOT")) return p;
             return "/home/kyamaguchi/tt-metal";
         }());
 
-    constexpr uint32_t kLogX = 0, kLogY = 0;
-    auto core = soc_logical_to_translated(soc_desc, kLogX, kLogY);
+    // Pass 1: writes + BRISC deassert per core. The deasserts could be
+    // batched after pass 1 finishes if we wanted maximum parallelism in
+    // firmware boot, but keeping them inline keeps the failure modes easy
+    // to attribute to a specific core.
+    for (const auto& logical : cores) {
+        auto core = soc_logical_to_translated(soc_desc, logical.x, logical.y);
 
-    assert_tensix_reset(*dev->umd_driver, dev->chip_id, core);
+        assert_tensix_reset(*dev->umd_driver, dev->chip_id, core);
 
-    load_tensix_firmware(*dev->umd_driver, *dev->hal, dev->chip_id, core, fw.brisc,  kBrisc);
-    load_tensix_firmware(*dev->umd_driver, *dev->hal, dev->chip_id, core, fw.ncrisc, kNcrisc);
-    load_tensix_firmware(*dev->umd_driver, *dev->hal, dev->chip_id, core, fw.trisc0, kTrisc0);
-    load_tensix_firmware(*dev->umd_driver, *dev->hal, dev->chip_id, core, fw.trisc1, kTrisc1);
-    load_tensix_firmware(*dev->umd_driver, *dev->hal, dev->chip_id, core, fw.trisc2, kTrisc2);
+        load_tensix_firmware(*dev->umd_driver, *dev->hal, dev->chip_id, core, fw.brisc,  kBrisc);
+        load_tensix_firmware(*dev->umd_driver, *dev->hal, dev->chip_id, core, fw.ncrisc, kNcrisc);
+        load_tensix_firmware(*dev->umd_driver, *dev->hal, dev->chip_id, core, fw.trisc0, kTrisc0);
+        load_tensix_firmware(*dev->umd_driver, *dev->hal, dev->chip_id, core, fw.trisc1, kTrisc1);
+        load_tensix_firmware(*dev->umd_driver, *dev->hal, dev->chip_id, core, fw.trisc2, kTrisc2);
 
-    zero_fill_bank_tables       (*dev->umd_driver, *dev->hal, dev->chip_id, core);
-    init_tensix_core_info_minimal(*dev->umd_driver, *dev->hal, dev->chip_id, core, kLogX, kLogY);
-    init_tensix_mailboxes        (*dev->umd_driver, *dev->hal, dev->chip_id, core);
+        zero_fill_bank_tables        (*dev->umd_driver, *dev->hal, dev->chip_id, core);
+        init_tensix_core_info_minimal(*dev->umd_driver, *dev->hal, dev->chip_id, core, logical.x, logical.y);
+        init_tensix_mailboxes        (*dev->umd_driver, *dev->hal, dev->chip_id, core);
 
-    deassert_brisc_reset(*dev->umd_driver, dev->chip_id, core);
-    wait_tensix_init_done(*dev->umd_driver, *dev->hal, dev->chip_id, core, /*timeout_ms=*/10000);
+        deassert_brisc_reset(*dev->umd_driver, dev->chip_id, core);
+    }
+
+    // Pass 2: wait for each core's BRISC firmware to reach RUN_MSG_DONE.
+    // Separating the wait from the deassert lets all cores boot in
+    // parallel on the device side; we just collect their completions.
+    for (const auto& logical : cores) {
+        auto core = soc_logical_to_translated(soc_desc, logical.x, logical.y);
+        wait_tensix_init_done(
+            *dev->umd_driver, *dev->hal, dev->chip_id, core, /*timeout_ms=*/10000);
+    }
 
     return dev;
 }

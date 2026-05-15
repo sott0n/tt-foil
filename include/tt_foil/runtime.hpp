@@ -9,6 +9,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace tt::foil {
 
@@ -24,6 +25,7 @@ struct Kernel;
 struct CoreCoord {
     uint32_t x{0};
     uint32_t y{0};
+    bool operator==(const CoreCoord& o) const { return x == o.x && y == o.y; }
 };
 
 // ---------------------------------------------------------------------------
@@ -48,13 +50,20 @@ struct Buffer {
 // Device
 // ---------------------------------------------------------------------------
 
-// Open the Nth PCIe Blackhole chip (0-indexed).
+// Open the Nth PCIe Blackhole chip (0-indexed) and cold-boot the requested
+// Tensix cores. `cores` defaults to a single core at logical (0,0) for
+// backwards compatibility with v1/v2 callers. Pass additional CoreCoord
+// entries (e.g. {{0,0}, {0,1}}) to boot multiple cores at open time —
+// kernels can only be loaded on cores listed here.
+//
 // firmware_dir: directory containing pre-built management firmware ELFs
 //   (brisc.elf, ncrisc.elf, trisc0.elf, trisc1.elf, trisc2.elf).
-// Throws std::runtime_error on failure.
+// Throws std::runtime_error on failure (chip missing, firmware ELFs not
+// found, INIT poll timeout).
 std::shared_ptr<Device> open_device(
     int pcie_device_index = 0,
-    const std::string& firmware_dir = "");
+    const std::string& firmware_dir = "",
+    std::vector<CoreCoord> cores = {{0, 0}});
 
 // Close the device explicitly before the shared_ptr goes out of scope.
 // Asserts resets on all cores and tears down UMD.

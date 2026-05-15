@@ -35,6 +35,12 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_brisc_ncrisc PRIVATE TT::Foil)
     add_test(NAME test_brisc_ncrisc COMMAND test_brisc_ncrisc)
 
+    # Multi-core boot via device_open (v3-1)
+    add_executable(test_multi_core_boot test_multi_core_boot.cpp)
+    target_include_directories(test_multi_core_boot PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(test_multi_core_boot PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_multi_core_boot COMMAND test_multi_core_boot)
+
     # UMD direct open + L1 round trip — opens umd::Cluster directly, no
     # tt-metal symbols required.
     add_executable(test_umd_open test_umd_open.cpp)
