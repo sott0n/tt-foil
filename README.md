@@ -26,6 +26,43 @@ small set of Tensix cores.
 | Target hardware               | WH, BH, Quasar             | Blackhole only                         |
 | Runtime dynamic deps          | `libtt_metal.so`, UMD, ... | UMD only (`libtt-umd.so`)              |
 
+## Dependencies
+
+**At runtime, the only dynamic dependency is `libtt-umd.so`.** Everything
+else (HAL, llrt subset, ELF parser) is statically linked into tt-foil. No
+`libtt_metal.so`, no `MetalContext`, no `tt::Cluster`.
+
+tt-metal is needed at **build time** (for headers, the SFPI cross-compiler,
+HAL .cpp sources, and the UMD library itself), and currently also at
+**first-run time** because the firmware ELFs (`brisc.elf` etc.) come from
+tt-metal's JIT cache — see [Firmware ELF
+selection](#firmware-elf-selection). Removing that first-run requirement
+(having tt-foil build firmware itself, SFPI-direct) is a known follow-up.
+
+```
+                tt-metal repo
+                ──────────────────
+build inputs ──→  source tree (.cc, .h, .ld)
+                  built artifacts:
+                    - SFPI compiler (riscv-tt-elf-g++)
+                    - libtt-umd.so + UMD headers
+                    - HAL .cpp           (compiled into tt_foil_hal_local.a)
+                    - vendored sources   (ll_api::memory, tt_elffile, dev_msgs)
+
+                ↓ (CMake)
+
+build outputs ──→ libtt_foil.a              ← static
+                  libtt_foil_hal_local.a    ← static
+                  test binaries / examples
+
+                ↓ (run)
+
+runtime deps  ──→ libtt-umd.so              ← only dynamic dep
+                  firmware ELFs from        ← from tt-metal's JIT cache
+                  ~/.cache/tt-metal-cache/    (today; tt-foil-built post-L)
+                  user kernel ELFs          ← from your build_kernels.sh
+```
+
 ## Status
 
 | Phase      | Highlight                                                       |
