@@ -58,16 +58,56 @@
 // — which sits between those two waypoints in brisc.cc — does not
 // produce visible writes to cb_interface[].
 //
-// Hypotheses left to investigate:
-//   - The pre-built brisc.elf we cold-boot was built with different
-//     defines than the source on this branch (DEBUG_NULL_KERNELS?
-//     compute_kernel_sentinel? something that no-ops the setup).
-//     Cross-check via objdump around 0x3f70 in brisc.elf.
-//   - cb_interface writes go through some shadowing memory map
-//     (unlikely on Blackhole local data memory but worth ruling out by
-//     checking if firmware's lui/sw targets a different address than
-//     what `nm` reports).
-//   - Cold-boot is missing a step that primes BRISC's data memory.
+// Disassembly verification (v4-6d, this round):
+//   In the pre-built brisc.elf, setup_local_cb_read_write_interfaces is
+//   present and inlined at 0x3f70. The store-side address calculation is:
+//       3f70: lui  a3, 0xffb00
+//       3f80: addi a0, a3, 1132    # = 0xffb0046c = &cb_interface[0]
+//   And the inner loop body at 0x3f88 emits exactly the seven stores
+//   matching LocalCBInterface offsets:
+//       sw zero, 24(a0)   tiles_acked_received_init
+//       sw a3,    0(a0)   fifo_size
+//       sw a3,    4(a0)   fifo_limit   (= fifo_addr + fifo_size)
+//       sw a2,   20(a0)   fifo_wr_ptr  (= fifo_addr)
+//       sw a6,   12(a0)   fifo_num_pages
+//       sw a2,   16(a0)   fifo_rd_ptr  (= fifo_addr)
+//       sw a7,    8(a0)   fifo_page_size
+//   So the binary targets the exact same 0xffb0046c that our kernel
+//   reads from with inline-asm `lw 0(t0)`. The values to write (loaded
+//   from the L1 blob via t3) and the mask shifting are correct.
+//
+//   Branch leading to the setup is at 0x3f64:
+//       beqz a1, 4438       # a1 = enables & 1
+//   and 0x4438 is the else-branch (setup_remote only, no BRISC kernel
+//   jump). Since our BRISC kernel does run, the branch isn't taken, so
+//   setup is reached. The post-setup path (upper-half = no-op for
+//   mask_upper=0, setup_remote = no-op for end_cb_index=64, no barrier,
+//   start_ncrisc_kernel_run = no-op on Blackhole, kernel jump at 0x40a0)
+//   leaves cb_interface[] untouched.
+//
+//   Conclusion: at the binary level, the firmware should write
+//   cb_interface[0] and cb_interface[16]. But on the device the writes
+//   are not visible to the BRISC kernel that runs ~hundreds of
+//   instructions later in the same core. We've ruled out:
+//     - Wrong store offsets (match LocalCBInterface)
+//     - Wrong store address (match cb_interface symbol)
+//     - Setup being skipped (kernel jump implies setup ran)
+//     - Kernel-side clobber (do_crt1 only touches [0xffb00c70..0xffb00c88))
+//
+// Hypotheses still on the table:
+//   - The pre-built brisc.elf comes from a tt-metal revision that
+//     diverges from the source on this branch — some later code on the
+//     same kernel-launch path performs an additional store loop that
+//     re-zeros cb_interface[]. (Worth grepping the brisc.elf binary
+//     for stores into 0xffb004... ranges past the setup loop.)
+//   - tt-metal's CreateDevice runs a step we don't (some additional
+//     mailbox or scratch init that primes the firmware's BSS or stops
+//     it from re-zeroing it).
+//   - BRISC's local data memory has some posted-write / coherency
+//     quirk on tt-bh-tensix that drops these specific writes. Unlikely
+//     but worth ruling out by writing the same values from BRISC
+//     kernel-side (we confirmed kernel-side writes survive; firmware
+//     writes don't).
 //
 // Until this is resolved the test is gated under TT_FOIL_HW_TESTS and
 // will time out at first launch.
