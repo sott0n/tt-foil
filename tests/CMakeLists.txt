@@ -76,6 +76,13 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_add_tiles PRIVATE TT::Foil tt_foil_llrt)
     add_test(NAME test_add_tiles COMMAND test_add_tiles)
 
+    # Row-broadcast bias add (v5.7) — out[i,j] = in[i,j] + bias[0,j].
+    # The Linear/FC layer bias-add primitive.
+    add_executable(test_bias_add test_bias_add.cpp)
+    target_include_directories(test_bias_add PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(test_bias_add PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_bias_add COMMAND test_bias_add)
+
     # Single-tile bf16 matmul (v5-1) — full 5-RISC + 2-input + matmul_tiles
     add_executable(test_matmul_1tile test_matmul_1tile.cpp)
     target_include_directories(test_matmul_1tile PRIVATE "${CMAKE_SOURCE_DIR}/src")
