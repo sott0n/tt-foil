@@ -25,6 +25,8 @@ small set of Tensix cores.
 | TRISC compute + Circular Buffers | Yes                     | Yes (v4)                               |
 | Target hardware               | WH, BH, Quasar             | Blackhole only                         |
 | Runtime dynamic deps          | `libtt_metal.so`, UMD, ... | UMD only (`libtt-umd.so`)              |
+| Runtime image on disk         | ~27 MB shared libs          | **~5 MB** (binary + libtt-umd.so)      |
+| Test binary (stripped)        | n/a (linked against .so)    | **~600 KB**                            |
 
 ## Dependencies
 
@@ -64,6 +66,31 @@ runtime deps  ──→ libtt-umd.so              ← only dynamic dep
                                               dependency)
                   user kernel ELFs          ← from your build_kernels.sh
 ```
+
+### Footprint
+
+Measured against `tests/test_matmul_1tile` (v5-1, the largest test
+binary so far — full 5-RISC + 2 input CBs + matmul), on Blackhole x86_64
+host:
+
+| Artifact                                        | Size      |
+| ----------------------------------------------- | --------- |
+| `libtt_foil.a` (static, all of tt-foil's logic) | **6.7 MB**|
+| `libtt_foil_hal_local.a` (HAL .cpp, static)     | 4.2 MB    |
+| Test binary `test_matmul_1tile` (stripped)      | **633 KB**|
+| Test binary (unstripped, with debug)            | 820 KB    |
+| `libtt-umd.so.0` (the only runtime dynamic dep) | 4.3 MB    |
+| **Total runtime image on disk** (binary + UMD)  | **~5 MB** |
+
+For comparison, an equivalent tt-metal test binary loads
+`libtt_metal.so` (22 MB) **and** `libtt-umd.so` (4.3 MB) at runtime —
+about **27 MB** of TT-specific shared objects, ~5–6× the tt-foil
+footprint. tt-foil's own static lib is 6.7 MB because it bundles HAL +
+llrt subset; the *image actually mapped to run a kernel* is a single
+~600 KB binary plus libtt-umd.so.
+
+Source-line count: ~700 lines of own runtime code + ~1.2K lines
+vendored from tt-metal (`tt_memory.cpp`, `tt_elffile.cpp`).
 
 ## Status
 
