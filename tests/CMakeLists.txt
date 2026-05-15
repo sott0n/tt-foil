@@ -64,6 +64,12 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_tile_copy PRIVATE TT::Foil tt_foil_llrt)
     add_test(NAME test_tile_copy COMMAND test_tile_copy)
 
+    # Single-tile bf16 matmul (v5-1) — full 5-RISC + 2-input + matmul_tiles
+    add_executable(test_matmul_1tile test_matmul_1tile.cpp)
+    target_include_directories(test_matmul_1tile PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(test_matmul_1tile PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_matmul_1tile COMMAND test_matmul_1tile)
+
     # Multi-core boot via device_open (v3-1)
     add_executable(test_multi_core_boot test_multi_core_boot.cpp)
     target_include_directories(test_multi_core_boot PRIVATE "${CMAKE_SOURCE_DIR}/src")
