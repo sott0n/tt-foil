@@ -141,6 +141,28 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_matmul_4x2 PRIVATE TT::Foil tt_foil_llrt)
     add_test(NAME test_matmul_4x2 COMMAND test_matmul_4x2)
 
+    # 1×1 convolution (v7-1) — implemented as a matmul over the
+    # (C_in, H*W) reshape. Kernel ELFs are bit-identical to matmul_dram;
+    # the test handles the CHW ↔ matrix layout dance. Tile counts:
+    #   MM_MT_C1 ≡ ceil(C_out / 32)
+    #   MM_KT_C1 ≡ ceil(C_in  / 32)
+    #   MM_NT_C1 ≡ ceil(H*W   / 32)
+    if(NOT DEFINED MM_MT_C1)
+        set(MM_MT_C1 2)
+    endif()
+    if(NOT DEFINED MM_KT_C1)
+        set(MM_KT_C1 2)
+    endif()
+    if(NOT DEFINED MM_NT_C1)
+        set(MM_NT_C1 2)
+    endif()
+    add_executable(test_conv_1x1 test_conv_1x1.cpp)
+    target_include_directories(test_conv_1x1 PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_compile_definitions(test_conv_1x1 PRIVATE
+        MM_MT=${MM_MT_C1} MM_KT=${MM_KT_C1} MM_NT=${MM_NT_C1})
+    target_link_libraries(test_conv_1x1 PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_conv_1x1 COMMAND test_conv_1x1)
+
     # Single-tile bf16 matmul (v5-1) — full 5-RISC + 2-input + matmul_tiles
     add_executable(test_matmul_1tile test_matmul_1tile.cpp)
     target_include_directories(test_matmul_1tile PRIVATE "${CMAKE_SOURCE_DIR}/src")
