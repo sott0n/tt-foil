@@ -163,6 +163,27 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_conv_1x1 PRIVATE TT::Foil tt_foil_llrt)
     add_test(NAME test_conv_1x1 COMMAND test_conv_1x1)
 
+    # 3×3 convolution via im2col → matmul (v7-2). Tile counts:
+    #   MM_MT_C3 ≡ ceil(C_out         / 32)
+    #   MM_KT_C3 ≡ ceil(C_in * 9      / 32)   (9 odd ⇒ C_in%32==0 ⇒ K-tile-aligned)
+    #   MM_NT_C3 ≡ ceil(H * W         / 32)
+    # Default: C_in=C_out=32, H=W=8 → MM_MT=1, MM_KT=9, MM_NT=2.
+    if(NOT DEFINED MM_MT_C3)
+        set(MM_MT_C3 1)
+    endif()
+    if(NOT DEFINED MM_KT_C3)
+        set(MM_KT_C3 9)
+    endif()
+    if(NOT DEFINED MM_NT_C3)
+        set(MM_NT_C3 2)
+    endif()
+    add_executable(test_conv_3x3 test_conv_3x3.cpp)
+    target_include_directories(test_conv_3x3 PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_compile_definitions(test_conv_3x3 PRIVATE
+        MM_MT=${MM_MT_C3} MM_KT=${MM_KT_C3} MM_NT=${MM_NT_C3})
+    target_link_libraries(test_conv_3x3 PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_conv_3x3 COMMAND test_conv_3x3)
+
     # Single-tile bf16 matmul (v5-1) — full 5-RISC + 2-input + matmul_tiles
     add_executable(test_matmul_1tile test_matmul_1tile.cpp)
     target_include_directories(test_matmul_1tile PRIVATE "${CMAKE_SOURCE_DIR}/src")
