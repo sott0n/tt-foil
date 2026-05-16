@@ -83,6 +83,20 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_bias_add PRIVATE TT::Foil tt_foil_llrt)
     add_test(NAME test_bias_add COMMAND test_bias_add)
 
+    # Row-sharded DRAM matmul across 2 Tensix cores (v6-1).  Per-core
+    # slice height is MM_MT_2C (default 1); the test sees a global M of
+    # 2 × MM_MT_2C tiles.  Kernel ELFs and the test must agree on the
+    # per-core triple (MM_MT_2C, MM_KT, MM_NT).
+    if(NOT DEFINED MM_MT_2C)
+        set(MM_MT_2C 1)
+    endif()
+    add_executable(test_matmul_2core test_matmul_2core.cpp)
+    target_include_directories(test_matmul_2core PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_compile_definitions(test_matmul_2core PRIVATE
+        MM_MT=${MM_MT_2C} MM_KT=${MM_KT} MM_NT=${MM_NT})
+    target_link_libraries(test_matmul_2core PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_matmul_2core COMMAND test_matmul_2core)
+
     # Single-tile bf16 matmul (v5-1) — full 5-RISC + 2-input + matmul_tiles
     add_executable(test_matmul_1tile test_matmul_1tile.cpp)
     target_include_directories(test_matmul_1tile PRIVATE "${CMAKE_SOURCE_DIR}/src")
