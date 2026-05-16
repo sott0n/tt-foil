@@ -97,6 +97,22 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_matmul_2core PRIVATE TT::Foil tt_foil_llrt)
     add_test(NAME test_matmul_2core COMMAND test_matmul_2core)
 
+    # 2×2 grid block-sharded DRAM matmul (v6-2). Per-core slice is
+    # MM_MT_2x2 × MM_NT_2x2 tiles; global problem is 2x larger in each
+    # of M and N. Kernel ELFs and test must agree on the per-core triple.
+    if(NOT DEFINED MM_MT_2x2)
+        set(MM_MT_2x2 1)
+    endif()
+    if(NOT DEFINED MM_NT_2x2)
+        set(MM_NT_2x2 1)
+    endif()
+    add_executable(test_matmul_2x2 test_matmul_2x2.cpp)
+    target_include_directories(test_matmul_2x2 PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_compile_definitions(test_matmul_2x2 PRIVATE
+        MM_MT=${MM_MT_2x2} MM_KT=${MM_KT} MM_NT=${MM_NT_2x2})
+    target_link_libraries(test_matmul_2x2 PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_matmul_2x2 COMMAND test_matmul_2x2)
+
     # Single-tile bf16 matmul (v5-1) — full 5-RISC + 2-input + matmul_tiles
     add_executable(test_matmul_1tile test_matmul_1tile.cpp)
     target_include_directories(test_matmul_1tile PRIVATE "${CMAKE_SOURCE_DIR}/src")
