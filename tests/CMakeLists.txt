@@ -113,6 +113,19 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_matmul_2x2 PRIVATE TT::Foil tt_foil_llrt)
     add_test(NAME test_matmul_2x2 COMMAND test_matmul_2x2)
 
+    # 2-core row-shard with B forwarded over NOC (v6-3). B read from
+    # DRAM exactly once by the producer core, NOC-pushed to consumer.
+    # Same per-core triple convention as v6-1 (MM_MT_2CMC defaults to 1).
+    if(NOT DEFINED MM_MT_2CMC)
+        set(MM_MT_2CMC 1)
+    endif()
+    add_executable(test_matmul_2core_mcast test_matmul_2core_mcast.cpp)
+    target_include_directories(test_matmul_2core_mcast PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_compile_definitions(test_matmul_2core_mcast PRIVATE
+        MM_MT=${MM_MT_2CMC} MM_KT=${MM_KT} MM_NT=${MM_NT})
+    target_link_libraries(test_matmul_2core_mcast PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_matmul_2core_mcast COMMAND test_matmul_2core_mcast)
+
     # Single-tile bf16 matmul (v5-1) — full 5-RISC + 2-input + matmul_tiles
     add_executable(test_matmul_1tile test_matmul_1tile.cpp)
     target_include_directories(test_matmul_1tile PRIVATE "${CMAKE_SOURCE_DIR}/src")
