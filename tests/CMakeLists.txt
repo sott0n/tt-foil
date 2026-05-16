@@ -126,6 +126,21 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_matmul_2core_mcast PRIVATE TT::Foil tt_foil_llrt)
     add_test(NAME test_matmul_2core_mcast COMMAND test_matmul_2core_mcast)
 
+    # 4×2 grid block-sharded DRAM matmul (v6-4) — 8 cores total. Same
+    # per-core triple convention as v6-2; this is the M-axis scale-up.
+    if(NOT DEFINED MM_MT_4x2)
+        set(MM_MT_4x2 1)
+    endif()
+    if(NOT DEFINED MM_NT_4x2)
+        set(MM_NT_4x2 1)
+    endif()
+    add_executable(test_matmul_4x2 test_matmul_4x2.cpp)
+    target_include_directories(test_matmul_4x2 PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_compile_definitions(test_matmul_4x2 PRIVATE
+        MM_MT=${MM_MT_4x2} MM_KT=${MM_KT} MM_NT=${MM_NT_4x2})
+    target_link_libraries(test_matmul_4x2 PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_matmul_4x2 COMMAND test_matmul_4x2)
+
     # Single-tile bf16 matmul (v5-1) — full 5-RISC + 2-input + matmul_tiles
     add_executable(test_matmul_1tile test_matmul_1tile.cpp)
     target_include_directories(test_matmul_1tile PRIVATE "${CMAKE_SOURCE_DIR}/src")
