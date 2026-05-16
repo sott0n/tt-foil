@@ -113,6 +113,44 @@ packing on the host. Producer kernels receive the result split into hi/lo
 `get_noc_addr_from_logical_xy` from a kernel** — the worker_logical_to_virtual
 scratch is zero-filled, so it would resolve to (0,0).
 
+### BRISC writes to peer L1 must use NOC=1 (v6-3 lesson)
+BRISC's default `noc_index = 0` is the **read** direction on Blackhole.
+`noc_async_write` / `noc_async_write_one_packet` issued from BRISC on
+NOC 0 to a peer Tensix L1 endpoint stalls in `noc_async_write_barrier`
+forever — the ACK never returns. (4-byte writes occasionally complete
+but flakily; anything bigger always hangs.) Pass `noc=1` (NCRISC's
+default writer NOC) explicitly:
+```cpp
+constexpr uint8_t kWriteNoc = 1;
+noc_async_write_one_packet(src, dst_noc_addr, size, kWriteNoc);
+noc_async_write_barrier(kWriteNoc);
+```
+Reads (`noc_async_read`) stay on the default NOC 0 from BRISC. NCRISC,
+by contrast, defaults to NOC 1 for both directions and the
+matmul_dram-style writer kernels work without passing an explicit
+`noc=...`. See `examples/matmul_2core_mcast/kernels/reader_producer.cpp`
+for the working pattern.
+
+### Tile-stream offset math: `(kt * Nt + nt)`, not `kt` (v6-3 lesson)
+For DRAM-resident B (laid out as Kt rows × Nt columns of tiles,
+kt-major), the (kt, nt) tile is at offset `(kt * Nt + nt) * kTileBytes`.
+Reading at `kt * kTileBytes` only is a **silent bug** when Nt > 1: half
+the matmul iterations grab the right B tile, half grab a wrong one, and
+the resulting outputs look "systematically scaled" rather than random
+— which makes the error look like a NOC/cache issue and burns hours.
+Cross-check any new reader against `examples/matmul_dram/kernels/
+reader.cpp`'s `b_dram_base + (kt * Nt + nt) * kTileBytes` form before
+running the test.
+
+### NOC checkpoint pattern for debugging
+When a producer/consumer kernel hangs and you can't tell where, give
+the kernel a small (16 × uint32_t) L1 scratch via RTA and have it write
+fixed-sentinel values (`0x11111111`, `0x22222222`, …) at each phase
+boundary. After the timeout, `read_buffer` the scratch from the host
+and look at the last non-zero entry. That's how v6-3's "consumer
+staging bytes match B but matmul output is wrong" insight was found
+quickly — confirms NOC fan-out works and the bug is downstream.
+
 ### CB blob covers [0..max_idx], not [min_idx..max_idx]
 Firmware's `setup_local_cb_read_write_interfaces` walks descriptors at
 `cb_l1_base + cb_id * 16` and indexes them by absolute CB id. The blob
@@ -251,6 +289,19 @@ relocations.
 `get_noc_addr_from_logical_xy` from a kernel. The logical→virtual scratch is
 zero-filled. Use the host-side `make_noc_unicast_addr` and pass the 64-bit
 result via RTA instead.
+
+**"BRISC NOC write to peer L1 hangs in `noc_async_write_barrier`"** —
+on Blackhole, BRISC's default NOC 0 doesn't reliably handle writes to
+peer Tensix L1 (ACK never returns). Pass `noc=1` explicitly to
+`noc_async_write_one_packet` / `noc_async_write` and to the matching
+`noc_async_write_barrier`. Reads stay on NOC 0. See the "BRISC writes
+to peer L1 must use NOC=1" invariant above.
+
+**"Multi-core matmul output is systematically wrong by a constant
+factor"** — your reader's B-tile offset probably has `kt` instead of
+`(kt * Nt + nt)`. With Nt > 1 the reader grabs the wrong B tile for
+some (mt, nt) iterations, and the output looks scaled rather than
+random. Diff against `examples/matmul_dram/kernels/reader.cpp`.
 
 **"TRISC compute kernel won't compile: `impossible constraint in 'asm'`"** —
 you're using `-Os`. Switch the TRISC build to `-O3`. tt-metal's `INSTRUCTION_WORD`
