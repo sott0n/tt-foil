@@ -30,42 +30,89 @@ small set of Tensix cores.
 
 ## Dependencies
 
-**At runtime, the only dynamic dependency is `libtt-umd.so`.** Everything
-else (HAL, llrt subset, ELF parser) is statically linked into tt-foil. No
-`libtt_metal.so`, no `MetalContext`, no `tt::Cluster`.
+**The headline:** tt-foil **needs tt-metal at build time only**. At
+runtime the binary has exactly one TT-specific dynamic dep —
+`libtt-umd.so`. No `libtt_metal.so`, no `MetalContext`, no
+`tt::Cluster`.
 
-tt-metal is needed only at **build time** (for headers, the SFPI
-cross-compiler, HAL .cpp sources, and the UMD library itself). tt-foil
-compiles the 5 RISC firmware ELFs (`brisc.elf`, `ncrisc.elf`,
-`trisc{0,1,2}.elf`) from the tt-metal source tree directly during its own
-CMake build, so **no prior tt-metal run is required** on the host. See
-[Firmware ELF selection](#firmware-elf-selection) for the resolution
-order.
+### Side-by-side at each phase
+
+|                       | tt-metal app                              | tt-foil app                             |
+| --------------------- | ----------------------------------------- | --------------------------------------- |
+| **Build inputs**      | tt-metal headers + libs                   | tt-metal headers + libs                 |
+| **Build output**      | your binary (links `libtt_metal.so`)      | your binary (statically holds tt-foil)  |
+| **Runtime TT deps**   | `libtt_metal.so` (22 MB) + UMD (4.3 MB)   | `libtt-umd.so` only (4.3 MB)            |
+| **Runtime image**     | ~27 MB                                    | **~5 MB**                               |
+
+### Phase diagram
 
 ```
-                tt-metal repo
-                ──────────────────
-build inputs ──→  source tree (.cc, .h, .ld)
-                  built artifacts:
-                    - SFPI compiler (riscv-tt-elf-g++)
-                    - libtt-umd.so + UMD headers
-                    - HAL .cpp           (compiled into tt_foil_hal_local.a)
-                    - vendored sources   (ll_api::memory, tt_elffile, dev_msgs)
-
-                ↓ (CMake)
-
-build outputs ──→ libtt_foil.a              ← static
-                  libtt_foil_hal_local.a    ← static
-                  test binaries / examples
-
-                ↓ (run)
-
-runtime deps  ──→ libtt-umd.so              ← only dynamic dep
-                  firmware ELFs from        ← built by tt-foil at CMake time
-                  <build>/firmware/           from tt-metal source (no JIT-cache
-                                              dependency)
-                  user kernel ELFs          ← from your build_kernels.sh
+┌─ BUILD TIME ────────────────────────────────── tt-metal is required here ─┐
+│                                                                           │
+│  tt-metal source tree                tt-metal build_Release/              │
+│  ┌───────────────────────────┐      ┌────────────────────────────────┐    │
+│  │ headers  (.h, .hpp)       │      │ libtt-umd.so        (.so)      │    │
+│  │ HAL      (.cpp)           │      │ libfmt.so           (.so)      │    │
+│  │ firmware (.cc, .ld)       │      │ SFPI g++   (cross compiler)    │    │
+│  │ ll_api/* (vendored .cpp)  │      └────────────────────────────────┘    │
+│  └───────────────────────────┘                                            │
+│             │                                  │                          │
+│             │  compile into tt-foil's          │  link libtt-umd /        │
+│             │  static libs + firmware ELFs     │  libfmt as deps          │
+│             ▼                                  ▼                          │
+│  ┌──────────────────────────────────────────────────────────────────┐     │
+│  │                       tt-foil CMake build                        │     │
+│  │                                                                  │     │
+│  │  src/*.cpp + HAL .cpp + vendored ll_api::memory + tt_elffile     │     │
+│  │     ──► libtt_foil.a + libtt_foil_hal_local.a       [STATIC]     │     │
+│  │                                                                  │     │
+│  │  tt_metal/hw/firmware/src/tt-1xx/{brisc,ncrisc,trisc}.cc         │     │
+│  │     ──► <build>/firmware/<risc>/<risc>.elf   ×5  [via SFPI g++]  │     │
+│  │                                                                  │     │
+│  │  tests/*.cpp + examples/build_kernels.sh                         │     │
+│  │     ──► test binaries  +  kernel ELFs               [STATIC]     │     │
+│  └──────────────────────────────────────────────────────────────────┘     │
+│                                                                           │
+└──────────  At this point tt-metal is no longer needed.  ─────────────────-┘
+                                                                            
+                                  │
+                                  ▼  ship just these to the target host:    
+                                                                            
+┌─ RUNTIME ──────────────────────────────────────── tt-metal NOT needed ───┐
+│                                                                          │
+│   your_test_binary  (~600 KB stripped)                                   │
+│   ┌──────────────────────────────────────────────────────────┐           │
+│   │ all of tt-foil statically linked in:                     │           │
+│   │   • src/* (device open, dispatch, ELF loader, NOC, ...)  │           │
+│   │   • HAL .cpp from tt-metal                               │           │
+│   │   • ll_api::memory + tt_elffile (vendored)               │           │
+│   │   • tile/bf16 helpers                                    │           │
+│   └──────────────────────────────────────────────────────────┘           │
+│                       │                                                  │
+│                       │ dynamic-links one TT-specific .so:               │
+│                       ▼                                                  │
+│              libtt-umd.so.0   (4.3 MB)   ──► PCIe / TLB / DMA            │
+│                                                  │                       │
+│                                                  ▼                       │
+│                                          Blackhole chip                  │
+│                                            • firmware ELFs (loaded into │
+│                                              Tensix L1 by tt-foil at    │
+│                                              device_open)               │
+│                                            • kernel ELFs    (loaded     │
+│                                              into Tensix L1 by tt-foil │
+│                                              at execute())             │
+│                                                                          │
+│   Not linked at all:                                                     │
+│     ✗ libtt_metal.so   ✗ MetalContext   ✗ tt::Cluster   ✗ JIT cache      │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
+
+In other words: tt-metal acts as a **build-time SDK** (source, HAL,
+firmware sources, SFPI compiler, and one shared lib called UMD). After
+the CMake build finishes, the only TT-related file that needs to ride
+along with the binary is `libtt-umd.so`. See [Firmware ELF
+selection](#firmware-elf-selection) for how the runtime resolves the
+self-built firmware ELFs.
 
 ### Footprint
 
