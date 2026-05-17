@@ -157,6 +157,7 @@ tt_foil_hw_test(test_conv_3x3_s2      test_conv_3x3_s2.cpp      "${EX}/conv_3x3_
 
 # ---- v8: peripheral ops (pool, BN fold) ----
 tt_foil_hw_test(test_maxpool_2x2      test_maxpool_2x2.cpp      "${EX}/maxpool_2x2/prebuilt")
+tt_foil_hw_test(test_brisc_col1_boot_diag test_brisc_col1_boot_diag.cpp "${EX}/add_two_numbers/prebuilt")
 
 # NOTE: The Phase B2 step-by-step tests (test_cold_boot, test_firmware_load,
 # test_mailbox_init, test_core_info_init, test_bank_tables_init) were
