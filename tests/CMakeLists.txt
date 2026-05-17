@@ -184,6 +184,26 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_conv_3x3 PRIVATE TT::Foil tt_foil_llrt)
     add_test(NAME test_conv_3x3 COMMAND test_conv_3x3)
 
+    # 2-core sharded 3×3 conv (v7-3) — H axis split between 2 cores;
+    # halo handled on the host by im2col'ing against the global X.
+    # MM_*_C32 are PER-CORE tile counts (defaults map to H_local=8,
+    # W=8, C_in=C_out=32 → global H=16, W=8).
+    if(NOT DEFINED MM_MT_C32)
+        set(MM_MT_C32 1)
+    endif()
+    if(NOT DEFINED MM_KT_C32)
+        set(MM_KT_C32 9)
+    endif()
+    if(NOT DEFINED MM_NT_C32)
+        set(MM_NT_C32 2)
+    endif()
+    add_executable(test_conv_3x3_2core test_conv_3x3_2core.cpp)
+    target_include_directories(test_conv_3x3_2core PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_compile_definitions(test_conv_3x3_2core PRIVATE
+        MM_MT=${MM_MT_C32} MM_KT=${MM_KT_C32} MM_NT=${MM_NT_C32})
+    target_link_libraries(test_conv_3x3_2core PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_conv_3x3_2core COMMAND test_conv_3x3_2core)
+
     # Single-tile bf16 matmul (v5-1) — full 5-RISC + 2-input + matmul_tiles
     add_executable(test_matmul_1tile test_matmul_1tile.cpp)
     target_include_directories(test_matmul_1tile PRIVATE "${CMAKE_SOURCE_DIR}/src")
