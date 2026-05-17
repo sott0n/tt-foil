@@ -204,6 +204,25 @@ if(TT_FOIL_HW_TESTS)
     target_link_libraries(test_conv_3x3_2core PRIVATE TT::Foil tt_foil_llrt)
     add_test(NAME test_conv_3x3_2core COMMAND test_conv_3x3_2core)
 
+    # 3×3 stride=2 conv (v7-4) — ResNet downsample. Strided im2col on
+    # the host; kernel is bit-identical to conv_3x3. Default config
+    # H_in=W_in=15 (derived from H_out=W_out=8, stride=2, pad=1).
+    if(NOT DEFINED MM_MT_CS2)
+        set(MM_MT_CS2 1)
+    endif()
+    if(NOT DEFINED MM_KT_CS2)
+        set(MM_KT_CS2 9)
+    endif()
+    if(NOT DEFINED MM_NT_CS2)
+        set(MM_NT_CS2 2)
+    endif()
+    add_executable(test_conv_3x3_s2 test_conv_3x3_s2.cpp)
+    target_include_directories(test_conv_3x3_s2 PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_compile_definitions(test_conv_3x3_s2 PRIVATE
+        MM_MT=${MM_MT_CS2} MM_KT=${MM_KT_CS2} MM_NT=${MM_NT_CS2})
+    target_link_libraries(test_conv_3x3_s2 PRIVATE TT::Foil tt_foil_llrt)
+    add_test(NAME test_conv_3x3_s2 COMMAND test_conv_3x3_s2)
+
     # Single-tile bf16 matmul (v5-1) — full 5-RISC + 2-input + matmul_tiles
     add_executable(test_matmul_1tile test_matmul_1tile.cpp)
     target_include_directories(test_matmul_1tile PRIVATE "${CMAKE_SOURCE_DIR}/src")
