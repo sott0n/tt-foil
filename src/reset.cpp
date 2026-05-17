@@ -4,6 +4,7 @@
 #include "reset.hpp"
 
 #include <chrono>
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -32,6 +33,13 @@ void deassert_brisc_reset(
     // umd::Cluster::deassert_risc_reset takes a RiscType bitmask. BRISC alone
     // is the right value on Blackhole; brisc firmware brings up NCRISC and
     // TRISCs from there.
+    //
+    // tt-metal performs an L1 membar across the chip *before* deasserting,
+    // to ensure every Tensix tile sees the firmware writes. Skip the barrier
+    // and BRISC on the second-and-later rows can fetch garbage and lock up
+    // before reaching its first mailbox write — observed symptom: go.signal
+    // stuck at RUN_MSG_INIT (0x40) at translated rows >= y=3.
+    driver.l1_membar(chip_id);
     driver.deassert_risc_reset(chip_id, core, tt::umd::RiscType::BRISC, /*staggered_start=*/true);
 }
 
@@ -59,10 +67,25 @@ void wait_tensix_init_done(
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start).count();
         if (timeout_ms > 0 && elapsed > timeout_ms) {
+            // Format sig as a real hex byte. std::to_string(uint8_t) prints in
+            // decimal and silently turns 0x40 into "64", which collides with
+            // 0x64 to the eye. Annotate the well-known RUN_MSG_* values too so
+            // the failure mode is obvious from one log line.
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "0x%02x", sig);
+            const char* meaning = "unknown";
+            switch (sig) {
+                case dev_msgs::RUN_MSG_DONE:                  meaning = "RUN_MSG_DONE"; break;
+                case dev_msgs::RUN_MSG_INIT:                  meaning = "RUN_MSG_INIT (firmware not yet up)"; break;
+                case dev_msgs::RUN_MSG_GO:                    meaning = "RUN_MSG_GO";   break;
+                case dev_msgs::RUN_MSG_RESET_READ_PTR:        meaning = "RUN_MSG_RESET_READ_PTR"; break;
+                case dev_msgs::RUN_MSG_RESET_READ_PTR_FROM_HOST: meaning = "RUN_MSG_RESET_READ_PTR_FROM_HOST"; break;
+                default: break;
+            }
             throw std::runtime_error(
                 "tt-foil: timeout waiting for firmware init to complete on core "
                 "(" + std::to_string(core.x) + "," + std::to_string(core.y) + "); "
-                "last go_msg.signal = 0x" + std::to_string(sig));
+                "last go_msg.signal = " + buf + " (" + meaning + ")");
         }
         std::this_thread::sleep_for(std::chrono::microseconds(100));
     }

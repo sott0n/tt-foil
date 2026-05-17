@@ -210,6 +210,33 @@ std::unique_ptr<Device> device_open(
             return "/home/kyamaguchi/tt-metal";
         }());
 
+    // Cluster-wide broadcast assert: parks every Tensix RISC across every
+    // chip in soft-reset before we touch L1. Without it, dispatch firmware
+    // left on neighbour cores from prior sessions keeps the column-1 (and
+    // possibly column-16) Tensix tiles producing/consuming NOC traffic, and
+    // our per-core BRISC boot at e.g. translated (1,3) never advances past
+    // RUN_MSG_INIT. tt-metal's Cluster::initialize() does the same broadcast
+    // (tt_cluster.cpp ~line 237: assert_risc_reset()).
+    dev->umd_driver->assert_risc_reset();
+
+    // Clear L1 to all-zero before loading firmware. tt-metal's
+    // `RiscFirmwareInitializer::clear_l1_state` does this for every Tensix
+    // core on the chip (worker_l1_size bytes, starting at address 0). Without
+    // it, BRISC firmware on rows it hasn't touched before (e.g., everything
+    // in translated column 1 above y=2 on Blackhole) reads leftover dispatch
+    // state from prior sessions during `do_crt1` / `noc_bank_table_init` and
+    // never reaches RUN_MSG_DONE.
+    {
+        const uint64_t worker_l1_size = soc_desc.worker_l1_size;
+        std::vector<uint8_t> zero_l1(worker_l1_size, 0);
+        for (const auto& logical : cores) {
+            auto core = soc_logical_to_translated(soc_desc, logical.x, logical.y);
+            dev->umd_driver->write_to_device(
+                zero_l1.data(), zero_l1.size(), dev->chip_id, core, /*addr=*/0);
+        }
+        dev->umd_driver->l1_membar(dev->chip_id);
+    }
+
     // Pass 1: writes + BRISC deassert per core. The deasserts could be
     // batched after pass 1 finishes if we wanted maximum parallelism in
     // firmware boot, but keeping them inline keeps the failure modes easy
