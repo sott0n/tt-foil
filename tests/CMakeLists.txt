@@ -63,6 +63,7 @@ tt_foil_unit_test(test_bump_alloc      test_bump_alloc.cpp)
 tt_foil_unit_test(test_risc_ids        test_risc_ids.cpp)
 tt_foil_unit_test(test_hal_standalone  test_hal_standalone.cpp)
 tt_foil_unit_test(test_firmware_paths  test_firmware_paths.cpp)
+tt_foil_unit_test(test_bn_fold         test_bn_fold.cpp)
 
 # =============================================================================
 # Hardware integration tests
@@ -153,6 +154,9 @@ tt_foil_hw_test(test_conv_3x3_2core   test_conv_3x3_2core.cpp   "${EX}/conv_3x3_
     "MM_MT=${MM_MT_C32}" "MM_KT=${MM_KT_C32}" "MM_NT=${MM_NT_C32}")
 tt_foil_hw_test(test_conv_3x3_s2      test_conv_3x3_s2.cpp      "${EX}/conv_3x3_s2/prebuilt"
     "MM_MT=${MM_MT_CS2}" "MM_KT=${MM_KT_CS2}" "MM_NT=${MM_NT_CS2}")
+
+# ---- v8: peripheral ops (pool, BN fold) ----
+tt_foil_hw_test(test_maxpool_2x2      test_maxpool_2x2.cpp      "${EX}/maxpool_2x2/prebuilt")
 
 # NOTE: The Phase B2 step-by-step tests (test_cold_boot, test_firmware_load,
 # test_mailbox_init, test_core_info_init, test_bank_tables_init) were
