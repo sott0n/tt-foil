@@ -1,297 +1,162 @@
 cmake_minimum_required(VERSION 3.21)
 
-# Unit test: ELF loading (no hardware required)
-add_executable(test_elf_load test_elf_load.cpp)
-target_include_directories(test_elf_load PRIVATE "${CMAKE_SOURCE_DIR}/src")
-target_link_libraries(test_elf_load PRIVATE TT::Foil tt_foil_llrt)
-add_test(NAME test_elf_load COMMAND test_elf_load)
-
-# Unit test: bump allocator (no hardware required)
-add_executable(test_bump_alloc test_bump_alloc.cpp)
-target_link_libraries(test_bump_alloc PRIVATE TT::Foil tt_foil_llrt)
-add_test(NAME test_bump_alloc COMMAND test_bump_alloc)
-
-# Unit test: RiscId → HAL index mapping (v4-1)
-add_executable(test_risc_ids test_risc_ids.cpp)
-target_include_directories(test_risc_ids PRIVATE "${CMAKE_SOURCE_DIR}/src")
-target_link_libraries(test_risc_ids PRIVATE TT::Foil tt_foil_llrt)
-add_test(NAME test_risc_ids COMMAND test_risc_ids)
-
-# Unit test: standalone HAL instantiation (Phase B3 probe)
-add_executable(test_hal_standalone test_hal_standalone.cpp)
-target_link_libraries(test_hal_standalone PRIVATE TT::Foil tt_foil_llrt)
-add_test(NAME test_hal_standalone COMMAND test_hal_standalone)
-
-# Unit test: firmware ELF discovery (no hardware required)
-add_executable(test_firmware_paths test_firmware_paths.cpp)
-target_include_directories(test_firmware_paths PRIVATE "${CMAKE_SOURCE_DIR}/src")
-target_link_libraries(test_firmware_paths PRIVATE TT::Foil)
-add_test(NAME test_firmware_paths COMMAND test_firmware_paths)
-
-# Integration test: add two numbers (requires Blackhole hardware)
-# Disabled by default; enable with -DTT_FOIL_HW_TESTS=ON
-option(TT_FOIL_HW_TESTS "Build hardware integration tests" OFF)
-if(TT_FOIL_HW_TESTS)
-    add_executable(test_add_kernel test_add_kernel.cpp)
-    target_link_libraries(test_add_kernel PRIVATE TT::Foil)
-    add_test(NAME test_add_kernel COMMAND test_add_kernel)
-
-    # BRISC + NCRISC concurrent dispatch (Phase A)
-    add_executable(test_brisc_ncrisc test_brisc_ncrisc.cpp)
-    target_link_libraries(test_brisc_ncrisc PRIVATE TT::Foil)
-    add_test(NAME test_brisc_ncrisc COMMAND test_brisc_ncrisc)
-
-    # NOC inter-core passthrough end-to-end (v3-3..v3-5)
-    add_executable(test_noc_passthrough test_noc_passthrough.cpp)
-    target_link_libraries(test_noc_passthrough PRIVATE TT::Foil)
-    add_test(NAME test_noc_passthrough COMMAND test_noc_passthrough)
-
-    # CB config blob layout (v4-3) — uses HW to validate L1 round-trip but
-    # doesn't run any TRISC firmware
-    add_executable(test_cb_config test_cb_config.cpp)
-    target_include_directories(test_cb_config PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_link_libraries(test_cb_config PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_cb_config COMMAND test_cb_config)
-
-    # Multi-kernel dispatch over multiple cores (v3-2)
-    add_executable(test_multi_kernel test_multi_kernel.cpp)
-    target_link_libraries(test_multi_kernel PRIVATE TT::Foil)
-    add_test(NAME test_multi_kernel COMMAND test_multi_kernel)
-
-    # End-to-end tile copy via all 5 Tensix RISCs (v4-6)
-    add_executable(test_tile_copy test_tile_copy.cpp)
-    target_include_directories(test_tile_copy PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_link_libraries(test_tile_copy PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_tile_copy COMMAND test_tile_copy)
-
-    # bf16 ReLU through the SFPU (v5.5) — 5-RISC pipeline, single tile.
-    add_executable(test_relu test_relu.cpp)
-    target_include_directories(test_relu PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_link_libraries(test_relu PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_relu COMMAND test_relu)
-
-    # bf16 eltwise add_tiles (v5.6) — 2-input compute, single tile, FPU.
-    add_executable(test_add_tiles test_add_tiles.cpp)
-    target_include_directories(test_add_tiles PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_link_libraries(test_add_tiles PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_add_tiles COMMAND test_add_tiles)
-
-    # Row-broadcast bias add (v5.7) — out[i,j] = in[i,j] + bias[0,j].
-    # The Linear/FC layer bias-add primitive.
-    add_executable(test_bias_add test_bias_add.cpp)
-    target_include_directories(test_bias_add PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_link_libraries(test_bias_add PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_bias_add COMMAND test_bias_add)
-
-    # Row-sharded DRAM matmul across 2 Tensix cores (v6-1).  Per-core
-    # slice height is MM_MT_2C (default 1); the test sees a global M of
-    # 2 × MM_MT_2C tiles.  Kernel ELFs and the test must agree on the
-    # per-core triple (MM_MT_2C, MM_KT, MM_NT).
-    if(NOT DEFINED MM_MT_2C)
-        set(MM_MT_2C 1)
+# TT_FOIL_DEVICE picks the PCIe board index used by HW tests. Resolution
+# order: CMake -DTT_FOIL_DEVICE=N > env TT_FOIL_DEVICE > 0.
+if(NOT DEFINED TT_FOIL_DEVICE)
+    if(DEFINED ENV{TT_FOIL_DEVICE})
+        set(TT_FOIL_DEVICE "$ENV{TT_FOIL_DEVICE}")
+    else()
+        set(TT_FOIL_DEVICE 0)
     endif()
-    add_executable(test_matmul_2core test_matmul_2core.cpp)
-    target_include_directories(test_matmul_2core PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_compile_definitions(test_matmul_2core PRIVATE
-        MM_MT=${MM_MT_2C} MM_KT=${MM_KT} MM_NT=${MM_NT})
-    target_link_libraries(test_matmul_2core PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_matmul_2core COMMAND test_matmul_2core)
-
-    # 2×2 grid block-sharded DRAM matmul (v6-2). Per-core slice is
-    # MM_MT_2x2 × MM_NT_2x2 tiles; global problem is 2x larger in each
-    # of M and N. Kernel ELFs and test must agree on the per-core triple.
-    if(NOT DEFINED MM_MT_2x2)
-        set(MM_MT_2x2 1)
-    endif()
-    if(NOT DEFINED MM_NT_2x2)
-        set(MM_NT_2x2 1)
-    endif()
-    add_executable(test_matmul_2x2 test_matmul_2x2.cpp)
-    target_include_directories(test_matmul_2x2 PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_compile_definitions(test_matmul_2x2 PRIVATE
-        MM_MT=${MM_MT_2x2} MM_KT=${MM_KT} MM_NT=${MM_NT_2x2})
-    target_link_libraries(test_matmul_2x2 PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_matmul_2x2 COMMAND test_matmul_2x2)
-
-    # 2-core row-shard with B forwarded over NOC (v6-3). B read from
-    # DRAM exactly once by the producer core, NOC-pushed to consumer.
-    # Same per-core triple convention as v6-1 (MM_MT_2CMC defaults to 1).
-    if(NOT DEFINED MM_MT_2CMC)
-        set(MM_MT_2CMC 1)
-    endif()
-    add_executable(test_matmul_2core_mcast test_matmul_2core_mcast.cpp)
-    target_include_directories(test_matmul_2core_mcast PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_compile_definitions(test_matmul_2core_mcast PRIVATE
-        MM_MT=${MM_MT_2CMC} MM_KT=${MM_KT} MM_NT=${MM_NT})
-    target_link_libraries(test_matmul_2core_mcast PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_matmul_2core_mcast COMMAND test_matmul_2core_mcast)
-
-    # 4×2 grid block-sharded DRAM matmul (v6-4) — 8 cores total. Same
-    # per-core triple convention as v6-2; this is the M-axis scale-up.
-    if(NOT DEFINED MM_MT_4x2)
-        set(MM_MT_4x2 1)
-    endif()
-    if(NOT DEFINED MM_NT_4x2)
-        set(MM_NT_4x2 1)
-    endif()
-    add_executable(test_matmul_4x2 test_matmul_4x2.cpp)
-    target_include_directories(test_matmul_4x2 PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_compile_definitions(test_matmul_4x2 PRIVATE
-        MM_MT=${MM_MT_4x2} MM_KT=${MM_KT} MM_NT=${MM_NT_4x2})
-    target_link_libraries(test_matmul_4x2 PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_matmul_4x2 COMMAND test_matmul_4x2)
-
-    # 1×1 convolution (v7-1) — implemented as a matmul over the
-    # (C_in, H*W) reshape. Kernel ELFs are bit-identical to matmul_dram;
-    # the test handles the CHW ↔ matrix layout dance. Tile counts:
-    #   MM_MT_C1 ≡ ceil(C_out / 32)
-    #   MM_KT_C1 ≡ ceil(C_in  / 32)
-    #   MM_NT_C1 ≡ ceil(H*W   / 32)
-    if(NOT DEFINED MM_MT_C1)
-        set(MM_MT_C1 2)
-    endif()
-    if(NOT DEFINED MM_KT_C1)
-        set(MM_KT_C1 2)
-    endif()
-    if(NOT DEFINED MM_NT_C1)
-        set(MM_NT_C1 2)
-    endif()
-    add_executable(test_conv_1x1 test_conv_1x1.cpp)
-    target_include_directories(test_conv_1x1 PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_compile_definitions(test_conv_1x1 PRIVATE
-        MM_MT=${MM_MT_C1} MM_KT=${MM_KT_C1} MM_NT=${MM_NT_C1})
-    target_link_libraries(test_conv_1x1 PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_conv_1x1 COMMAND test_conv_1x1)
-
-    # 3×3 convolution via im2col → matmul (v7-2). Tile counts:
-    #   MM_MT_C3 ≡ ceil(C_out         / 32)
-    #   MM_KT_C3 ≡ ceil(C_in * 9      / 32)   (9 odd ⇒ C_in%32==0 ⇒ K-tile-aligned)
-    #   MM_NT_C3 ≡ ceil(H * W         / 32)
-    # Default: C_in=C_out=32, H=W=8 → MM_MT=1, MM_KT=9, MM_NT=2.
-    if(NOT DEFINED MM_MT_C3)
-        set(MM_MT_C3 1)
-    endif()
-    if(NOT DEFINED MM_KT_C3)
-        set(MM_KT_C3 9)
-    endif()
-    if(NOT DEFINED MM_NT_C3)
-        set(MM_NT_C3 2)
-    endif()
-    add_executable(test_conv_3x3 test_conv_3x3.cpp)
-    target_include_directories(test_conv_3x3 PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_compile_definitions(test_conv_3x3 PRIVATE
-        MM_MT=${MM_MT_C3} MM_KT=${MM_KT_C3} MM_NT=${MM_NT_C3})
-    target_link_libraries(test_conv_3x3 PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_conv_3x3 COMMAND test_conv_3x3)
-
-    # 2-core sharded 3×3 conv (v7-3) — H axis split between 2 cores;
-    # halo handled on the host by im2col'ing against the global X.
-    # MM_*_C32 are PER-CORE tile counts (defaults map to H_local=8,
-    # W=8, C_in=C_out=32 → global H=16, W=8).
-    if(NOT DEFINED MM_MT_C32)
-        set(MM_MT_C32 1)
-    endif()
-    if(NOT DEFINED MM_KT_C32)
-        set(MM_KT_C32 9)
-    endif()
-    if(NOT DEFINED MM_NT_C32)
-        set(MM_NT_C32 2)
-    endif()
-    add_executable(test_conv_3x3_2core test_conv_3x3_2core.cpp)
-    target_include_directories(test_conv_3x3_2core PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_compile_definitions(test_conv_3x3_2core PRIVATE
-        MM_MT=${MM_MT_C32} MM_KT=${MM_KT_C32} MM_NT=${MM_NT_C32})
-    target_link_libraries(test_conv_3x3_2core PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_conv_3x3_2core COMMAND test_conv_3x3_2core)
-
-    # 3×3 stride=2 conv (v7-4) — ResNet downsample. Strided im2col on
-    # the host; kernel is bit-identical to conv_3x3. Default config
-    # H_in=W_in=15 (derived from H_out=W_out=8, stride=2, pad=1).
-    if(NOT DEFINED MM_MT_CS2)
-        set(MM_MT_CS2 1)
-    endif()
-    if(NOT DEFINED MM_KT_CS2)
-        set(MM_KT_CS2 9)
-    endif()
-    if(NOT DEFINED MM_NT_CS2)
-        set(MM_NT_CS2 2)
-    endif()
-    add_executable(test_conv_3x3_s2 test_conv_3x3_s2.cpp)
-    target_include_directories(test_conv_3x3_s2 PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_compile_definitions(test_conv_3x3_s2 PRIVATE
-        MM_MT=${MM_MT_CS2} MM_KT=${MM_KT_CS2} MM_NT=${MM_NT_CS2})
-    target_link_libraries(test_conv_3x3_s2 PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_conv_3x3_s2 COMMAND test_conv_3x3_s2)
-
-    # Single-tile bf16 matmul (v5-1) — full 5-RISC + 2-input + matmul_tiles
-    add_executable(test_matmul_1tile test_matmul_1tile.cpp)
-    target_include_directories(test_matmul_1tile PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_link_libraries(test_matmul_1tile PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_matmul_1tile COMMAND test_matmul_1tile)
-
-    # K-loop bf16 matmul (v5-2) — DST_ACCUM_MODE=true, Kt partial products
-    # summed exactly in fp32 DST regs.  MM_KT must match the value the
-    # kernel ELFs were compiled with (default 4).
-    if(NOT DEFINED MM_KT)
-        set(MM_KT 4)
-    endif()
-    add_executable(test_matmul_kt test_matmul_kt.cpp)
-    target_include_directories(test_matmul_kt PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_compile_definitions(test_matmul_kt PRIVATE MM_KT=${MM_KT})
-    target_link_libraries(test_matmul_kt PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_matmul_kt COMMAND test_matmul_kt)
-
-    # Host-side DRAM round trip (v5-4 smoke) — write_buffer + read_buffer
-    # on BufferLocation::DRAM.  Runs before the kernel-side DRAM matmul so
-    # we catch host I/O bugs separately.
-    add_executable(test_dram_roundtrip test_dram_roundtrip.cpp)
-    target_link_libraries(test_dram_roundtrip PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_dram_roundtrip COMMAND test_dram_roundtrip)
-
-    # General Mt×Kt × Kt×Nt single-core matmul (v5-3) — outer-product
-    # schedule with one DST-resident accumulator per output tile.  Tile
-    # counts must match what the kernel ELFs were compiled with.
-    if(NOT DEFINED MM_MT)
-        set(MM_MT 2)
-    endif()
-    if(NOT DEFINED MM_NT)
-        set(MM_NT 2)
-    endif()
-    add_executable(test_matmul_mnk test_matmul_mnk.cpp)
-    target_include_directories(test_matmul_mnk PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_compile_definitions(test_matmul_mnk PRIVATE
-        MM_MT=${MM_MT} MM_KT=${MM_KT} MM_NT=${MM_NT})
-    target_link_libraries(test_matmul_mnk PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_matmul_mnk COMMAND test_matmul_mnk)
-
-    # DRAM-backed matmul (v5-4) — same Mt×Kt×Nt schedule, A/B/C in DRAM.
-    # Lifts the L1 capacity wall from v5-3.
-    add_executable(test_matmul_dram test_matmul_dram.cpp)
-    target_include_directories(test_matmul_dram PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_compile_definitions(test_matmul_dram PRIVATE
-        MM_MT=${MM_MT} MM_KT=${MM_KT} MM_NT=${MM_NT})
-    target_link_libraries(test_matmul_dram PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_matmul_dram COMMAND test_matmul_dram)
-
-    # Multi-core boot via device_open (v3-1)
-    add_executable(test_multi_core_boot test_multi_core_boot.cpp)
-    target_include_directories(test_multi_core_boot PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_link_libraries(test_multi_core_boot PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_multi_core_boot COMMAND test_multi_core_boot)
-
-    # UMD direct open + L1 round trip — opens umd::Cluster directly, no
-    # tt-metal symbols required.
-    add_executable(test_umd_open test_umd_open.cpp)
-    target_include_directories(test_umd_open PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_link_libraries(test_umd_open PRIVATE TT::Foil tt_foil_llrt)
-    add_test(NAME test_umd_open COMMAND test_umd_open)
-
-    # The Phase B2 step-by-step tests (test_cold_boot, test_firmware_load,
-    # test_mailbox_init, test_core_info_init, test_bank_tables_init) were
-    # development scaffolding that linked against tt-metal's CreateDevice +
-    # MetalContext to byte-compare our writes against tt-metal's. With B3-4
-    # those symbols are no longer linked. The production-equivalent
-    # verification — full cold boot via device_open() + kernel launch — is
-    # covered by test_add_kernel and test_brisc_ncrisc above. The .cpp files
-    # remain on disk for reference but are no longer in the build.
 endif()
+message(STATUS "tt-foil tests: TT_FOIL_DEVICE=${TT_FOIL_DEVICE}")
+
+# ---------------------------------------------------------------------------
+# tt_foil_unit_test(name src ...)
+#   Adds a host-side unit test (no HW). Optional remaining args are passed as
+#   target_compile_definitions PRIVATE values.
+# ---------------------------------------------------------------------------
+function(tt_foil_unit_test name src)
+    add_executable(${name} ${src})
+    target_include_directories(${name} PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(${name} PRIVATE TT::Foil tt_foil_llrt)
+    if(ARGN)
+        target_compile_definitions(${name} PRIVATE ${ARGN})
+    endif()
+    add_test(NAME ${name} COMMAND ${name})
+    set_tests_properties(${name} PROPERTIES LABELS "unit" TIMEOUT 30)
+endfunction()
+
+# ---------------------------------------------------------------------------
+# tt_foil_hw_test(name src kernel_dir ...)
+#   Adds a hardware integration test. The test binary gets:
+#     TT_FOIL_KERNEL_DIR  pointed at `kernel_dir`
+#     TT_FOIL_DEVICE      pointed at the CMake variable above
+#   All HW tests share `RESOURCE_LOCK chip` so ctest serialises them
+#   without running them concurrently.  Remaining args go to
+#   target_compile_definitions PRIVATE.
+# ---------------------------------------------------------------------------
+function(tt_foil_hw_test name src kernel_dir)
+    add_executable(${name} ${src})
+    target_include_directories(${name} PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(${name} PRIVATE TT::Foil tt_foil_llrt)
+    if(ARGN)
+        target_compile_definitions(${name} PRIVATE ${ARGN})
+    endif()
+    add_test(NAME ${name} COMMAND ${name})
+    # set_tests_properties splits the ENVIRONMENT value on semicolons
+    # for its own list parsing; pass it as a single quoted string and
+    # set each property in its own call so list-ish values don't get
+    # split into argument-count errors.
+    set_tests_properties(${name} PROPERTIES
+        ENVIRONMENT "TT_FOIL_KERNEL_DIR=${kernel_dir};TT_FOIL_DEVICE=${TT_FOIL_DEVICE}")
+    set_tests_properties(${name} PROPERTIES RESOURCE_LOCK chip)
+    set_tests_properties(${name} PROPERTIES LABELS "hw")
+    set_tests_properties(${name} PROPERTIES TIMEOUT 90)
+endfunction()
+
+# =============================================================================
+# Host-only unit tests
+# =============================================================================
+tt_foil_unit_test(test_elf_load        test_elf_load.cpp)
+tt_foil_unit_test(test_bump_alloc      test_bump_alloc.cpp)
+tt_foil_unit_test(test_risc_ids        test_risc_ids.cpp)
+tt_foil_unit_test(test_hal_standalone  test_hal_standalone.cpp)
+tt_foil_unit_test(test_firmware_paths  test_firmware_paths.cpp)
+
+# =============================================================================
+# Hardware integration tests
+# Enable with -DTT_FOIL_HW_TESTS=ON
+# =============================================================================
+option(TT_FOIL_HW_TESTS "Build hardware integration tests" OFF)
+if(NOT TT_FOIL_HW_TESTS)
+    return()
+endif()
+
+set(EX "${CMAKE_SOURCE_DIR}/examples")
+
+# NOTE: HW tests assume the board is in a healthy state at ctest
+# invocation time. If you've been crashing kernels, run a one-shot
+# `tt-smi -r <TT_FOIL_DEVICE>` before `ctest`. RESOURCE_LOCK chip
+# serialises HW tests within one ctest run, but ctest cannot revive a
+# chip that a prior test hung.
+
+# Per-config tile-count defaults. Override via CMake -DMM_XX=N.
+macro(_tt_default var val)
+    if(NOT DEFINED ${var})
+        set(${var} ${val})
+    endif()
+endmacro()
+_tt_default(MM_MT      2)
+_tt_default(MM_KT      4)
+_tt_default(MM_NT      2)
+_tt_default(MM_MT_2C   1)
+_tt_default(MM_MT_2x2  1)
+_tt_default(MM_NT_2x2  1)
+_tt_default(MM_MT_2CMC 1)
+_tt_default(MM_MT_4x2  1)
+_tt_default(MM_NT_4x2  1)
+_tt_default(MM_MT_C1   2)
+_tt_default(MM_KT_C1   2)
+_tt_default(MM_NT_C1   2)
+_tt_default(MM_MT_C3   1)
+_tt_default(MM_KT_C3   9)
+_tt_default(MM_NT_C3   2)
+_tt_default(MM_MT_C32  1)
+_tt_default(MM_KT_C32  9)
+_tt_default(MM_NT_C32  2)
+_tt_default(MM_MT_CS2  1)
+_tt_default(MM_KT_CS2  9)
+_tt_default(MM_NT_CS2  2)
+
+# ---- Boot / IO smoke (no kernel ELFs needed beyond firmware) ----
+tt_foil_hw_test(test_umd_open         test_umd_open.cpp         "${EX}/add_two_numbers/prebuilt")
+tt_foil_hw_test(test_multi_core_boot  test_multi_core_boot.cpp  "${EX}/add_two_numbers/prebuilt")
+tt_foil_hw_test(test_dram_roundtrip   test_dram_roundtrip.cpp   "${EX}/add_two_numbers/prebuilt")
+
+# ---- v1..v4: foundational dispatch + 5-RISC + CBs ----
+tt_foil_hw_test(test_add_kernel       test_add_kernel.cpp       "${EX}/add_two_numbers/prebuilt")
+tt_foil_hw_test(test_brisc_ncrisc     test_brisc_ncrisc.cpp     "${EX}/add_two_numbers/prebuilt")
+tt_foil_hw_test(test_multi_kernel     test_multi_kernel.cpp     "${EX}/add_two_numbers/prebuilt")
+tt_foil_hw_test(test_noc_passthrough  test_noc_passthrough.cpp  "${EX}/noc_passthrough/prebuilt")
+tt_foil_hw_test(test_cb_config        test_cb_config.cpp        "${EX}/add_two_numbers/prebuilt")
+tt_foil_hw_test(test_tile_copy        test_tile_copy.cpp        "${EX}/tile_copy/prebuilt")
+
+# ---- v5: matmul + ReLU + add + bias ----
+tt_foil_hw_test(test_matmul_1tile     test_matmul_1tile.cpp     "${EX}/matmul_1tile/prebuilt")
+tt_foil_hw_test(test_matmul_kt        test_matmul_kt.cpp        "${EX}/matmul_kt/prebuilt"
+    "MM_KT=${MM_KT}")
+tt_foil_hw_test(test_matmul_mnk       test_matmul_mnk.cpp       "${EX}/matmul_mnk/prebuilt"
+    "MM_MT=${MM_MT}" "MM_KT=${MM_KT}" "MM_NT=${MM_NT}")
+tt_foil_hw_test(test_matmul_dram      test_matmul_dram.cpp      "${EX}/matmul_dram/prebuilt"
+    "MM_MT=${MM_MT}" "MM_KT=${MM_KT}" "MM_NT=${MM_NT}")
+tt_foil_hw_test(test_relu             test_relu.cpp             "${EX}/relu/prebuilt")
+tt_foil_hw_test(test_add_tiles        test_add_tiles.cpp        "${EX}/add_tiles/prebuilt")
+tt_foil_hw_test(test_bias_add         test_bias_add.cpp         "${EX}/bias_add/prebuilt")
+
+# ---- v6: multi-core sharding + NOC mcast ----
+tt_foil_hw_test(test_matmul_2core         test_matmul_2core.cpp        "${EX}/matmul_2core/prebuilt"
+    "MM_MT=${MM_MT_2C}" "MM_KT=${MM_KT}" "MM_NT=${MM_NT}")
+tt_foil_hw_test(test_matmul_2x2           test_matmul_2x2.cpp          "${EX}/matmul_2x2/prebuilt"
+    "MM_MT=${MM_MT_2x2}" "MM_KT=${MM_KT}" "MM_NT=${MM_NT_2x2}")
+tt_foil_hw_test(test_matmul_2core_mcast   test_matmul_2core_mcast.cpp  "${EX}/matmul_2core_mcast/prebuilt"
+    "MM_MT=${MM_MT_2CMC}" "MM_KT=${MM_KT}" "MM_NT=${MM_NT}")
+tt_foil_hw_test(test_matmul_4x2           test_matmul_4x2.cpp          "${EX}/matmul_4x2/prebuilt"
+    "MM_MT=${MM_MT_4x2}" "MM_KT=${MM_KT}" "MM_NT=${MM_NT_4x2}")
+
+# ---- v7: conv (1×1, 3×3, sharded, stride=2) ----
+tt_foil_hw_test(test_conv_1x1         test_conv_1x1.cpp         "${EX}/conv_1x1/prebuilt"
+    "MM_MT=${MM_MT_C1}"  "MM_KT=${MM_KT_C1}"  "MM_NT=${MM_NT_C1}")
+tt_foil_hw_test(test_conv_3x3         test_conv_3x3.cpp         "${EX}/conv_3x3/prebuilt"
+    "MM_MT=${MM_MT_C3}"  "MM_KT=${MM_KT_C3}"  "MM_NT=${MM_NT_C3}")
+tt_foil_hw_test(test_conv_3x3_2core   test_conv_3x3_2core.cpp   "${EX}/conv_3x3_2core/prebuilt"
+    "MM_MT=${MM_MT_C32}" "MM_KT=${MM_KT_C32}" "MM_NT=${MM_NT_C32}")
+tt_foil_hw_test(test_conv_3x3_s2      test_conv_3x3_s2.cpp      "${EX}/conv_3x3_s2/prebuilt"
+    "MM_MT=${MM_MT_CS2}" "MM_KT=${MM_KT_CS2}" "MM_NT=${MM_NT_CS2}")
+
+# NOTE: The Phase B2 step-by-step tests (test_cold_boot, test_firmware_load,
+# test_mailbox_init, test_core_info_init, test_bank_tables_init) were
+# development scaffolding that linked against tt-metal's CreateDevice +
+# MetalContext. They were removed when libtt_metal.so was unlinked (B3-4).
+# Their production-equivalent coverage lives in test_add_kernel +
+# test_brisc_ncrisc.

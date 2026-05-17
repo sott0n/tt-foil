@@ -208,10 +208,26 @@ All in `tests/`. CMake gates HW tests behind `-DTT_FOIL_HW_TESTS=ON`.
 | `test_cb_config`              | Yes | CB descriptor blob round-trip via L1 (v4)       |
 | `test_tile_copy`              | Yes | End-to-end 5-RISC tile_copy pipeline (v4)       |
 
-Run HW tests on Blackhole with:
+Run tests via ctest (preferred — `TT_FOIL_KERNEL_DIR` is wired per
+test by the CMake test-helper functions, no manual env juggling):
 
 ```bash
-TT_METAL_RUNTIME_ROOT=/path/to/tt-metal \
+cmake -B build -DTT_FOIL_HW_TESTS=ON -DTT_FOIL_DEVICE=3
+cmake --build build -j$(nproc)
+tt-smi -r 3                        # one-shot, ensures clean chip state
+ctest --test-dir build             # all tests, serialised on chip
+ctest --test-dir build -L unit     # only host-side unit tests
+ctest --test-dir build -L hw       # only Blackhole integration tests
+ctest --test-dir build -R matmul   # by name regex
+```
+
+All HW tests share `RESOURCE_LOCK chip` so they never run in parallel
+within one ctest invocation. If a kernel crashes the chip, `ctest`
+cannot recover it — rerun with another `tt-smi -r N` first.
+
+To run a single test binary directly:
+
+```bash
 TT_FOIL_DEVICE=3 \
 TT_FOIL_KERNEL_DIR=examples/.../prebuilt \
 ./build/tests/test_<name>

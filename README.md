@@ -207,6 +207,24 @@ tt::foil::close_device(std::move(dev));
 | `TT_FOIL_FIRMWARE_DIR`   | Explicit firmware dir; overrides auto-discovery          |
 | `TT_FOIL_KERNEL_DIR`     | Directory containing your kernel ELFs (test convention)  |
 
+### Running tests with `ctest`
+
+`tests/CMakeLists.txt` wires the kernel-dir + device env vars per
+test, so HW integration tests run end-to-end through `ctest`:
+
+```bash
+cmake -B build -DTT_FOIL_HW_TESTS=ON -DTT_FOIL_DEVICE=3
+cmake --build build -j$(nproc)
+tt-smi -r 3                    # one-shot, ensures clean chip state
+ctest --test-dir build         # all tests, serialised on chip
+ctest --test-dir build -L unit # host-only unit tests
+ctest --test-dir build -L hw   # Blackhole integration tests
+```
+
+HW tests share `RESOURCE_LOCK chip` so they never run concurrently
+within a ctest invocation. `TT_FOIL_DEVICE` falls back to the env var
+if unset on the CMake line, and to `0` otherwise.
+
 ### Firmware ELF selection
 
 `tt-foil` resolves firmware ELFs in this order:
