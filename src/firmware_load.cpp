@@ -45,6 +45,31 @@ void load_tensix_firmware(
             static_cast<std::size_t>(len_words) * sizeof(uint32_t),
             chip_id, core, relo_addr);
     });
+
+    // Program the per-RISC launch address. tt-metal's HAL gives us, for each
+    // RISC, a write that has to land before deassert:
+    //   - BRISC  on Blackhole: fw_launch_addr = 0x0 (L1[0]), fw_launch_addr_value =
+    //     JAL trampoline that jumps to MEM_BRISC_FIRMWARE_BASE. BH BRISC has no
+    //     reset-PC register (NCRISC/TRISC do), so it always executes from L1[0];
+    //     without the trampoline a freshly-asserted BRISC hits 0x00000000
+    //     (illegal instruction) at L1[0] and never reaches its firmware. Single-
+    //     core tests passed in the past only because the chip's ARC bootrom had
+    //     core (0,0) running, and our soft-reset assert→deassert merely halted
+    //     and resumed BRISC inside leftover firmware.
+    //   - NCRISC / TRISC0/1/2: fw_launch_addr is the per-RISC RESET_PC register,
+    //     fw_launch_addr_value is the firmware base address. The Hal's value is
+    //     a register write that programs the reset vector before deassert.
+    //
+    // The Hal exposes these uniformly via HalJitBuildConfig; we just honour them.
+    if (jit_cfg.fw_launch_addr_value != 0 || jit_cfg.fw_launch_addr == 0) {
+        // fw_launch_addr_value == 0 with fw_launch_addr != 0 means "no launch
+        // write needed" (e.g., a RISC with a hardware-fixed reset vector). The
+        // tt-1xx Tensix configs always populate both fields, but guard anyway.
+        uint32_t launch_value = jit_cfg.fw_launch_addr_value;
+        driver.write_to_device(
+            &launch_value, sizeof(launch_value),
+            chip_id, core, jit_cfg.fw_launch_addr);
+    }
 }
 
 }  // namespace tt::foil
