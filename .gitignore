@@ -3,6 +3,9 @@ build/
 generated/
 .cpmcache/
 
+# tools/export_*.py download cache (CIFAR-10 tarball, pretrained checkpoints…)
+.cache/
+
 # Example kernel build outputs (all examples/*/prebuilt/)
 examples/*/prebuilt/
 
