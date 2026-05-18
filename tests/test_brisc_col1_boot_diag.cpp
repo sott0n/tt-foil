@@ -70,6 +70,23 @@ void prep_core(tt::umd::Cluster& driver, const Hal& hal, uint32_t chip,
     }
 
     tt::foil::load_tensix_firmware(driver, hal, chip, core, tt::foil::firmware_elf(fw, FR::BRISC),  tt::foil::kBrisc);
+
+    // Write the JAL trampoline at L1[0] so BRISC, which has reset PC=0
+    // hardcoded (no reset-PC register on BH), jumps into firmware at
+    // MEM_BRISC_FIRMWARE_BASE = 0x38E0 instead of hitting an illegal
+    // instruction at L1[0] (which we zeroed in the clear_l1 step).
+    // Encoding from generate_risc_startup_addr(0x38E0):
+    //   (0x38E0 & 0x7fe) << 20  = 0x0E000000
+    //   (0x38E0 & 0x800) << 9   = 0x00100000
+    //   (0x38E0 & 0xff000)      = 0x00003000
+    //   opcode                  = 0x0000006f
+    //   total                   = 0x0E10306F
+    {
+        uint32_t jal = 0x0e10306fu;
+        driver.write_to_device(&jal, sizeof(jal), chip, core, /*addr=*/0);
+        driver.l1_membar(chip);
+    }
+
     tt::foil::load_tensix_firmware(driver, hal, chip, core, tt::foil::firmware_elf(fw, FR::NCRISC), tt::foil::kNcrisc);
     tt::foil::load_tensix_firmware(driver, hal, chip, core, tt::foil::firmware_elf(fw, FR::TRISC0), tt::foil::kTrisc0);
     tt::foil::load_tensix_firmware(driver, hal, chip, core, tt::foil::firmware_elf(fw, FR::TRISC1), tt::foil::kTrisc1);
@@ -142,11 +159,62 @@ int main() try {
         tt::umd::CoreCoord lcoord{lc.x, lc.y, tt::CoreType::TENSIX, tt::CoordSystem::LOGICAL};
         auto t = soc_desc.translate_coord_to(lcoord, tt::CoordSystem::TRANSLATED);
 
+        // Initial state before we touch it.
+        {
+            auto rs_initial = driver.get_risc_reset_state(chip, t);
+            std::printf(">>> logical (%u,%u) -> translated (%zu,%zu)  initial=0x%x\n",
+                        lc.x, lc.y, t.x, t.y, static_cast<uint32_t>(rs_initial));
+        }
+
+        // Try broadcast assert first (covers ETH bcast for cluster-wide).
+        driver.assert_risc_reset();
+
+        // Read after broadcast.
+        {
+            auto rs_after_broadcast = driver.get_risc_reset_state(chip, t);
+            std::printf("    after broadcast assert: 0x%x\n",
+                        static_cast<uint32_t>(rs_after_broadcast));
+        }
+
         prep_core(driver, hal, chip, t, lc.x, lc.y, fw);
 
         std::printf("=== logical (%u,%u) -> translated (%zu,%zu) ===\n", lc.x, lc.y, t.x, t.y);
 
+        // Smoking-gun read: L1[0..16] right after firmware load, BEFORE
+        // deassert. On BH, BRISC reset PC = 0 (no PC reg), so it executes
+        // from L1[0]. tt-metal writes a JAL trampoline (opcode 0x6f, low
+        // 7 bits) at L1[0] that jumps to MEM_BRISC_FIRMWARE_BASE = 0x38E0.
+        // If L1[0] is zero on a failing core, BRISC runs NOPs forever
+        // even though firmware is loaded at 0x38E0.
+        uint32_t l1_head[4] = {0};
+        uint32_t fw_head[4] = {0};
+        driver.read_from_device(l1_head, chip, t, 0x0,    sizeof(l1_head));
+        driver.read_from_device(fw_head, chip, t, 0x38E0, sizeof(fw_head));
+        std::printf("    L1[0..15]      = %08x %08x %08x %08x  (opcode L1[0]=0x%02x)\n",
+                    l1_head[0], l1_head[1], l1_head[2], l1_head[3], l1_head[0] & 0x7f);
+        std::printf("    L1[0x38E0..]   = %08x %08x %08x %08x\n",
+                    fw_head[0], fw_head[1], fw_head[2], fw_head[3]);
+
+        // Read soft-reset state BEFORE deassert. Should show BRISC bit set
+        // (we asserted it in prep_core).
+        {
+            auto rs = driver.get_risc_reset_state(chip, t);
+            bool brisc_in_reset = (rs & tt::umd::RiscType::BRISC) != tt::umd::RiscType::NONE;
+            std::printf("    soft-reset pre-deassert: BRISC=%s (raw=0x%x)\n",
+                        brisc_in_reset ? "ASSERTED" : "DEASSERTED",
+                        static_cast<uint32_t>(rs));
+        }
+
         tt::foil::deassert_brisc_reset(driver, chip, t);
+
+        // Read soft-reset state AFTER deassert. Should show BRISC bit cleared.
+        {
+            auto rs = driver.get_risc_reset_state(chip, t);
+            bool brisc_in_reset = (rs & tt::umd::RiscType::BRISC) != tt::umd::RiscType::NONE;
+            std::printf("    soft-reset post-deassert: BRISC=%s (raw=0x%x)\n",
+                        brisc_in_reset ? "STILL ASSERTED" : "deasserted",
+                        static_cast<uint32_t>(rs));
+        }
 
         // Sample at a few intervals.
         for (int ms : {1, 50, 500}) {
