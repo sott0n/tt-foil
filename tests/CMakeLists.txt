@@ -215,6 +215,10 @@ tt_foil_hw_test(test_mini_resnet      test_mini_resnet.cpp      "${EX}/mini_resn
 
 # ---- v9.8: classifier tail (host GAP + device FC + host bias) ----
 tt_foil_hw_test(test_classifier_tail  test_classifier_tail.cpp  "${EX}/classifier_tail/prebuilt")
+
+# ---- v9.9: Full ResNet classifier — image in, logits out ----
+tt_foil_hw_test(test_resnet_classifier test_resnet_classifier.cpp
+    "${EX}/resnet_classifier/prebuilt")
 tt_foil_hw_test(test_brisc_col1_boot_diag test_brisc_col1_boot_diag.cpp "${EX}/add_two_numbers/prebuilt")
 
 # NOTE: The Phase B2 step-by-step tests (test_cold_boot, test_firmware_load,

@@ -295,6 +295,7 @@ Pick by what you want to learn:
 | ResNet stem end-to-end (Conv₇ₓ₇ → bias+ReLU → Maxpool₃ₓ₃) | [`examples/stem/`](examples/stem/) + [`tests/test_stem.cpp`](tests/test_stem.cpp) |
 | Mini ResNet feature path (stem + 2× basic_block)        | [`examples/mini_resnet/`](examples/mini_resnet/) + [`tests/test_mini_resnet.cpp`](tests/test_mini_resnet.cpp) |
 | Classifier tail (Global Avg Pool + FC + bias)           | [`examples/classifier_tail/`](examples/classifier_tail/) + [`tests/test_classifier_tail.cpp`](tests/test_classifier_tail.cpp) |
+| Full ResNet classifier (image → stem → 2× basic → GAP → FC → logits) | [`examples/resnet_classifier/`](examples/resnet_classifier/) + [`tests/test_resnet_classifier.cpp`](tests/test_resnet_classifier.cpp) |
 | Eltwise primitives (ReLU, add, bias broadcast)   | [`examples/relu/`](examples/relu/), [`examples/add_tiles/`](examples/add_tiles/), [`examples/bias_add/`](examples/bias_add/) |
 | Multi-tile eltwise add (ResNet skip-add building block) | [`examples/residual_add/`](examples/residual_add/) |
 | ResNet basic block end-to-end (conv → bias+ReLU → conv → bias → skip-add → ReLU) | [`examples/basic_block/`](examples/basic_block/) + [`tests/test_basic_block.cpp`](tests/test_basic_block.cpp) |
