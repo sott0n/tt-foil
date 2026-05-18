@@ -1,24 +1,24 @@
 // SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
 // SPDX-License-Identifier: Apache-2.0
 //
-// Full ResNet classifier — stem + 2× basic_block on device, classifier
-// tail on host. The "image in, logits out" test:
+// Full ResNet classifier — everything on device, host only does bias
+// add at the very end. The "image in, logits out" test:
 //
 //   x        : (C=32, 32, 32)
 //   stem     : Conv₇ₓ₇ s=2 pad=3 → bias + ReLU → Maxpool₃ₓ₃ s=2 pad=1
 //   block₁   : basic_block (3×3 s=1 ×2 + identity skip)  on (32, 8, 8)
 //   block₂   : basic_block (3×3 s=1 ×2 + identity skip)  on (32, 8, 8)
-//   gap      : mean over (h, w)                          → (32,)
-//   fc       : W · gap + bias                            → 32-way logits
+//   gap      : mean over (h, w)                          → (32,)   (host)
+//   fc       : W · gap                                   → device matmul
+//   +bias    : on host                                   → 32-way logits
 //
-// Four kernel programs rotate on the same core for the feature path
-// (Conv₇ₓ₇, Maxpool₃ₓ₃, Conv₃ₓ₃, residual_add). The classifier-tail
-// kernels (FC matmul) are already separately exercised by
-// test_classifier_tail; here we run GAP + FC + bias on the host because
-// Blackhole's per-core KERNEL_CONFIG region (~69 KB) doesn't fit a
-// fifth pre-loaded kernel alongside the four feature-path kernels.
-// Moving FC on-device would need either a kernel-unload API on tt-foil
-// (single-kernel-per-core slot) or a wider KERNEL_CONFIG region.
+// Five distinct kernel programs across the chain (Conv₇ₓ₇, Maxpool₃ₓ₃,
+// Conv₃ₓ₃, residual_add, FC matmul) — more than Blackhole's per-core
+// KERNEL_CONFIG region (~69 KB) can hold simultaneously. The test runs
+// the feature path with the first four kernels loaded, then calls
+// release_kernels() to free the KERNEL_CONFIG region, then re-loads
+// just the FC kernel for the classifier head. This is the first
+// tt-foil test to exercise kernel slot recycling on a single core.
 
 #include <array>
 #include <cmath>
@@ -77,8 +77,11 @@ constexpr uint32_t kRaNt = kMt_3 * kNt_3;       // 2
 // maxpool stream tile count (RA_NT-equivalent)
 constexpr uint32_t kNtPool = (kHpost * kWpost) / kTileH;   // 2
 
-// Classifier-tail FC matmul lives on the host (see top-level comment).
+// Classifier-tail FC matmul: M=Ncl=32, K=C=32, N=1 tile (padded).
 constexpr uint32_t kNcl    = 32;
+constexpr uint32_t kMt_fc  = kNcl / kTileH;     // 1
+constexpr uint32_t kKt_fc  = kC   / kTileW;     // 1
+constexpr uint32_t kNt_fc  = 1;
 
 std::string required_env(const char* name) {
     const char* val = std::getenv(name);
@@ -329,6 +332,7 @@ int main() try {
     const std::string pool_dir    = kernel_root + "/maxpool_3x3";
     const std::string conv_dir    = kernel_root + "/conv";
     const std::string add_dir     = kernel_root + "/residual_add";
+    const std::string fc_dir      = kernel_root + "/fc";
 
     const char* dev_env = std::getenv("TT_FOIL_DEVICE");
     int pcie_index = dev_env ? std::stoi(dev_env) : 0;
@@ -695,9 +699,20 @@ int main() try {
         relu_inplace(feat_dev);
     }
 
-    // ================ Classifier tail (host): GAP + FC + bias =======
+    // ================ Classifier tail: GAP (host) + FC (device) =====
+    // The four feature-path kernel programs fill the KERNEL_CONFIG
+    // region; the FC kernel won't fit alongside them. Drop the feature
+    // kernel handles, free the slot, then load FC fresh.
+    k_conv7.reset();
+    k_pool.reset();
+    k_conv.reset();
+    k_add.reset();
+    tt::foil::release_kernels(*dev, core);
+    auto k_fc = load(fc_dir);
+
     std::vector<uint16_t> y_dev(kNcl);
     {
+        // Host GAP: mean across (h, w) per channel.
         std::vector<uint16_t> gap_bf16(kC);
         for (uint32_t c = 0; c < kC; ++c) {
             float acc = 0.0f;
@@ -705,12 +720,46 @@ int main() try {
                 acc += bf16_to_f32(feat_dev[c * (kHpost * kWpost) + i]);
             gap_bf16[c] = f32_to_bf16(acc / static_cast<float>(kHpost * kWpost));
         }
-        for (uint32_t k = 0; k < kNcl; ++k) {
-            float acc = 0.0f;
+
+        // Pack FC operands: W (Ncl, C) and X (C, 32) with col 0 = gap.
+        std::vector<uint16_t> Wmat(kNcl * kC);
+        for (uint32_t r = 0; r < kNcl; ++r)
             for (uint32_t c = 0; c < kC; ++c)
-                acc += bf16_to_f32(Wfc[k * kC + c]) * bf16_to_f32(gap_bf16[c]);
-            y_dev[k] = f32_to_bf16(acc + bfc[k]);
-        }
+                Wmat[r * kC + c] = Wfc[r * kC + c];
+        std::vector<uint16_t> Xmat(kC * kTileW, 0);
+        for (uint32_t r = 0; r < kC; ++r) Xmat[r * kTileW + 0] = gap_bf16[r];
+
+        std::vector<uint16_t> w_tiles, x_tiles;
+        tile_matrix(Wmat, kMt_fc, kKt_fc, kC,     w_tiles);
+        tile_matrix(Xmat, kKt_fc, kNt_fc, kTileW, x_tiles);
+
+        const uint32_t fc_w_bytes = kMt_fc * kKt_fc * kTileBytes;
+        const uint32_t fc_x_bytes = kKt_fc * kNt_fc * kTileBytes;
+        const uint32_t fc_y_bytes = kMt_fc * kNt_fc * kTileBytes;
+        // Reuse buf_Ym (W), buf_Ys (X), buf_Yo (Y) — all DRAM and
+        // already sized larger than the FC's single-tile operands.
+        tt::foil::write_buffer(*dev, *buf_Ym, w_tiles.data(), fc_w_bytes);
+        tt::foil::write_buffer(*dev, *buf_Ys, x_tiles.data(), fc_x_bytes);
+        std::vector<uint8_t> zero(fc_y_bytes, 0);
+        tt::foil::write_buffer(*dev, *buf_Yo, zero.data(), fc_y_bytes);
+
+        std::array<uint32_t, 7> ra = {
+            lo(Ym_noc), hi(Ym_noc), lo(Ys_noc), hi(Ys_noc),
+            kMt_fc, kKt_fc, kNt_fc,
+        };
+        std::array<uint32_t, 3> rn = { lo(Yo_noc), hi(Yo_noc), kMt_fc * kNt_fc };
+        tt::foil::set_runtime_args(*dev, *k_fc, R::RiscId::BRISC,  ra);
+        tt::foil::set_runtime_args(*dev, *k_fc, R::RiscId::NCRISC, rn);
+        tt::foil::register_cbs(*dev, *k_fc, matmul_cbs);
+        tt::foil::execute(*dev, *k_fc);
+
+        std::vector<uint16_t> y_tiles(kMt_fc * kNt_fc * kTileWords, 0);
+        tt::foil::read_buffer(*dev, *buf_Yo, y_tiles.data(), fc_y_bytes);
+        std::vector<uint16_t> y_mat;
+        untile_matrix(y_tiles, kMt_fc, kNt_fc, kTileW, y_mat);   // (Ncl, 32)
+
+        for (uint32_t k = 0; k < kNcl; ++k)
+            y_dev[k] = f32_to_bf16(bf16_to_f32(y_mat[k * kTileW + 0]) + bfc[k]);
     }
 
     // ---- Compare ---------------------------------------------------

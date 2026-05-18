@@ -116,6 +116,25 @@ std::shared_ptr<Kernel> load_kernel(
     std::span<const RiscBinary> binaries,
     CoreCoord logical_core);
 
+// Release all kernel-config state (RTAs + kernel text) for `logical_core`,
+// so subsequent load_kernel() calls can reuse the per-core KERNEL_CONFIG
+// region from scratch.
+//
+// The Blackhole KERNEL_CONFIG region is small (~69 KB on Tensix), and
+// load_kernel is a bump allocator with no per-kernel free.  When a chain
+// needs more distinct programs than fit at once, the caller is meant to
+// drop all outstanding std::shared_ptr<Kernel> for `logical_core` and
+// then call release_kernels(device, logical_core); the next load_kernel
+// starts at the base of the region again.
+//
+// Behaviour after release:
+//   • Any Kernel object whose shared_ptr is still alive is UB to use —
+//     its rta_base_addr / kernel_text_addr now point at memory that the
+//     next load_kernel will overwrite.  Drop them first.
+//   • Buffers in DRAM and in the user L1 region are unaffected.
+//   • The launch_msg slot the firmware polls is untouched.
+void release_kernels(Device& device, CoreCoord logical_core);
+
 // Write runtime arguments for a specific RISC processor.
 void set_runtime_args(
     Device& device,

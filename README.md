@@ -310,7 +310,7 @@ surface lives in `<tt_foil/runtime.hpp>`:
 ```
 open_device / close_device
 allocate_buffer / write_buffer / read_buffer
-load_kernel / set_runtime_args
+load_kernel / set_runtime_args / release_kernels
 register_cbs               // circular buffer descriptors
 execute                    // single-kernel + multi-kernel variants
 make_noc_unicast_addr      // pack a 64-bit peer-L1 NOC address

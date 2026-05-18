@@ -82,4 +82,15 @@ void kernel_set_runtime_args(
     throw std::runtime_error("tt-foil: set_runtime_args called for a RISC not in this kernel");
 }
 
+void release_kernels(Device& device, CoreCoord logical_core) {
+    // The kernel_config_for_core() entry is lazily created on first use.
+    // Erase it; the next load_kernel() will lazily reconstruct it with
+    // current == base, reclaiming the whole KERNEL_CONFIG region for new
+    // kernel text + RTAs. Any std::shared_ptr<Kernel> still held by the
+    // caller now has stale pointers into the (about-to-be-overwritten)
+    // region — see runtime.hpp for the contract.
+    uint64_t key = Device::core_key(logical_core.x, logical_core.y);
+    device.kernel_config_allocs.erase(key);
+}
+
 }  // namespace tt::foil
