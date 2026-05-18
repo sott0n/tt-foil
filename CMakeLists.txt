@@ -74,6 +74,15 @@ set_target_properties(tt_foil_weaken PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tools"
 )
 
+# ---- tt_foil_inspect host CLI ----
+# Reads soft-reset/L1 state of every Tensix core without doing init.
+# Used to diagnose chip-state degradation after heavy workloads.
+add_executable(tt_foil_inspect tools/tt_foil_inspect.cpp)
+target_link_libraries(tt_foil_inspect PRIVATE tt_foil)
+set_target_properties(tt_foil_inspect PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tools"
+)
+
 # ---- Plan L: self-build firmware ELFs (no tt-metal runtime needed) ----
 # Builds the 5 firmware ELFs + *_weakened.elf companions directly from the
 # tt-metal source tree under ${CMAKE_BINARY_DIR}/firmware/.  tt-foil's
