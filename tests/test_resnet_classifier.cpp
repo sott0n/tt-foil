@@ -1,24 +1,29 @@
 // SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
 // SPDX-License-Identifier: Apache-2.0
 //
-// Full ResNet classifier — everything on device, host only does bias
-// add at the very end. The "image in, logits out" test:
+// Full ResNet classifier — every arithmetic op runs on device. The host
+// only handles layout (im2col, tile/untile, chw↔hwc, window gather) and
+// reference comparison. The "image in, logits out" test:
 //
 //   x        : (C=32, 32, 32)
 //   stem     : Conv₇ₓ₇ s=2 pad=3 → bias + ReLU → Maxpool₃ₓ₃ s=2 pad=1
 //   block₁   : basic_block (3×3 s=1 ×2 + identity skip)  on (32, 8, 8)
 //   block₂   : basic_block (3×3 s=1 ×2 + identity skip)  on (32, 8, 8)
-//   gap      : mean over (h, w)                          → (32,)   (host)
-//   fc       : W · gap                                   → device matmul
-//   +bias    : on host                                   → 32-way logits
+//   gap      : global avg pool over (h, w)               → (32,)   device
+//   fc       : W · gap + bias                            → 32-way logits  device
 //
-// Five distinct kernel programs across the chain (Conv₇ₓ₇, Maxpool₃ₓ₃,
-// Conv₃ₓ₃, residual_add, FC matmul) — more than Blackhole's per-core
-// KERNEL_CONFIG region (~69 KB) can hold simultaneously. The test runs
-// the feature path with the first four kernels loaded, then calls
-// release_kernels() to free the KERNEL_CONFIG region, then re-loads
-// just the FC kernel for the classifier head. This is the first
-// tt-foil test to exercise kernel slot recycling on a single core.
+// Seven distinct kernel programs across the chain (Conv₇ₓ₇, Maxpool₃ₓ₃,
+// Conv₃ₓ₃, residual_add, bias_relu_post, global_avg_pool, FC matmul).
+// They don't all fit in Blackhole's per-core KERNEL_CONFIG region
+// (~69 KB) simultaneously, so the test loads three phase-specific
+// kernel sets in turn with release_kernels() between phases:
+//   • stem  : conv_7x7 + maxpool_3x3 + bias_relu_post
+//   • blocks: conv_3x3 + residual_add + bias_relu_post
+//   • tail  : global_avg_pool + fc + bias_relu_post
+//
+// bias_relu_post is reused in every phase (Nt is a runtime arg). The
+// residual-add ReLU is also delivered by bias_relu_post with bias=0,
+// relu=1.
 
 #include <array>
 #include <cmath>
@@ -332,6 +337,8 @@ int main() try {
     const std::string pool_dir    = kernel_root + "/maxpool_3x3";
     const std::string conv_dir    = kernel_root + "/conv";
     const std::string add_dir     = kernel_root + "/residual_add";
+    const std::string bias_dir    = kernel_root + "/bias_relu_post";
+    const std::string gap_dir     = kernel_root + "/global_avg_pool";
     const std::string fc_dir      = kernel_root + "/fc";
 
     const char* dev_env = std::getenv("TT_FOIL_DEVICE");
@@ -429,23 +436,29 @@ int main() try {
     // Conv stage DRAM scratch. Two K-sizes (7×7 and 3×3) get separate
     // weight/im2col buffers to keep extents explicit and avoid having
     // to track which size last lived there.
-    const uint32_t w7_bytes  = kMt_7 * kKt_7 * kTileBytes;
-    const uint32_t a7_bytes  = kKt_7 * kNt_7 * kTileBytes;
-    const uint32_t y7_bytes  = kMt_7 * kNt_7 * kTileBytes;   // 8 tiles
-    const uint32_t w3_bytes  = kMt_3 * kKt_3 * kTileBytes;
-    const uint32_t a3_bytes  = kKt_3 * kNt_3 * kTileBytes;
-    const uint32_t y3_bytes  = kMt_3 * kNt_3 * kTileBytes;   // 2 tiles
-    const uint32_t add_bytes = kRaNt  * kTileBytes;          // 2 tiles
+    const uint32_t w7_bytes   = kMt_7 * kKt_7 * kTileBytes;
+    const uint32_t a7_bytes   = kKt_7 * kNt_7 * kTileBytes;
+    const uint32_t y7_bytes   = kMt_7 * kNt_7 * kTileBytes;   // 8 tiles
+    const uint32_t w3_bytes   = kMt_3 * kKt_3 * kTileBytes;
+    const uint32_t a3_bytes   = kKt_3 * kNt_3 * kTileBytes;
+    const uint32_t y3_bytes   = kMt_3 * kNt_3 * kTileBytes;   // 2 tiles
+    const uint32_t add_bytes  = kRaNt  * kTileBytes;          // 2 tiles
     static_assert(y3_bytes == add_bytes, "matmul out and add stream sizes match");
 
-    auto buf_W7 = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, w7_bytes, core);
-    auto buf_A7 = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, a7_bytes, core);
-    auto buf_Y7 = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, y7_bytes, core);
-    auto buf_W3 = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, w3_bytes, core);
-    auto buf_A3 = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, a3_bytes, core);
-    auto buf_Ym = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, y3_bytes, core);  // conv₂ output
-    auto buf_Ys = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, y3_bytes, core);  // skip-path side
-    auto buf_Yo = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, y3_bytes, core);  // block output
+    auto buf_W7      = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, w7_bytes,   core);
+    auto buf_A7      = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, a7_bytes,   core);
+    auto buf_Y7      = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, y7_bytes,   core);
+    auto buf_W3      = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, w3_bytes,   core);
+    auto buf_A3      = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, a3_bytes,   core);
+    auto buf_Ym      = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, y3_bytes,   core);  // conv₂ output
+    auto buf_Ys      = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, y3_bytes,   core);  // skip-path side
+    auto buf_Yo      = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, y3_bytes,   core);  // block output
+    // bias_relu_post output (sized for stem = 8 tiles, blocks use only 2):
+    auto buf_post    = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, y7_bytes,   core);
+    // bias tile (1 tile reused across every bias_relu_post call):
+    auto buf_bias_d  = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, kTileBytes, core);
+    // GAP scaler tile (1/HW filled, written once before the tail phase):
+    auto buf_scaler  = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, kTileBytes, core);
 
     auto buf_cb_a   = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, kTileBytes, core);
     auto buf_cb_b   = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, kTileBytes, core);
@@ -462,14 +475,17 @@ int main() try {
         pool_cb_bufs[i] = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, kTileBytes, core);
 
     auto noc_of = [&](auto& buf) { return tt::foil::make_noc_dram_addr(*dev, buf->device_addr); };
-    uint64_t W7_noc = noc_of(buf_W7);
-    uint64_t A7_noc = noc_of(buf_A7);
-    uint64_t Y7_noc = noc_of(buf_Y7);
-    uint64_t W3_noc = noc_of(buf_W3);
-    uint64_t A3_noc = noc_of(buf_A3);
-    uint64_t Ym_noc = noc_of(buf_Ym);
-    uint64_t Ys_noc = noc_of(buf_Ys);
-    uint64_t Yo_noc = noc_of(buf_Yo);
+    uint64_t W7_noc      = noc_of(buf_W7);
+    uint64_t A7_noc      = noc_of(buf_A7);
+    uint64_t Y7_noc      = noc_of(buf_Y7);
+    uint64_t W3_noc      = noc_of(buf_W3);
+    uint64_t A3_noc      = noc_of(buf_A3);
+    uint64_t Ym_noc      = noc_of(buf_Ym);
+    uint64_t Ys_noc      = noc_of(buf_Ys);
+    uint64_t Yo_noc      = noc_of(buf_Yo);
+    uint64_t post_noc    = noc_of(buf_post);
+    uint64_t bias_d_noc  = noc_of(buf_bias_d);
+    uint64_t scaler_noc  = noc_of(buf_scaler);
 
     auto lo = [](uint64_t v) { return static_cast<uint32_t>(v & 0xffffffffu); };
     auto hi = [](uint64_t v) { return static_cast<uint32_t>(v >> 32); };
@@ -485,10 +501,6 @@ int main() try {
         }};
         return tt::foil::load_kernel(*dev, bins, core);
     };
-    auto k_conv7 = load(conv7_dir);
-    auto k_pool  = load(pool_dir);
-    auto k_conv  = load(conv_dir);
-    auto k_add   = load(add_dir);
 
     std::array<tt::foil::CbConfig, 3> matmul_cbs = {{
         {0,  buf_cb_a  ->device_addr, kTileBytes, 1, kTileBytes},
@@ -508,9 +520,95 @@ int main() try {
         {16, pool_cb_bufs[9]->device_addr, kTileBytes, 1, kTileBytes},
     }};
 
-    // ================ STEM stage 1: Conv₇ₓ₇ =========================
+    // ---- Helper: pack a per-channel bias vector into one (32, 32) tile,
+    //              with channel biases in column 0 and zeros elsewhere.
+    auto pack_bias_tile = [&](const std::vector<float>& bias,
+                              std::vector<uint16_t>& tiles_out) {
+        std::vector<uint16_t> rm(kTileH * kTileW, 0);
+        for (uint32_t r = 0; r < kC; ++r) rm[r * kTileW + 0] = f32_to_bf16(bias[r]);
+        tiles_out.clear();
+        tt::foil::test::row_major_to_tile(rm.data(), tiles_out);
+    };
+    // Zero-bias tile, used when bias_relu_post is asked to apply ReLU only
+    // (e.g. after a residual add).
+    auto zero_bias = std::vector<float>(kC, 0.0f);
+
+    // Helper: write a freshly-packed bias tile into buf_bias_d. The reader
+    // re-reads the same DRAM address every tile so this only runs once
+    // per bias_relu_post call.
+    auto stage_bias = [&](const std::vector<float>& bias) {
+        std::vector<uint16_t> bt;
+        pack_bias_tile(bias, bt);
+        tt::foil::write_buffer(*dev, *buf_bias_d, bt.data(), kTileBytes);
+    };
+
+    // Helper: run bias_relu_post on `n_tiles` tiles already laid out in
+    // `buf_in_dram` (NOC addr `in_noc`), reading bias from buf_bias_d,
+    // writing to `buf_out_dram` (NOC addr `out_noc`).
+    auto run_bias_relu = [&](tt::foil::Kernel& k,
+                             tt::foil::Buffer& buf_in_dram, uint64_t in_noc,
+                             tt::foil::Buffer& buf_out_dram, uint64_t out_noc,
+                             uint32_t n_tiles, uint32_t relu_enable) {
+        const uint32_t bytes = n_tiles * kTileBytes;
+        std::vector<uint8_t> zero(bytes, 0);
+        tt::foil::write_buffer(*dev, buf_out_dram, zero.data(), bytes);
+
+        std::array<uint32_t, 5> rab = {
+            lo(in_noc),     hi(in_noc),
+            lo(bias_d_noc), hi(bias_d_noc),
+            n_tiles,
+        };
+        std::array<uint32_t, 3> ran = { lo(out_noc), hi(out_noc), n_tiles };
+        std::array<uint32_t, 2> rac = { n_tiles, relu_enable };
+        tt::foil::set_runtime_args(*dev, k, R::RiscId::BRISC,  rab);
+        tt::foil::set_runtime_args(*dev, k, R::RiscId::NCRISC, ran);
+        tt::foil::set_runtime_args(*dev, k, R::RiscId::TRISC0, rac);
+        tt::foil::set_runtime_args(*dev, k, R::RiscId::TRISC1, rac);
+        tt::foil::set_runtime_args(*dev, k, R::RiscId::TRISC2, rac);
+        tt::foil::register_cbs(*dev, k, matmul_cbs);
+        tt::foil::execute(*dev, k);
+    };
+
+    // Helper: pack (C, HW) row-major chw → tile stream, write to DRAM
+    // buffer, then run bias+ReLU on device, read back tiles, untile
+    // back to (C, HW) chw. Bias staged via stage_bias() before calling.
+    auto bias_relu_chw = [&](tt::foil::Kernel& k,
+                             std::vector<uint16_t>& chw_inout,
+                             uint32_t H, uint32_t W,
+                             const std::vector<float>& bias,
+                             uint32_t relu_enable,
+                             tt::foil::Buffer& buf_io_dram,
+                             uint64_t io_noc) {
+        const uint32_t hw = H * W;
+        const uint32_t nt = hw / kTileW;
+        const uint32_t bytes = nt * kTileBytes;
+        std::vector<uint16_t> in_tiles;
+        tile_matrix(chw_inout, kMt_3 /*=1*/, nt, hw, in_tiles);
+        tt::foil::write_buffer(*dev, buf_io_dram, in_tiles.data(), bytes);
+
+        stage_bias(bias);
+        run_bias_relu(k, buf_io_dram, io_noc, *buf_post, post_noc, nt, relu_enable);
+
+        std::vector<uint16_t> out_tiles(nt * kTileWords, 0);
+        tt::foil::read_buffer(*dev, *buf_post, out_tiles.data(), bytes);
+        untile_matrix(out_tiles, 1, nt, hw, chw_inout);
+    };
+
+    // Kernel handles: rebound per phase via release_kernels(). The
+    // shared_ptr is captured by reference by the lambdas below, so they
+    // resolve to whichever program is currently loaded.
+    std::shared_ptr<tt::foil::Kernel> k_conv7, k_pool, k_conv, k_add,
+                                       k_bias, k_gap, k_fc;
+
+    // ================ Phase 1 — STEM ================================
+    // Kernel slots: conv_7x7 + maxpool_3x3 + bias_relu_post.
+    k_conv7 = load(conv7_dir);
+    k_pool  = load(pool_dir);
+    k_bias  = load(bias_dir);
+
     std::vector<uint16_t> stem_chw;
     {
+        // ---- Conv₇ₓ₇ → buf_Y7 (8 tiles, C × HW_mid) ----------------
         std::vector<uint16_t> w_mat, w_tiles, a_mat, a_tiles;
         weight_7x7_reshape(W7, w_mat);
         tile_matrix(w_mat, kMt_7, kKt_7, kKdim7, w_tiles);
@@ -532,11 +630,16 @@ int main() try {
         tt::foil::register_cbs(*dev, *k_conv7, matmul_cbs);
         tt::foil::execute(*dev, *k_conv7);
 
+        // ---- bias + ReLU on device (buf_Y7 → buf_post) --------------
+        stage_bias(b7);
+        run_bias_relu(*k_bias, *buf_Y7, Y7_noc, *buf_post, post_noc,
+                      /*n_tiles=*/kMt_7 * kNt_7, /*relu_enable=*/1);
+
+        // Read the post-op tiles back and untile to (C, HW_mid).
         std::vector<uint16_t> y_tiles(kMt_7 * kNt_7 * kTileWords, 0);
-        tt::foil::read_buffer(*dev, *buf_Y7, y_tiles.data(), y7_bytes);
+        tt::foil::read_buffer(*dev, *buf_post, y_tiles.data(), y7_bytes);
         std::vector<uint16_t> conv_chw;
         untile_matrix(y_tiles, kMt_7, kNt_7, kHWmid, conv_chw);   // (C, HW_mid)
-        bias_and_relu_chw_h(conv_chw, kHmid, kWmid, b7);
 
         // ---- Stem stage 2: Maxpool₃ₓ₃ (HWC layout in/out) ----------
         std::vector<uint16_t> conv_hwc;
@@ -611,6 +714,16 @@ int main() try {
         hwc_to_chw(pool_hwc, kHpost, kWpost, stem_chw);
     }
 
+    // ---- Phase 1 → Phase 2 transition: free the stem kernels and reload
+    // the block kernels into the freed KERNEL_CONFIG slot.
+    k_conv7.reset();
+    k_pool.reset();
+    k_bias.reset();
+    tt::foil::release_kernels(*dev, core);
+    k_conv = load(conv_dir);
+    k_add  = load(add_dir);
+    k_bias = load(bias_dir);
+
     // Helpers for the block-stage matmul (Mt=1 Kt=9 Nt=2) and residual_add.
     auto run_conv3 = [&](const std::vector<uint16_t>& x_chw,
                          const std::vector<uint16_t>& w_cchw,
@@ -670,16 +783,17 @@ int main() try {
     {
         std::vector<uint16_t> t1, t2;
         run_conv3(stem_chw, W11, *buf_Ym, Ym_noc, t1);
-        bias_and_relu_chw_h(t1, kHpost, kWpost, b11);
+        bias_relu_chw(*k_bias, t1, kHpost, kWpost, b11, /*relu=*/1, *buf_Ym, Ym_noc);
         run_conv3(t1, W12, *buf_Ym, Ym_noc, t2);
-        bias_only_chw_h(t2, kHpost, kWpost, b12);
+        bias_relu_chw(*k_bias, t2, kHpost, kWpost, b12, /*relu=*/0, *buf_Ym, Ym_noc);
 
         std::vector<uint16_t> t2_tiles, sk_tiles;
         chw_post_to_tile_stream(t2,       t2_tiles);
         chw_post_to_tile_stream(stem_chw, sk_tiles);
         run_add(*buf_Ym, *buf_Ys, *buf_Yo, Ym_noc, Ys_noc, Yo_noc,
                 t2_tiles, sk_tiles, y1_chw);
-        relu_inplace(y1_chw);
+        // ReLU after residual: bias_relu_post with bias = 0.
+        bias_relu_chw(*k_bias, y1_chw, kHpost, kWpost, zero_bias, /*relu=*/1, *buf_Ym, Ym_noc);
     }
 
     // ================ Block 2 — basic, skip = y1_chw ================
@@ -687,79 +801,99 @@ int main() try {
     {
         std::vector<uint16_t> t3, t4;
         run_conv3(y1_chw, W21, *buf_Ym, Ym_noc, t3);
-        bias_and_relu_chw_h(t3, kHpost, kWpost, b21);
+        bias_relu_chw(*k_bias, t3, kHpost, kWpost, b21, /*relu=*/1, *buf_Ym, Ym_noc);
         run_conv3(t3, W22, *buf_Ym, Ym_noc, t4);
-        bias_only_chw_h(t4, kHpost, kWpost, b22);
+        bias_relu_chw(*k_bias, t4, kHpost, kWpost, b22, /*relu=*/0, *buf_Ym, Ym_noc);
 
         std::vector<uint16_t> t4_tiles, y1_tiles;
         chw_post_to_tile_stream(t4,     t4_tiles);
         chw_post_to_tile_stream(y1_chw, y1_tiles);
         run_add(*buf_Ym, *buf_Ys, *buf_Yo, Ym_noc, Ys_noc, Yo_noc,
                 t4_tiles, y1_tiles, feat_dev);
-        relu_inplace(feat_dev);
+        bias_relu_chw(*k_bias, feat_dev, kHpost, kWpost, zero_bias, /*relu=*/1, *buf_Ym, Ym_noc);
     }
 
-    // ================ Classifier tail: GAP (host) + FC (device) =====
-    // The four feature-path kernel programs fill the KERNEL_CONFIG
-    // region; the FC kernel won't fit alongside them. Drop the feature
-    // kernel handles, free the slot, then load FC fresh.
-    k_conv7.reset();
-    k_pool.reset();
+    // ---- Phase 2 → Phase 3 transition: free block kernels, load tail. -
     k_conv.reset();
     k_add.reset();
+    k_bias.reset();
     tt::foil::release_kernels(*dev, core);
-    auto k_fc = load(fc_dir);
+    k_gap  = load(gap_dir);
+    k_fc   = load(fc_dir);
+    k_bias = load(bias_dir);
 
+    // ================ Classifier tail: GAP + FC + bias (all device) =
     std::vector<uint16_t> y_dev(kNcl);
     {
-        // Host GAP: mean across (h, w) per channel.
-        std::vector<uint16_t> gap_bf16(kC);
-        for (uint32_t c = 0; c < kC; ++c) {
-            float acc = 0.0f;
-            for (uint32_t i = 0; i < kHpost * kWpost; ++i)
-                acc += bf16_to_f32(feat_dev[c * (kHpost * kWpost) + i]);
-            gap_bf16[c] = f32_to_bf16(acc / static_cast<float>(kHpost * kWpost));
-        }
+        // ---- Stage A: device global_avg_pool -----------------------
+        // Pre-fill the scaler tile (1/HW) once for this stage.
+        std::vector<uint16_t> scaler_rm(kTileH * kTileW,
+                                        f32_to_bf16(1.0f / static_cast<float>(kHpost * kWpost)));
+        std::vector<uint16_t> scaler_tiles;
+        tt::foil::test::row_major_to_tile(scaler_rm.data(), scaler_tiles);
+        tt::foil::write_buffer(*dev, *buf_scaler, scaler_tiles.data(), kTileBytes);
 
-        // Pack FC operands: W (Ncl, C) and X (C, 32) with col 0 = gap.
+        // Tile feat_dev (C, HW_post) and write to buf_Ym (2 tiles).
+        std::vector<uint16_t> feat_tiles;
+        chw_post_to_tile_stream(feat_dev, feat_tiles);
+        const uint32_t feat_bytes = kRaNt * kTileBytes;
+        tt::foil::write_buffer(*dev, *buf_Ym, feat_tiles.data(), feat_bytes);
+
+        // GAP output (1 tile, col 0 = per-channel mean) → buf_Ys.
+        std::vector<uint8_t> zero(kTileBytes, 0);
+        tt::foil::write_buffer(*dev, *buf_Ys, zero.data(), kTileBytes);
+
+        std::array<uint32_t, 5> ga_rab = {
+            lo(Ym_noc),     hi(Ym_noc),
+            lo(scaler_noc), hi(scaler_noc),
+            kRaNt,
+        };
+        std::array<uint32_t, 2> ga_ran = { lo(Ys_noc), hi(Ys_noc) };
+        std::array<uint32_t, 1> ga_rac = { kRaNt };
+        tt::foil::set_runtime_args(*dev, *k_gap, R::RiscId::BRISC,  ga_rab);
+        tt::foil::set_runtime_args(*dev, *k_gap, R::RiscId::NCRISC, ga_ran);
+        tt::foil::set_runtime_args(*dev, *k_gap, R::RiscId::TRISC0, ga_rac);
+        tt::foil::set_runtime_args(*dev, *k_gap, R::RiscId::TRISC1, ga_rac);
+        tt::foil::set_runtime_args(*dev, *k_gap, R::RiscId::TRISC2, ga_rac);
+        tt::foil::register_cbs(*dev, *k_gap, matmul_cbs);
+        tt::foil::execute(*dev, *k_gap);
+
+        // ---- Stage B: device FC matmul -----------------------------
+        // W: (Ncl, C) tiled. X comes straight from GAP output (already
+        // in buf_Ys at the FC's expected layout — channel value in col 0
+        // of a 32×32 tile). Output → buf_Yo (1 tile).
         std::vector<uint16_t> Wmat(kNcl * kC);
         for (uint32_t r = 0; r < kNcl; ++r)
             for (uint32_t c = 0; c < kC; ++c)
                 Wmat[r * kC + c] = Wfc[r * kC + c];
-        std::vector<uint16_t> Xmat(kC * kTileW, 0);
-        for (uint32_t r = 0; r < kC; ++r) Xmat[r * kTileW + 0] = gap_bf16[r];
+        std::vector<uint16_t> w_tiles;
+        tile_matrix(Wmat, kMt_fc, kKt_fc, kC, w_tiles);
 
-        std::vector<uint16_t> w_tiles, x_tiles;
-        tile_matrix(Wmat, kMt_fc, kKt_fc, kC,     w_tiles);
-        tile_matrix(Xmat, kKt_fc, kNt_fc, kTileW, x_tiles);
+        tt::foil::write_buffer(*dev, *buf_Ym, w_tiles.data(), kTileBytes);
+        tt::foil::write_buffer(*dev, *buf_Yo, zero.data(), kTileBytes);
 
-        const uint32_t fc_w_bytes = kMt_fc * kKt_fc * kTileBytes;
-        const uint32_t fc_x_bytes = kKt_fc * kNt_fc * kTileBytes;
-        const uint32_t fc_y_bytes = kMt_fc * kNt_fc * kTileBytes;
-        // Reuse buf_Ym (W), buf_Ys (X), buf_Yo (Y) — all DRAM and
-        // already sized larger than the FC's single-tile operands.
-        tt::foil::write_buffer(*dev, *buf_Ym, w_tiles.data(), fc_w_bytes);
-        tt::foil::write_buffer(*dev, *buf_Ys, x_tiles.data(), fc_x_bytes);
-        std::vector<uint8_t> zero(fc_y_bytes, 0);
-        tt::foil::write_buffer(*dev, *buf_Yo, zero.data(), fc_y_bytes);
-
-        std::array<uint32_t, 7> ra = {
+        std::array<uint32_t, 7> fc_ra = {
             lo(Ym_noc), hi(Ym_noc), lo(Ys_noc), hi(Ys_noc),
             kMt_fc, kKt_fc, kNt_fc,
         };
-        std::array<uint32_t, 3> rn = { lo(Yo_noc), hi(Yo_noc), kMt_fc * kNt_fc };
-        tt::foil::set_runtime_args(*dev, *k_fc, R::RiscId::BRISC,  ra);
-        tt::foil::set_runtime_args(*dev, *k_fc, R::RiscId::NCRISC, rn);
+        std::array<uint32_t, 3> fc_rn = { lo(Yo_noc), hi(Yo_noc), kMt_fc * kNt_fc };
+        tt::foil::set_runtime_args(*dev, *k_fc, R::RiscId::BRISC,  fc_ra);
+        tt::foil::set_runtime_args(*dev, *k_fc, R::RiscId::NCRISC, fc_rn);
         tt::foil::register_cbs(*dev, *k_fc, matmul_cbs);
         tt::foil::execute(*dev, *k_fc);
 
-        std::vector<uint16_t> y_tiles(kMt_fc * kNt_fc * kTileWords, 0);
-        tt::foil::read_buffer(*dev, *buf_Yo, y_tiles.data(), fc_y_bytes);
-        std::vector<uint16_t> y_mat;
-        untile_matrix(y_tiles, kMt_fc, kNt_fc, kTileW, y_mat);   // (Ncl, 32)
+        // ---- Stage C: device FC bias add ---------------------------
+        stage_bias(bfc);
+        run_bias_relu(*k_bias, *buf_Yo, Yo_noc, *buf_post, post_noc,
+                      /*n_tiles=*/1, /*relu_enable=*/0);
 
+        // Read logits: col 0 of the single output tile.
+        std::vector<uint16_t> y_tiles(kTileWords, 0);
+        tt::foil::read_buffer(*dev, *buf_post, y_tiles.data(), kTileBytes);
+        std::vector<uint16_t> y_block(kTileH * kTileW);
+        tt::foil::test::tile_to_row_major(y_tiles.data(), y_block.data());
         for (uint32_t k = 0; k < kNcl; ++k)
-            y_dev[k] = f32_to_bf16(bf16_to_f32(y_mat[k * kTileW + 0]) + bfc[k]);
+            y_dev[k] = y_block[k * kTileW + 0];
     }
 
     // ---- Compare ---------------------------------------------------
