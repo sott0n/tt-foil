@@ -62,7 +62,9 @@ fi
 echo "build_kernels: using firmware weakened.elfs from $TT_METAL_PRECOMPILED"
 
 BUILD="${BUILD:-/tmp/tt_foil_build}"
-PREBUILT="$HERE/prebuilt"
+# PREBUILT_DIR override lets siblings reuse this builder at a different
+# Mt/Kt/Nt without clobbering the default fixture.
+PREBUILT="${PREBUILT_DIR:-$HERE/prebuilt}"
 mkdir -p "$BUILD" "$PREBUILT"
 
 # Common preprocessor + include flags shared by both RISC compiles.
@@ -263,7 +265,7 @@ EOF
             -DTRISC_${VAR} \
             -DNAMESPACE=chlkc_${var} \
             -DPROCESSOR_INDEX=$proc_idx \
-            -DMM_MT=${MM_MT:-2} -DMM_KT=${MM_KT:-4} -DMM_NT=${MM_NT:-2} \
+            -DMM_MT=${MM_MT:-1} -DMM_KT=${MM_KT:-9} -DMM_NT=${MM_NT:-2} \
             -c "$TT/tt_metal/hw/firmware/src/tt-1xx/trisck.cc" \
             -o "$obj"
 
