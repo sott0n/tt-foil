@@ -210,14 +210,34 @@ std::unique_ptr<Device> device_open(
             return "/home/kyamaguchi/tt-metal";
         }());
 
-    // Cluster-wide broadcast assert: parks every Tensix RISC across every
-    // chip in soft-reset before we touch L1. Without it, dispatch firmware
-    // left on neighbour cores from prior sessions keeps the column-1 (and
-    // possibly column-16) Tensix tiles producing/consuming NOC traffic, and
-    // our per-core BRISC boot at e.g. translated (1,3) never advances past
-    // RUN_MSG_INIT. tt-metal's Cluster::initialize() does the same broadcast
-    // (tt_cluster.cpp ~line 237: assert_risc_reset()).
-    dev->umd_driver->assert_risc_reset();
+    // Park every Tensix RISC on this chip in soft-reset before we touch L1.
+    //
+    // History note: we used to call `umd::Cluster::assert_risc_reset()` which
+    // is a NOC0 multicast write to 0xFFB121B0 (the soft-reset register) with
+    // mcast row/col exclusion. That works for clean cores but Bug 3 showed it
+    // can silently skip cores whose BRISC is mid-NOC-transaction: the mcast
+    // packet sits in a router queue behind the very transaction we want to
+    // interrupt. Same is true of `tt-smi -r` (ARC reset → broadcast). The
+    // symptom is (1,2) staying at soft_reset=0xf7 (BRISC running) even after
+    // the broadcast — subsequent L1 clear then races a still-running BRISC.
+    //
+    // Per-core unicast writes use a different NOC path and do land, so we
+    // issue one per Tensix translated coord. The default RISC mask asserts
+    // ALL Tensix RISCs (BRISC + NCRISC + TRISC0/1/2), which also takes care
+    // of subordinates left running by a previous dispatch.
+    {
+        auto all_tensix = soc_desc.get_cores(
+            tt::CoreType::TENSIX, tt::CoordSystem::TRANSLATED);
+        // Two passes with a membar between so any RISC that was deep in a NOC
+        // transaction gets a second chance once the first wave of asserts has
+        // forced router state to flush.
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            for (const auto& t : all_tensix) {
+                dev->umd_driver->assert_risc_reset_at_core(dev->chip_id, t);
+            }
+            dev->umd_driver->l1_membar(dev->chip_id);
+        }
+    }
 
     // Clear L1 to all-zero before loading firmware. tt-metal's
     // `RiscFirmwareInitializer::clear_l1_state` does this for every Tensix
@@ -272,6 +292,27 @@ std::unique_ptr<Device> device_open(
 }
 
 void device_close(Device& dev) {
+    // Park every Tensix RISC before releasing the UMD handle. Without this,
+    // BRISC and subordinates keep running their idle firmware loop after we
+    // exit; the next program's broadcast-assert can fail to interrupt a
+    // mid-NOC-transaction BRISC (see the long comment in open_device above)
+    // and the chip ends up needing a re-flash to recover. The per-core
+    // unicast assert is the same trick open_device now uses; doing it on the
+    // way out is the cheap preventative half of the fix.
+    if (dev.umd_driver) {
+        try {
+            const auto& soc_desc = dev.umd_driver->get_soc_descriptor(dev.chip_id);
+            auto all_tensix = soc_desc.get_cores(
+                tt::CoreType::TENSIX, tt::CoordSystem::TRANSLATED);
+            for (const auto& t : all_tensix) {
+                dev.umd_driver->assert_risc_reset_at_core(dev.chip_id, t);
+            }
+            dev.umd_driver->l1_membar(dev.chip_id);
+        } catch (...) {
+            // Best effort: never let close throw.
+        }
+    }
+
     // Drop owned UMD cluster + HAL. Cluster destructor closes PCIe handle.
     dev.owned_cluster.reset();
     dev.owned_hal.reset();
