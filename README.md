@@ -290,6 +290,7 @@ Pick by what you want to learn:
 | NOC weight-broadcast (DRAM read once + forward)  | [`examples/matmul_2core_mcast/`](examples/matmul_2core_mcast/) |
 | 1×1 / 3×3 convolution via im2col                 | [`examples/conv_1x1/`](examples/conv_1x1/), [`examples/conv_3x3/`](examples/conv_3x3/) |
 | 3×3 stride=2 conv (ResNet downsample)            | [`examples/conv_3x3_s2/`](examples/conv_3x3_s2/) |
+| 7×7 stride=2 conv (ResNet stem input layer)      | [`examples/conv_7x7/`](examples/conv_7x7/) |
 | Eltwise primitives (ReLU, add, bias broadcast)   | [`examples/relu/`](examples/relu/), [`examples/add_tiles/`](examples/add_tiles/), [`examples/bias_add/`](examples/bias_add/) |
 | Multi-tile eltwise add (ResNet skip-add building block) | [`examples/residual_add/`](examples/residual_add/) |
 | ResNet basic block end-to-end (conv → bias+ReLU → conv → bias → skip-add → ReLU) | [`examples/basic_block/`](examples/basic_block/) + [`tests/test_basic_block.cpp`](tests/test_basic_block.cpp) |

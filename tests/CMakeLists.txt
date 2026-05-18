@@ -190,6 +190,13 @@ tt_foil_hw_test(test_downsample_block test_downsample_block.cpp
 # block 1.
 tt_foil_hw_test(test_layer            test_layer.cpp
     "${EX}/downsample_block/prebuilt")
+
+# ---- v9.4: 7×7 strided conv (ResNet stem input layer) ----
+_tt_default(MM_MT_C7  1)
+_tt_default(MM_KT_C7  49)   # C_in * 49 / 32 ; assumes C_in = 32
+_tt_default(MM_NT_C7  2)
+tt_foil_hw_test(test_conv_7x7         test_conv_7x7.cpp         "${EX}/conv_7x7/prebuilt"
+    "MM_MT=${MM_MT_C7}" "MM_KT=${MM_KT_C7}" "MM_NT=${MM_NT_C7}")
 tt_foil_hw_test(test_brisc_col1_boot_diag test_brisc_col1_boot_diag.cpp "${EX}/add_two_numbers/prebuilt")
 
 # NOTE: The Phase B2 step-by-step tests (test_cold_boot, test_firmware_load,
