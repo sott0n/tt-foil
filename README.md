@@ -292,6 +292,7 @@ Pick by what you want to learn:
 | 3×3 stride=2 conv (ResNet downsample)            | [`examples/conv_3x3_s2/`](examples/conv_3x3_s2/) |
 | 7×7 stride=2 conv (ResNet stem input layer)      | [`examples/conv_7x7/`](examples/conv_7x7/) |
 | 3×3 stride=2 maxpool (ResNet stem post-conv)     | [`examples/maxpool_3x3/`](examples/maxpool_3x3/) |
+| ResNet stem end-to-end (Conv₇ₓ₇ → bias+ReLU → Maxpool₃ₓ₃) | [`examples/stem/`](examples/stem/) + [`tests/test_stem.cpp`](tests/test_stem.cpp) |
 | Eltwise primitives (ReLU, add, bias broadcast)   | [`examples/relu/`](examples/relu/), [`examples/add_tiles/`](examples/add_tiles/), [`examples/bias_add/`](examples/bias_add/) |
 | Multi-tile eltwise add (ResNet skip-add building block) | [`examples/residual_add/`](examples/residual_add/) |
 | ResNet basic block end-to-end (conv → bias+ReLU → conv → bias → skip-add → ReLU) | [`examples/basic_block/`](examples/basic_block/) + [`tests/test_basic_block.cpp`](tests/test_basic_block.cpp) |

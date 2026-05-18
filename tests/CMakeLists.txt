@@ -200,6 +200,12 @@ tt_foil_hw_test(test_conv_7x7         test_conv_7x7.cpp         "${EX}/conv_7x7/
 
 # ---- v9.5: 3×3 stride-2 maxpool (ResNet stem post-conv) ----
 tt_foil_hw_test(test_maxpool_3x3      test_maxpool_3x3.cpp      "${EX}/maxpool_3x3/prebuilt")
+
+# ---- v9.6: ResNet stem (Conv₇ₓ₇ → bias+ReLU → Maxpool₃ₓ₃) ----
+# Conv₇ₓ₇ is rebuilt at Nt=8 (input H=W=32 → H=W=16) under
+# stem/prebuilt/conv_7x7. Maxpool₃ₓ₃ matches its standalone default
+# fixture and is symlinked in.
+tt_foil_hw_test(test_stem             test_stem.cpp             "${EX}/stem/prebuilt")
 tt_foil_hw_test(test_brisc_col1_boot_diag test_brisc_col1_boot_diag.cpp "${EX}/add_two_numbers/prebuilt")
 
 # NOTE: The Phase B2 step-by-step tests (test_cold_boot, test_firmware_load,

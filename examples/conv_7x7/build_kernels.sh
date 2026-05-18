@@ -20,6 +20,6 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PREBUILT_DIR="$HERE/prebuilt" \
+PREBUILT_DIR="${PREBUILT_DIR:-$HERE/prebuilt}" \
     MM_MT="${MM_MT:-1}" MM_KT="${MM_KT:-49}" MM_NT="${MM_NT:-2}" \
     bash "$HERE/../conv_3x3_s2/build_kernels.sh"
