@@ -62,7 +62,9 @@ fi
 echo "build_kernels: using firmware weakened.elfs from $TT_METAL_PRECOMPILED"
 
 BUILD="${BUILD:-/tmp/tt_foil_build}"
-PREBUILT="$HERE/prebuilt"
+# PREBUILT_DIR lets a sibling example reuse these kernel sources at a
+# different MM_MT/MM_KT/MM_NT without clobbering this example's prebuilt/.
+PREBUILT="${PREBUILT_DIR:-$HERE/prebuilt}"
 mkdir -p "$BUILD" "$PREBUILT"
 
 # Common preprocessor + include flags shared by both RISC compiles.

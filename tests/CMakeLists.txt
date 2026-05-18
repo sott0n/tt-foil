@@ -176,6 +176,12 @@ set_tests_properties(test_basic_block PROPERTIES
 set_tests_properties(test_basic_block PROPERTIES RESOURCE_LOCK chip)
 set_tests_properties(test_basic_block PROPERTIES LABELS "hw")
 set_tests_properties(test_basic_block PROPERTIES TIMEOUT 90)
+
+# ---- v9.2: ResNet downsample block (3×3 s=2 main + 1×1 s=2 projection skip) ----
+# Single kernel root with four subdirs (conv_s2, conv, conv1x1, residual_add)
+# produced by examples/downsample_block/build_kernels.sh.
+tt_foil_hw_test(test_downsample_block test_downsample_block.cpp
+    "${EX}/downsample_block/prebuilt")
 tt_foil_hw_test(test_brisc_col1_boot_diag test_brisc_col1_boot_diag.cpp "${EX}/add_two_numbers/prebuilt")
 
 # NOTE: The Phase B2 step-by-step tests (test_cold_boot, test_firmware_load,

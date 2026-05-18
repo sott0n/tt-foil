@@ -293,6 +293,7 @@ Pick by what you want to learn:
 | Eltwise primitives (ReLU, add, bias broadcast)   | [`examples/relu/`](examples/relu/), [`examples/add_tiles/`](examples/add_tiles/), [`examples/bias_add/`](examples/bias_add/) |
 | Multi-tile eltwise add (ResNet skip-add building block) | [`examples/residual_add/`](examples/residual_add/) |
 | ResNet basic block end-to-end (conv → bias+ReLU → conv → bias → skip-add → ReLU) | [`examples/basic_block/`](examples/basic_block/) + [`tests/test_basic_block.cpp`](tests/test_basic_block.cpp) |
+| ResNet downsample block (3×3 s=2 main + 1×1 s=2 projection skip) | [`examples/downsample_block/`](examples/downsample_block/) + [`tests/test_downsample_block.cpp`](tests/test_downsample_block.cpp) |
 
 ## API
 
