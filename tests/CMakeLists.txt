@@ -157,6 +157,11 @@ tt_foil_hw_test(test_conv_3x3_s2      test_conv_3x3_s2.cpp      "${EX}/conv_3x3_
 
 # ---- v8: peripheral ops (pool, BN fold) ----
 tt_foil_hw_test(test_maxpool_2x2      test_maxpool_2x2.cpp      "${EX}/maxpool_2x2/prebuilt")
+
+# ---- v9: residual add (ResNet skip-connection building block) ----
+_tt_default(RA_NT 8)
+tt_foil_hw_test(test_residual_add     test_residual_add.cpp     "${EX}/residual_add/prebuilt"
+    "RA_NT=${RA_NT}")
 tt_foil_hw_test(test_brisc_col1_boot_diag test_brisc_col1_boot_diag.cpp "${EX}/add_two_numbers/prebuilt")
 
 # NOTE: The Phase B2 step-by-step tests (test_cold_boot, test_firmware_load,

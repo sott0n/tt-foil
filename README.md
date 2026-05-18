@@ -291,6 +291,7 @@ Pick by what you want to learn:
 | 1×1 / 3×3 convolution via im2col                 | [`examples/conv_1x1/`](examples/conv_1x1/), [`examples/conv_3x3/`](examples/conv_3x3/) |
 | 3×3 stride=2 conv (ResNet downsample)            | [`examples/conv_3x3_s2/`](examples/conv_3x3_s2/) |
 | Eltwise primitives (ReLU, add, bias broadcast)   | [`examples/relu/`](examples/relu/), [`examples/add_tiles/`](examples/add_tiles/), [`examples/bias_add/`](examples/bias_add/) |
+| Multi-tile eltwise add (ResNet skip-add building block) | [`examples/residual_add/`](examples/residual_add/) |
 
 ## API
 
