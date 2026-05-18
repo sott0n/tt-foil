@@ -294,6 +294,7 @@ Pick by what you want to learn:
 | Multi-tile eltwise add (ResNet skip-add building block) | [`examples/residual_add/`](examples/residual_add/) |
 | ResNet basic block end-to-end (conv → bias+ReLU → conv → bias → skip-add → ReLU) | [`examples/basic_block/`](examples/basic_block/) + [`tests/test_basic_block.cpp`](tests/test_basic_block.cpp) |
 | ResNet downsample block (3×3 s=2 main + 1×1 s=2 projection skip) | [`examples/downsample_block/`](examples/downsample_block/) + [`tests/test_downsample_block.cpp`](tests/test_downsample_block.cpp) |
+| ResNet layer = downsample_block + basic_block chained               | [`tests/test_layer.cpp`](tests/test_layer.cpp) |
 
 ## API
 

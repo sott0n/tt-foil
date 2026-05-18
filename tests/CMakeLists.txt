@@ -182,6 +182,14 @@ set_tests_properties(test_basic_block PROPERTIES TIMEOUT 90)
 # produced by examples/downsample_block/build_kernels.sh.
 tt_foil_hw_test(test_downsample_block test_downsample_block.cpp
     "${EX}/downsample_block/prebuilt")
+
+# ---- v9.3: ResNet layer (downsample_block + basic_block chained) ----
+# Reuses the downsample_block kernel root — all needed binaries
+# (conv_s2, conv, conv1x1, residual_add) already match this test's
+# tile shapes since C stays at 32 and spatial dims stay 8×8 after
+# block 1.
+tt_foil_hw_test(test_layer            test_layer.cpp
+    "${EX}/downsample_block/prebuilt")
 tt_foil_hw_test(test_brisc_col1_boot_diag test_brisc_col1_boot_diag.cpp "${EX}/add_two_numbers/prebuilt")
 
 # NOTE: The Phase B2 step-by-step tests (test_cold_boot, test_firmware_load,
