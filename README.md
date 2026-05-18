@@ -271,38 +271,41 @@ firmware it runs against must come from the same build (their
 precedence order, so by default they link against tt-foil's self-built
 `build/firmware/`.
 
-## Examples
+## Supported Models
 
-The [`examples/`](examples/) directory contains end-to-end programs
-paired with tests under [`tests/`](tests/). Each example has a
-`build_kernels.sh` that produces the kernel ELFs and a
-`test_<name>.cpp` that drives them.
+End-to-end neural network forward passes that run on a single Tensix
+core. Each model lives under [`models/`](models/) and is exercised by
+a paired test under [`tests/`](tests/).
 
-Pick by what you want to learn:
+| Model | Description | Test |
+| --- | --- | --- |
+| **Mini ResNet** | Random-weight ResNet-shaped classifier: Stem (7×7 conv + bias+ReLU + 3×3 maxpool) → 2× basic_block → Global Avg Pool → FC → 32-way logits. (C=32, image 32×32). Every multiply / add / ReLU runs on device; only layout (im2col, tile, transpose) on host. Verifies device output against a host fp32→bf16 reference; argmax dev/ref match. | [`test_resnet_classifier`](tests/test_resnet_classifier.cpp) |
+| **CIFAR-10 ResNet-20** | Pretrained akamaster checkpoint + one CIFAR-10 test image (10-way real classification). **In progress** — see `data/cifar10_resnet20/` for the bf16-exported weights / image / golden logits produced by [`tools/export_cifar10_resnet20.py`](tools/export_cifar10_resnet20.py); the device chain (kernel builds + test) lands incrementally. | `test_cifar10_resnet20` (planned) |
 
-| If you want to see…                              | Look at                                      |
-| ------------------------------------------------ | -------------------------------------------- |
-| A single BRISC kernel doing arithmetic           | [`examples/add_two_numbers/`](examples/add_two_numbers/) |
-| BRISC ↔ BRISC NOC unicast between two cores      | [`examples/noc_passthrough/`](examples/noc_passthrough/) |
-| All 5 RISCs + circular buffers + `copy_tile`     | [`examples/tile_copy/`](examples/tile_copy/) |
-| bf16 matmul tiled through DRAM                   | [`examples/matmul_dram/`](examples/matmul_dram/) |
-| Multi-core sharded matmul (2×2 / 4×2 grids)      | [`examples/matmul_2x2/`](examples/matmul_2x2/), [`examples/matmul_4x2/`](examples/matmul_4x2/) |
-| NOC weight-broadcast (DRAM read once + forward)  | [`examples/matmul_2core_mcast/`](examples/matmul_2core_mcast/) |
-| 1×1 / 3×3 convolution via im2col                 | [`examples/conv_1x1/`](examples/conv_1x1/), [`examples/conv_3x3/`](examples/conv_3x3/) |
-| 3×3 stride=2 conv (ResNet downsample)            | [`examples/conv_3x3_s2/`](examples/conv_3x3_s2/) |
-| 7×7 stride=2 conv (ResNet stem input layer)      | [`examples/conv_7x7/`](examples/conv_7x7/) |
-| 3×3 stride=2 maxpool (ResNet stem post-conv)     | [`examples/maxpool_3x3/`](examples/maxpool_3x3/) |
-| ResNet stem end-to-end (Conv₇ₓ₇ → bias+ReLU → Maxpool₃ₓ₃) | [`models/stem/`](models/stem/) + [`tests/test_stem.cpp`](tests/test_stem.cpp) |
-| Mini ResNet feature path (stem + 2× basic_block)        | [`models/mini_resnet/`](models/mini_resnet/) + [`tests/test_mini_resnet.cpp`](tests/test_mini_resnet.cpp) |
-| Classifier tail (Global Avg Pool + FC + bias)           | [`models/classifier_tail/`](models/classifier_tail/) + [`tests/test_classifier_tail.cpp`](tests/test_classifier_tail.cpp) |
-| Full ResNet classifier (image → stem → 2× basic → GAP → FC → logits) | [`models/resnet_classifier/`](models/resnet_classifier/) + [`tests/test_resnet_classifier.cpp`](tests/test_resnet_classifier.cpp) |
-| Eltwise primitives (ReLU, add, bias broadcast)   | [`examples/relu/`](examples/relu/), [`examples/add_tiles/`](examples/add_tiles/), [`examples/bias_add/`](examples/bias_add/) |
-| Multi-tile bias + optional ReLU (post-op)        | [`examples/bias_relu_post/`](examples/bias_relu_post/) |
-| Global average pool (SFPU reduce_w sum × 1/HW)   | [`examples/global_avg_pool/`](examples/global_avg_pool/) |
-| Multi-tile eltwise add (ResNet skip-add building block) | [`examples/residual_add/`](examples/residual_add/) |
-| ResNet basic block end-to-end (conv → bias+ReLU → conv → bias → skip-add → ReLU) | [`models/basic_block/`](models/basic_block/) + [`tests/test_basic_block.cpp`](tests/test_basic_block.cpp) |
-| ResNet downsample block (3×3 s=2 main + 1×1 s=2 projection skip) | [`models/downsample_block/`](models/downsample_block/) + [`tests/test_downsample_block.cpp`](tests/test_downsample_block.cpp) |
-| ResNet layer = downsample_block + basic_block chained               | [`tests/test_layer.cpp`](tests/test_layer.cpp) |
+### Composable building blocks
+
+The model graphs above are assembled from smaller stage-level pieces,
+each runnable standalone for stage-by-stage verification:
+
+| Stage | Where | Test |
+| --- | --- | --- |
+| Basic block (conv → bias+ReLU → conv → bias → skip-add → ReLU) | [`models/basic_block/`](models/basic_block/) | [`test_basic_block`](tests/test_basic_block.cpp) |
+| Downsample block (3×3 s=2 main + 1×1 s=2 projection skip)      | [`models/downsample_block/`](models/downsample_block/) | [`test_downsample_block`](tests/test_downsample_block.cpp) |
+| Layer (`downsample_block` + `basic_block` chained)             | (no fresh kernels) | [`test_layer`](tests/test_layer.cpp) |
+| Stem (Conv₇ₓ₇ + bias+ReLU + Maxpool₃ₓ₃)                       | [`models/stem/`](models/stem/) | [`test_stem`](tests/test_stem.cpp) |
+| Mini ResNet feature path (stem + 2× basic_block, no head)      | [`models/mini_resnet/`](models/mini_resnet/) | [`test_mini_resnet`](tests/test_mini_resnet.cpp) |
+| Classifier tail (host GAP + device FC + host bias)             | [`models/classifier_tail/`](models/classifier_tail/) | [`test_classifier_tail`](tests/test_classifier_tail.cpp) |
+
+### Single-op kernel demos
+
+Lower-level building blocks — one device kernel each, isolated for
+study or copy-paste — live under [`examples/`](examples/): matmul
+variants, conv via im2col (1×1 / 3×3 / 3×3 stride 2 / 7×7), maxpool
+2×2 and 3×3, SFPU eltwise (ReLU, add, bias broadcast, fused
+bias+ReLU), global average pool, multi-tile residual add, NOC
+passthrough, multi-core sharded matmul, and a couple of "five RISCs
+plus circular buffers" tutorials. Each example ships its own
+`build_kernels.sh` and `tests/test_<name>.cpp`.
 
 ## API
 
