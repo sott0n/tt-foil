@@ -6,9 +6,11 @@ generated/
 # tools/export_*.py download cache (CIFAR-10 tarball, pretrained checkpoints…)
 .cache/
 
-# Example kernel build outputs (all examples/*/prebuilt/)
+# Example and model kernel build outputs (per-dir prebuilt/)
 examples/*/prebuilt/
+models/*/prebuilt/
 
 # Editor / OS noise
 *.swp
 .DS_Store
+.claude/

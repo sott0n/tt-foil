@@ -17,7 +17,7 @@
 //   y₂ = ReLU(main + y₁)
 //
 // We keep C = 32 throughout so the prebuilt kernels in
-// examples/downsample_block/prebuilt/{conv_s2,conv,conv1x1,residual_add}
+// models/downsample_block/prebuilt/{conv_s2,conv,conv1x1,residual_add}
 // (all shaped for Mt=1, Kt={9,9,1}, Nt=2) can be reused as-is — no new
 // kernel binaries needed for this test.
 //

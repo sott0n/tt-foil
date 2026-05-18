@@ -25,15 +25,15 @@ mkdir -p "$PREBUILT"
 # Their defaults already match: Mt=1, Kt=9, Nt=2 (see tests/CMakeLists.txt
 # MM_MT_C3 / MM_MT_CS2). Symlink so the test driver doesn't have to know
 # multiple unrelated paths.
-ln -sfn "$HERE/../conv_3x3_s2/prebuilt" "$PREBUILT/conv_s2"
-ln -sfn "$HERE/../conv_3x3/prebuilt"    "$PREBUILT/conv"
+ln -sfn "$HERE/../../examples/conv_3x3_s2/prebuilt" "$PREBUILT/conv_s2"
+ln -sfn "$HERE/../../examples/conv_3x3/prebuilt"    "$PREBUILT/conv"
 
 # ---- Build conv_1x1 with shapes matching this test --------------------
 mkdir -p "$PREBUILT/conv1x1"
 PREBUILT_DIR="$PREBUILT/conv1x1" MM_MT=1 MM_KT=1 MM_NT=2 \
-    bash "$HERE/../conv_1x1/build_kernels.sh"
+    bash "$HERE/../../examples/conv_1x1/build_kernels.sh"
 
 # ---- Build residual_add with RA_NT=2 ----------------------------------
 mkdir -p "$PREBUILT/residual_add"
 PREBUILT_DIR="$PREBUILT/residual_add" RA_NT=2 \
-    bash "$HERE/../residual_add/build_kernels.sh"
+    bash "$HERE/../../examples/residual_add/build_kernels.sh"

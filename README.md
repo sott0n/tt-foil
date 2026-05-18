@@ -292,16 +292,16 @@ Pick by what you want to learn:
 | 3×3 stride=2 conv (ResNet downsample)            | [`examples/conv_3x3_s2/`](examples/conv_3x3_s2/) |
 | 7×7 stride=2 conv (ResNet stem input layer)      | [`examples/conv_7x7/`](examples/conv_7x7/) |
 | 3×3 stride=2 maxpool (ResNet stem post-conv)     | [`examples/maxpool_3x3/`](examples/maxpool_3x3/) |
-| ResNet stem end-to-end (Conv₇ₓ₇ → bias+ReLU → Maxpool₃ₓ₃) | [`examples/stem/`](examples/stem/) + [`tests/test_stem.cpp`](tests/test_stem.cpp) |
-| Mini ResNet feature path (stem + 2× basic_block)        | [`examples/mini_resnet/`](examples/mini_resnet/) + [`tests/test_mini_resnet.cpp`](tests/test_mini_resnet.cpp) |
-| Classifier tail (Global Avg Pool + FC + bias)           | [`examples/classifier_tail/`](examples/classifier_tail/) + [`tests/test_classifier_tail.cpp`](tests/test_classifier_tail.cpp) |
-| Full ResNet classifier (image → stem → 2× basic → GAP → FC → logits) | [`examples/resnet_classifier/`](examples/resnet_classifier/) + [`tests/test_resnet_classifier.cpp`](tests/test_resnet_classifier.cpp) |
+| ResNet stem end-to-end (Conv₇ₓ₇ → bias+ReLU → Maxpool₃ₓ₃) | [`models/stem/`](models/stem/) + [`tests/test_stem.cpp`](tests/test_stem.cpp) |
+| Mini ResNet feature path (stem + 2× basic_block)        | [`models/mini_resnet/`](models/mini_resnet/) + [`tests/test_mini_resnet.cpp`](tests/test_mini_resnet.cpp) |
+| Classifier tail (Global Avg Pool + FC + bias)           | [`models/classifier_tail/`](models/classifier_tail/) + [`tests/test_classifier_tail.cpp`](tests/test_classifier_tail.cpp) |
+| Full ResNet classifier (image → stem → 2× basic → GAP → FC → logits) | [`models/resnet_classifier/`](models/resnet_classifier/) + [`tests/test_resnet_classifier.cpp`](tests/test_resnet_classifier.cpp) |
 | Eltwise primitives (ReLU, add, bias broadcast)   | [`examples/relu/`](examples/relu/), [`examples/add_tiles/`](examples/add_tiles/), [`examples/bias_add/`](examples/bias_add/) |
 | Multi-tile bias + optional ReLU (post-op)        | [`examples/bias_relu_post/`](examples/bias_relu_post/) |
 | Global average pool (SFPU reduce_w sum × 1/HW)   | [`examples/global_avg_pool/`](examples/global_avg_pool/) |
 | Multi-tile eltwise add (ResNet skip-add building block) | [`examples/residual_add/`](examples/residual_add/) |
-| ResNet basic block end-to-end (conv → bias+ReLU → conv → bias → skip-add → ReLU) | [`examples/basic_block/`](examples/basic_block/) + [`tests/test_basic_block.cpp`](tests/test_basic_block.cpp) |
-| ResNet downsample block (3×3 s=2 main + 1×1 s=2 projection skip) | [`examples/downsample_block/`](examples/downsample_block/) + [`tests/test_downsample_block.cpp`](tests/test_downsample_block.cpp) |
+| ResNet basic block end-to-end (conv → bias+ReLU → conv → bias → skip-add → ReLU) | [`models/basic_block/`](models/basic_block/) + [`tests/test_basic_block.cpp`](tests/test_basic_block.cpp) |
+| ResNet downsample block (3×3 s=2 main + 1×1 s=2 projection skip) | [`models/downsample_block/`](models/downsample_block/) + [`tests/test_downsample_block.cpp`](tests/test_downsample_block.cpp) |
 | ResNet layer = downsample_block + basic_block chained               | [`tests/test_layer.cpp`](tests/test_layer.cpp) |
 
 ## API

@@ -24,7 +24,7 @@
 //   Conv_s (1×1)     M=32 →Mt=1, K=Cin=32 →Kt=1, N=64 →Nt=2
 //   skip add          RA_NT = Mt*Nt = 2
 //
-// Kernel dirs (built by examples/downsample_block/build_kernels.sh):
+// Kernel dirs (built by models/downsample_block/build_kernels.sh):
 //   $TT_FOIL_KERNEL_DIR/conv_s2/        (conv_3x3_s2 prebuilt, Mt=1 Kt=9 Nt=2)
 //   $TT_FOIL_KERNEL_DIR/conv/           (conv_3x3 prebuilt,    Mt=1 Kt=9 Nt=2)
 //   $TT_FOIL_KERNEL_DIR/conv1x1/        (conv_1x1 fresh,       Mt=1 Kt=1 Nt=2)

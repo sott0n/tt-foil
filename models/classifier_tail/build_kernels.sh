@@ -20,7 +20,7 @@ PREBUILT="$HERE/prebuilt"
 mkdir -p "$PREBUILT/fc"
 
 PREBUILT_DIR="$PREBUILT/fc" MM_MT=1 MM_KT=1 MM_NT=1 \
-    bash "$HERE/../conv_1x1/build_kernels.sh"
+    bash "$HERE/../../examples/conv_1x1/build_kernels.sh"
 
 echo "classifier_tail prebuilt: $PREBUILT"
 ls "$PREBUILT/fc"

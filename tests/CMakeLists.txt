@@ -75,6 +75,7 @@ if(NOT TT_FOIL_HW_TESTS)
 endif()
 
 set(EX "${CMAKE_SOURCE_DIR}/examples")
+set(MO "${CMAKE_SOURCE_DIR}/models")
 
 # NOTE: HW tests assume the board is in a healthy state at ctest
 # invocation time. If you've been crashing kernels, run a one-shot
@@ -166,22 +167,22 @@ tt_foil_hw_test(test_residual_add     test_residual_add.cpp     "${EX}/residual_
 # ---- v9.1: ResNet basic block (Conv → bias+ReLU → Conv → bias → skip+ReLU) ----
 # This test needs two kernel dirs: conv_3x3 prebuilt for both conv stages
 # and a residual_add build compiled with RA_NT=2 (matching this test's
-# Mt*Nt) under examples/basic_block/prebuilt.
+# Mt*Nt) under models/basic_block/prebuilt.
 add_executable(test_basic_block test_basic_block.cpp)
 target_include_directories(test_basic_block PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(test_basic_block PRIVATE TT::Foil tt_foil_llrt)
 add_test(NAME test_basic_block COMMAND test_basic_block)
 set_tests_properties(test_basic_block PROPERTIES
-    ENVIRONMENT "TT_FOIL_KERNEL_DIR=${EX}/conv_3x3/prebuilt;TT_FOIL_KERNEL_DIR_ADD=${EX}/basic_block/prebuilt;TT_FOIL_DEVICE=${TT_FOIL_DEVICE}")
+    ENVIRONMENT "TT_FOIL_KERNEL_DIR=${EX}/conv_3x3/prebuilt;TT_FOIL_KERNEL_DIR_ADD=${MO}/basic_block/prebuilt;TT_FOIL_DEVICE=${TT_FOIL_DEVICE}")
 set_tests_properties(test_basic_block PROPERTIES RESOURCE_LOCK chip)
 set_tests_properties(test_basic_block PROPERTIES LABELS "hw")
 set_tests_properties(test_basic_block PROPERTIES TIMEOUT 90)
 
 # ---- v9.2: ResNet downsample block (3×3 s=2 main + 1×1 s=2 projection skip) ----
 # Single kernel root with four subdirs (conv_s2, conv, conv1x1, residual_add)
-# produced by examples/downsample_block/build_kernels.sh.
+# produced by models/downsample_block/build_kernels.sh.
 tt_foil_hw_test(test_downsample_block test_downsample_block.cpp
-    "${EX}/downsample_block/prebuilt")
+    "${MO}/downsample_block/prebuilt")
 
 # ---- v9.3: ResNet layer (downsample_block + basic_block chained) ----
 # Reuses the downsample_block kernel root — all needed binaries
@@ -189,7 +190,7 @@ tt_foil_hw_test(test_downsample_block test_downsample_block.cpp
 # tile shapes since C stays at 32 and spatial dims stay 8×8 after
 # block 1.
 tt_foil_hw_test(test_layer            test_layer.cpp
-    "${EX}/downsample_block/prebuilt")
+    "${MO}/downsample_block/prebuilt")
 
 # ---- v9.4: 7×7 strided conv (ResNet stem input layer) ----
 _tt_default(MM_MT_C7  1)
@@ -205,20 +206,20 @@ tt_foil_hw_test(test_maxpool_3x3      test_maxpool_3x3.cpp      "${EX}/maxpool_3
 # Conv₇ₓ₇ is rebuilt at Nt=8 (input H=W=32 → H=W=16) under
 # stem/prebuilt/conv_7x7. Maxpool₃ₓ₃ matches its standalone default
 # fixture and is symlinked in.
-tt_foil_hw_test(test_stem             test_stem.cpp             "${EX}/stem/prebuilt")
+tt_foil_hw_test(test_stem             test_stem.cpp             "${MO}/stem/prebuilt")
 
 # ---- v9.7: Mini ResNet (stem + 2× basic_block) ----
 # All four kernel programs (conv_7x7, maxpool_3x3, conv, residual_add)
-# are symlinked into examples/mini_resnet/prebuilt by its build script;
+# are symlinked into models/mini_resnet/prebuilt by its build script;
 # no fresh compiles needed for this test.
-tt_foil_hw_test(test_mini_resnet      test_mini_resnet.cpp      "${EX}/mini_resnet/prebuilt")
+tt_foil_hw_test(test_mini_resnet      test_mini_resnet.cpp      "${MO}/mini_resnet/prebuilt")
 
 # ---- v9.8: classifier tail (host GAP + device FC + host bias) ----
-tt_foil_hw_test(test_classifier_tail  test_classifier_tail.cpp  "${EX}/classifier_tail/prebuilt")
+tt_foil_hw_test(test_classifier_tail  test_classifier_tail.cpp  "${MO}/classifier_tail/prebuilt")
 
 # ---- v9.9: Full ResNet classifier — image in, logits out ----
 tt_foil_hw_test(test_resnet_classifier test_resnet_classifier.cpp
-    "${EX}/resnet_classifier/prebuilt")
+    "${MO}/resnet_classifier/prebuilt")
 
 # ---- v10.1: bias_relu_post primitive ----
 tt_foil_hw_test(test_bias_relu_post   test_bias_relu_post.cpp   "${EX}/bias_relu_post/prebuilt")

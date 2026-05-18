@@ -14,4 +14,4 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREBUILT_DIR="$HERE/prebuilt" RA_NT=2 \
-    bash "$HERE/../residual_add/build_kernels.sh"
+    bash "$HERE/../../examples/residual_add/build_kernels.sh"

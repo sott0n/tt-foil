@@ -14,7 +14,7 @@
 //
 // All four kernel binaries are reused from sibling examples — the
 // mini_resnet directory only contributes symlinks (see
-// examples/mini_resnet/build_kernels.sh).
+// models/mini_resnet/build_kernels.sh).
 
 #include <array>
 #include <cmath>

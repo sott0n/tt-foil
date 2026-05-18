@@ -14,7 +14,7 @@
 //   1. Conv₁  — examples/conv_3x3 kernel (matmul over im2col).
 //   2. Conv₂  — same kernel, different weights / input.
 //   3. Skip add  — examples/residual_add kernel (RA_NT=2 build under
-//      examples/basic_block/prebuilt/).
+//      models/basic_block/prebuilt/).
 //
 // Host work in between each device call:
 //   - im2col of the running activation,

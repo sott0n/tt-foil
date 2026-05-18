@@ -27,20 +27,20 @@ fi
 if [[ ! -d "$HERE/../classifier_tail/prebuilt/fc" ]]; then
     bash "$HERE/../classifier_tail/build_kernels.sh"
 fi
-if [[ ! -d "$HERE/../bias_relu_post/prebuilt" ]]; then
-    bash "$HERE/../bias_relu_post/build_kernels.sh"
+if [[ ! -d "$HERE/../../examples/bias_relu_post/prebuilt" ]]; then
+    bash "$HERE/../../examples/bias_relu_post/build_kernels.sh"
 fi
-if [[ ! -d "$HERE/../global_avg_pool/prebuilt" ]]; then
-    bash "$HERE/../global_avg_pool/build_kernels.sh"
+if [[ ! -d "$HERE/../../examples/global_avg_pool/prebuilt" ]]; then
+    bash "$HERE/../../examples/global_avg_pool/build_kernels.sh"
 fi
 
 ln -sfn "$HERE/../stem/prebuilt/conv_7x7"        "$PREBUILT/conv_7x7"
-ln -sfn "$HERE/../maxpool_3x3/prebuilt"          "$PREBUILT/maxpool_3x3"
-ln -sfn "$HERE/../conv_3x3/prebuilt"             "$PREBUILT/conv"
+ln -sfn "$HERE/../../examples/maxpool_3x3/prebuilt"          "$PREBUILT/maxpool_3x3"
+ln -sfn "$HERE/../../examples/conv_3x3/prebuilt"             "$PREBUILT/conv"
 ln -sfn "$HERE/../basic_block/prebuilt"          "$PREBUILT/residual_add"
 ln -sfn "$HERE/../classifier_tail/prebuilt/fc"   "$PREBUILT/fc"
-ln -sfn "$HERE/../bias_relu_post/prebuilt"       "$PREBUILT/bias_relu_post"
-ln -sfn "$HERE/../global_avg_pool/prebuilt"      "$PREBUILT/global_avg_pool"
+ln -sfn "$HERE/../../examples/bias_relu_post/prebuilt"       "$PREBUILT/bias_relu_post"
+ln -sfn "$HERE/../../examples/global_avg_pool/prebuilt"      "$PREBUILT/global_avg_pool"
 
 echo "resnet_classifier prebuilt root: $PREBUILT"
 ls -la "$PREBUILT"

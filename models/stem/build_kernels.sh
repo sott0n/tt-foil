@@ -23,6 +23,6 @@ PREBUILT="$HERE/prebuilt"
 mkdir -p "$PREBUILT/conv_7x7"
 
 PREBUILT_DIR="$PREBUILT/conv_7x7" MM_MT=1 MM_KT=49 MM_NT=8 \
-    bash "$HERE/../conv_7x7/build_kernels.sh"
+    bash "$HERE/../../examples/conv_7x7/build_kernels.sh"
 
-ln -sfn "$HERE/../maxpool_3x3/prebuilt" "$PREBUILT/maxpool_3x3"
+ln -sfn "$HERE/../../examples/maxpool_3x3/prebuilt" "$PREBUILT/maxpool_3x3"
