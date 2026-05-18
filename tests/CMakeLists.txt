@@ -206,6 +206,12 @@ tt_foil_hw_test(test_maxpool_3x3      test_maxpool_3x3.cpp      "${EX}/maxpool_3
 # stem/prebuilt/conv_7x7. Maxpool₃ₓ₃ matches its standalone default
 # fixture and is symlinked in.
 tt_foil_hw_test(test_stem             test_stem.cpp             "${EX}/stem/prebuilt")
+
+# ---- v9.7: Mini ResNet (stem + 2× basic_block) ----
+# All four kernel programs (conv_7x7, maxpool_3x3, conv, residual_add)
+# are symlinked into examples/mini_resnet/prebuilt by its build script;
+# no fresh compiles needed for this test.
+tt_foil_hw_test(test_mini_resnet      test_mini_resnet.cpp      "${EX}/mini_resnet/prebuilt")
 tt_foil_hw_test(test_brisc_col1_boot_diag test_brisc_col1_boot_diag.cpp "${EX}/add_two_numbers/prebuilt")
 
 # NOTE: The Phase B2 step-by-step tests (test_cold_boot, test_firmware_load,
