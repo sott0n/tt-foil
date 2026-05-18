@@ -197,6 +197,9 @@ _tt_default(MM_KT_C7  49)   # C_in * 49 / 32 ; assumes C_in = 32
 _tt_default(MM_NT_C7  2)
 tt_foil_hw_test(test_conv_7x7         test_conv_7x7.cpp         "${EX}/conv_7x7/prebuilt"
     "MM_MT=${MM_MT_C7}" "MM_KT=${MM_KT_C7}" "MM_NT=${MM_NT_C7}")
+
+# ---- v9.5: 3×3 stride-2 maxpool (ResNet stem post-conv) ----
+tt_foil_hw_test(test_maxpool_3x3      test_maxpool_3x3.cpp      "${EX}/maxpool_3x3/prebuilt")
 tt_foil_hw_test(test_brisc_col1_boot_diag test_brisc_col1_boot_diag.cpp "${EX}/add_two_numbers/prebuilt")
 
 # NOTE: The Phase B2 step-by-step tests (test_cold_boot, test_firmware_load,
