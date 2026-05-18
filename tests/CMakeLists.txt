@@ -162,6 +162,20 @@ tt_foil_hw_test(test_maxpool_2x2      test_maxpool_2x2.cpp      "${EX}/maxpool_2
 _tt_default(RA_NT 8)
 tt_foil_hw_test(test_residual_add     test_residual_add.cpp     "${EX}/residual_add/prebuilt"
     "RA_NT=${RA_NT}")
+
+# ---- v9.1: ResNet basic block (Conv → bias+ReLU → Conv → bias → skip+ReLU) ----
+# This test needs two kernel dirs: conv_3x3 prebuilt for both conv stages
+# and a residual_add build compiled with RA_NT=2 (matching this test's
+# Mt*Nt) under examples/basic_block/prebuilt.
+add_executable(test_basic_block test_basic_block.cpp)
+target_include_directories(test_basic_block PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(test_basic_block PRIVATE TT::Foil tt_foil_llrt)
+add_test(NAME test_basic_block COMMAND test_basic_block)
+set_tests_properties(test_basic_block PROPERTIES
+    ENVIRONMENT "TT_FOIL_KERNEL_DIR=${EX}/conv_3x3/prebuilt;TT_FOIL_KERNEL_DIR_ADD=${EX}/basic_block/prebuilt;TT_FOIL_DEVICE=${TT_FOIL_DEVICE}")
+set_tests_properties(test_basic_block PROPERTIES RESOURCE_LOCK chip)
+set_tests_properties(test_basic_block PROPERTIES LABELS "hw")
+set_tests_properties(test_basic_block PROPERTIES TIMEOUT 90)
 tt_foil_hw_test(test_brisc_col1_boot_diag test_brisc_col1_boot_diag.cpp "${EX}/add_two_numbers/prebuilt")
 
 # NOTE: The Phase B2 step-by-step tests (test_cold_boot, test_firmware_load,
