@@ -263,8 +263,32 @@ def main():
     print(f"[export] image index={args.image_index} label={label} ({CIFAR_CLASSES[label]})")
 
     # ---- Reference forward pass (fp32) --------------------------------
+    # Also export per-stage activations so the C++ test can debug numeric
+    # drift layer-by-layer.
+    stage_activations = {}
+    def hook(name):
+        def f(_m, _inp, out):
+            stage_activations[name] = out.detach().clone().squeeze(0)
+        return f
+    handles = []
+    handles.append(model.bn1.register_forward_hook(hook("post_stem")))
+    for li, layer in enumerate([model.layer1, model.layer2, model.layer3], start=1):
+        for bi, blk in enumerate(layer):
+            handles.append(blk.register_forward_hook(hook(f"post_layer{li}.{bi}")))
     with torch.no_grad():
+        # bn1 captures pre-ReLU; pre-relu activation = bn1 output, post-
+        # ReLU happens in F.relu inside ResNet.forward. We capture both:
+        # the stage_activations dict above holds bn outputs (pre-ReLU),
+        # plus we re-run hooks on block outputs (post-ReLU since basic
+        # block applies its final ReLU before returning).
         logits = model(img.unsqueeze(0)).squeeze(0)
+    for h in handles: h.remove()
+
+    # Apply ReLU to the stem activation we captured (the model does that
+    # in forward right after bn1, so the natural "post-stem" value is
+    # post-ReLU).
+    stage_activations["post_stem"] = torch.relu(stage_activations["post_stem"])
+
     argmax = int(torch.argmax(logits).item())
     print(f"[export] reference argmax={argmax} ({CIFAR_CLASSES[argmax]}), "
           f"max_logit={logits.max().item():.4f}")
@@ -298,6 +322,14 @@ def main():
     (out_dir / "golden.bin").write_bytes(golden_bytes)
     print(f"[export] wrote {out_dir / 'golden.bin'} ({len(golden_bytes)} bytes)")
 
+    # ---- Per-stage golden activations (post-ReLU CHW) -----------------
+    stages_dir = out_dir / "stages"
+    stages_dir.mkdir(exist_ok=True)
+    for name, t in stage_activations.items():
+        path = stages_dir / f"{name}.bin"
+        path.write_bytes(to_bf16_bytes(t.contiguous()))
+        print(f"[export] wrote {path} shape={tuple(t.shape)}")
+
     manifest["image_index"] = args.image_index
     manifest["label"]       = label
     manifest["class_name"]  = CIFAR_CLASSES[label]
@@ -309,6 +341,21 @@ def main():
     manifest_path = out_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2))
     print(f"[export] wrote {manifest_path}")
+
+    # Sibling text manifest, easier for the C++ test to parse than JSON
+    # (no third-party deps). One line per layer.
+    txt_path = out_dir / "manifest.txt"
+    with open(txt_path, "w") as f:
+        f.write("# Auto-generated. Format: <num_layers>, then "
+                "<name offset_bytes total_bytes ndim s0 s1 s2 s3> per layer.\n")
+        f.write(f"{len(manifest['layers'])}\n")
+        for layer in manifest["layers"]:
+            shape = list(layer["shape"]) + [0] * (4 - len(layer["shape"]))
+            f.write(f"{layer['name']} {layer['offset']} {layer['bytes']} "
+                    f"{len(layer['shape'])} {shape[0]} {shape[1]} {shape[2]} {shape[3]}\n")
+        f.write(f"# ref_argmax {manifest['ref_argmax']}  "
+                f"class {manifest['ref_class']}\n")
+    print(f"[export] wrote {txt_path}")
 
 
 if __name__ == "__main__":

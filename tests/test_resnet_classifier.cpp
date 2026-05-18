@@ -553,10 +553,13 @@ int main() try {
         std::vector<uint8_t> zero(bytes, 0);
         tt::foil::write_buffer(*dev, buf_out_dram, zero.data(), bytes);
 
-        std::array<uint32_t, 5> rab = {
+        // bias_relu_post reader signature: Mt and Nt separately so it
+        // can pick the right bias tile per Mt row. mini ResNet stays at
+        // Mt=1 throughout so Mt=1, Nt=n_tiles.
+        std::array<uint32_t, 6> rab = {
             lo(in_noc),     hi(in_noc),
             lo(bias_d_noc), hi(bias_d_noc),
-            n_tiles,
+            1u, n_tiles,
         };
         std::array<uint32_t, 3> ran = { lo(out_noc), hi(out_noc), n_tiles };
         std::array<uint32_t, 2> rac = { n_tiles, relu_enable };

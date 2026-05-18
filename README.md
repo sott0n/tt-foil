@@ -280,7 +280,7 @@ a paired test under [`tests/`](tests/).
 | Model | Description | Test |
 | --- | --- | --- |
 | **Mini ResNet** | Random-weight ResNet-shaped classifier: Stem (7×7 conv + bias+ReLU + 3×3 maxpool) → 2× basic_block → Global Avg Pool → FC → 32-way logits. (C=32, image 32×32). Every multiply / add / ReLU runs on device; only layout (im2col, tile, transpose) on host. Verifies device output against a host fp32→bf16 reference; argmax dev/ref match. | [`test_resnet_classifier`](tests/test_resnet_classifier.cpp) |
-| **CIFAR-10 ResNet-20** | Pretrained akamaster checkpoint + one CIFAR-10 test image (10-way real classification). **In progress** — see `data/cifar10_resnet20/` for the bf16-exported weights / image / golden logits produced by [`tools/export_cifar10_resnet20.py`](tools/export_cifar10_resnet20.py); the device chain (kernel builds + test) lands incrementally. | `test_cifar10_resnet20` (planned) |
+| **CIFAR-10 ResNet-20** | Pretrained akamaster checkpoint + one CIFAR-10 test image. Full 19-conv + GAP + FC forward pass on device, BN folded into per-conv biases by [`tools/export_cifar10_resnet20.py`](tools/export_cifar10_resnet20.py). Worst per-class logit drift 0.14 vs the fp32 reference; dev argmax matches ref argmax = "cat". | [`test_cifar10_resnet20`](tests/test_cifar10_resnet20.cpp) |
 
 ### Composable building blocks
 

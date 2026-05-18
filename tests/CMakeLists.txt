@@ -226,6 +226,19 @@ tt_foil_hw_test(test_bias_relu_post   test_bias_relu_post.cpp   "${EX}/bias_relu
 tt_foil_hw_test(test_global_avg_pool  test_global_avg_pool.cpp  "${EX}/global_avg_pool/prebuilt")
 tt_foil_hw_test(test_brisc_col1_boot_diag test_brisc_col1_boot_diag.cpp "${EX}/add_two_numbers/prebuilt")
 
+# ---- v10.2: CIFAR-10 ResNet-20 end-to-end inference ----
+# Reads pretrained weights + sample image + golden logits from
+# data/cifar10_resnet20/ (produced by tools/export_cifar10_resnet20.py).
+add_executable(test_cifar10_resnet20 test_cifar10_resnet20.cpp)
+target_include_directories(test_cifar10_resnet20 PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(test_cifar10_resnet20 PRIVATE TT::Foil tt_foil_llrt)
+add_test(NAME test_cifar10_resnet20 COMMAND test_cifar10_resnet20)
+set_tests_properties(test_cifar10_resnet20 PROPERTIES
+    ENVIRONMENT "TT_FOIL_KERNEL_DIR=${MO}/cifar10_resnet20/prebuilt;TT_FOIL_DATA_DIR=${CMAKE_SOURCE_DIR}/data/cifar10_resnet20;TT_FOIL_DEVICE=${TT_FOIL_DEVICE}")
+set_tests_properties(test_cifar10_resnet20 PROPERTIES RESOURCE_LOCK chip)
+set_tests_properties(test_cifar10_resnet20 PROPERTIES LABELS "hw")
+set_tests_properties(test_cifar10_resnet20 PROPERTIES TIMEOUT 120)
+
 # NOTE: The Phase B2 step-by-step tests (test_cold_boot, test_firmware_load,
 # test_mailbox_init, test_core_info_init, test_bank_tables_init) were
 # development scaffolding that linked against tt-metal's CreateDevice +

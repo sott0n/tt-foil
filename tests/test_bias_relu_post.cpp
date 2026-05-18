@@ -166,8 +166,9 @@ int main() try {
         std::vector<uint8_t> zero(out_bytes, 0);
         tt::foil::write_buffer(*dev, *buf_out, zero.data(), out_bytes);
 
-        std::array<uint32_t, 5> ra_brisc = {
-            lo(in_noc), hi(in_noc), lo(bias_noc), hi(bias_noc), kNt
+        std::array<uint32_t, 6> ra_brisc = {
+            lo(in_noc), hi(in_noc), lo(bias_noc), hi(bias_noc),
+            /*Mt=*/1u, /*Nt=*/kNt
         };
         std::array<uint32_t, 3> ra_ncrisc = { lo(out_noc), hi(out_noc), kNt };
         std::array<uint32_t, 2> ra_compute = { kNt, relu_enable };
