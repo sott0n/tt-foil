@@ -31,6 +31,16 @@ static inline uint64_t join64(uint32_t lo, uint32_t hi) {
 }
 
 void kernel_main() {
+    // ---- Bug 3 workaround: BRISC firmware only calls noc_local_state_init
+    // for noc_index (= 0 by default). When this BRISC kernel issues NOC1
+    // writes, noc_nonposted_writes_acked[1] is left at 0 (BSS zero) while
+    // HW NIU_MST_WR_ACK_RECEIVED on NOC1 has whatever value the previous
+    // session left there. After the first ACK the HW counter advances
+    // ahead of SW expectations and noc_async_write_barrier(1) waits
+    // forever. Sync SW to HW for NOC1 here so the barrier baseline is
+    // correct. (See tt-metal noc_nonblocking_api.h noc_local_state_init.)
+    noc_local_state_init(1);
+
     uint64_t a_dram_base     = join64(get_arg_val<uint32_t>(0), get_arg_val<uint32_t>(1));
     uint64_t b_dram_base     = join64(get_arg_val<uint32_t>(2), get_arg_val<uint32_t>(3));
     uint64_t peer_b_staging  = join64(get_arg_val<uint32_t>(4), get_arg_val<uint32_t>(5));
