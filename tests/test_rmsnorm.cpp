@@ -212,16 +212,19 @@ int main() try {
     }};
     auto kernel = tt::foil::load_kernel(*dev, bins, core);
 
-    // CB registration
+    // CB registration. fifo_size MUST equal num_pages * page_size
+    // (see src/cb_config.hpp) — using kTileBytes here when num_pages>1
+    // makes the CB wrap at 1 tile and silently aliases later tiles onto
+    // the first slot. Caught while debugging test_softmax.
     std::array<tt::foil::CbConfig, 9> cbs = {{
-        {0,  l1_inp->device_addr,        kTileBytes, kWt, kTileBytes},  // cb_inp, depth=Wt
+        {0,  l1_inp->device_addr,        l1_wt,      kWt, kTileBytes},  // cb_inp, depth=Wt
         {1,  l1_reduce->device_addr,     kTileBytes, 1,   kTileBytes},  // cb_reduce
-        {2,  l1_gamma->device_addr,      kTileBytes, kWt, kTileBytes},  // cb_gamma, depth=Wt
+        {2,  l1_gamma->device_addr,      l1_wt,      kWt, kTileBytes},  // cb_gamma, depth=Wt
         {3,  l1_eps->device_addr,        kTileBytes, 1,   kTileBytes},  // cb_eps
-        {4,  l1_x2->device_addr,         kTileBytes, kWt, kTileBytes},  // cb_x2, depth=Wt
+        {4,  l1_x2->device_addr,         l1_wt,      kWt, kTileBytes},  // cb_x2, depth=Wt
         {5,  l1_var->device_addr,        kTileBytes, 1,   kTileBytes},  // cb_var
         {6,  l1_recip_sqrt->device_addr, kTileBytes, 1,   kTileBytes},  // cb_recip_sqrt
-        {7,  l1_x_normed->device_addr,   kTileBytes, kWt, kTileBytes},  // cb_x_normed, depth=Wt
+        {7,  l1_x_normed->device_addr,   l1_wt,      kWt, kTileBytes},  // cb_x_normed, depth=Wt
         {16, l1_out->device_addr,        kTileBytes, 1,   kTileBytes},  // cb_out
     }};
     tt::foil::register_cbs(*dev, *kernel, cbs);

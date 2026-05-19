@@ -114,6 +114,24 @@ read_buffer(*dev, *l1_cb_buffer, l1_buf.data(), kTileBytes);
 // dump l1_buf[0..7] — if all zero, the host→DRAM or reader→L1 path failed
 ```
 
+### `CbConfig.fifo_size` must equal `num_pages * page_size`
+The CB ring buffer wraps at `fifo_size`. For a depth-N CB, passing
+`fifo_size = page_size` (one tile worth) instead of `N * page_size`
+makes the ring wrap after the first tile — subsequent tiles overwrite
+slot 0 and (worse) spill into whatever L1 region sits after the CB's
+allocated buffer. Tests with `Wt=1` accidentally pass because the
+two values coincide; the bug surfaces only when a CB needs to hold
+>1 tile at a time. The canonical form is:
+```cpp
+const uint32_t l1_wt = kWt * kTileBytes;
+{0, l1_inp->device_addr, l1_wt, kWt, kTileBytes},  // depth=kWt
+{1, l1_one->device_addr, kTileBytes, 1, kTileBytes},  // depth=1
+```
+Caught while bringing up Softmax with `Wt=4`: the scaler CB at
+`l1_reduce` got overwritten by `l1_inp` tile 1's writes, so the
+reducer saw `x` instead of `1.0` and softmax produced negative
+numbers.
+
 ### MATH_FIDELITY for reduce: prefer HiFi4 (=4) over LoFi (=0)
 For RMSNorm-style reduce (sum-of-squares followed by rsqrt), LoFi GAPOOL
 gives ~5% relative error vs the host reference — outside the typical
