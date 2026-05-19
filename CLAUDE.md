@@ -87,6 +87,41 @@ hangs forever. The `build_kernels.sh` scripts under `examples/*/` use
 the same priority order, so by default they link against tt-foil's
 self-built `build/firmware/`.
 
+### `row_major_to_tile` is APPEND, not OVERWRITE (test helper trap)
+`tests/tile_utils.hpp::row_major_to_tile` resizes `tile_out` by
+`tile_out.size() + kTileWords` and writes the new region starting at
+the prior `size()`. **The destination vector must be empty (or already
+contain the prior tiles)** before calling. The natural-looking pattern
+```cpp
+out.assign(kTileWords, 0);          // pre-fill with zeros
+row_major_to_tile(block.data(), out);  // expects to overwrite — but APPENDS
+```
+silently produces a **2×-length vector**, where the first half is the
+zeros you pre-filled and the second half is the data. Subsequent
+`write_buffer(buf, out.data(), kTileBytes)` only writes the first
+kTileBytes — i.e. **all zeros to DRAM**. This was the root cause of
+the RMSNorm "GAPOOL produces zeros" rabbit hole: the scaler tile
+never made it to DRAM, so `cb_reduce` was zero, so GAPOOL's SrcB was
+zero, so DST col 0 stayed zero. Always start the destination empty:
+`out.clear()` (or use a fresh vector).
+
+When debugging compute kernels that produce unexpected zeros, **first
+read back the source CBs' L1 after exec** (and the DRAM buffers
+pre-exec) to confirm the data path before suspecting the kernel:
+```cpp
+std::vector<uint16_t> l1_buf(kTileWords);
+read_buffer(*dev, *l1_cb_buffer, l1_buf.data(), kTileBytes);
+// dump l1_buf[0..7] — if all zero, the host→DRAM or reader→L1 path failed
+```
+
+### MATH_FIDELITY for reduce: prefer HiFi4 (=4) over LoFi (=0)
+For RMSNorm-style reduce (sum-of-squares followed by rsqrt), LoFi GAPOOL
+gives ~5% relative error vs the host reference — outside the typical
+`kAbsTol = 0.02` we use in tests. HiFi4 brings this under 1%. Set
+`MATH_FIDELITY = static_cast<ckernel::MathFidelity>(4)` in the kernel's
+chlkc_list.h stub (see `ops/rmsnorm/build.sh` for the heredoc shape).
+LoFi remains fine for raw mul_tiles / elementwise paths.
+
 ### Cores must be booted at `open_device` time
 `open_device(pcie_idx, fw_dir, cores)` boots each entry in `cores` (default
 `{{0,0}}`). `kernel_load` does **not** lazily boot — calling it on an unbooted

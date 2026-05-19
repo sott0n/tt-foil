@@ -226,6 +226,19 @@ tt_foil_hw_test(test_bias_relu_post   test_bias_relu_post.cpp   "${EX}/bias_relu
 tt_foil_hw_test(test_global_avg_pool  test_global_avg_pool.cpp  "${EX}/global_avg_pool/prebuilt")
 tt_foil_hw_test(test_brisc_col1_boot_diag test_brisc_col1_boot_diag.cpp "${EX}/add_two_numbers/prebuilt")
 
+# ---- op_lib: primitive op library tests ----
+set(OPS "${CMAKE_SOURCE_DIR}/ops")
+_tt_default(SILU_NT 8)
+tt_foil_hw_test(test_silu        test_silu.cpp        "${OPS}/eltwise_unary/prebuilt"
+    "SILU_NT=${SILU_NT}")
+_tt_default(EMUL_NT 8)
+tt_foil_hw_test(test_eltwise_mul test_eltwise_mul.cpp "${OPS}/eltwise_binary/prebuilt"
+    "EMUL_NT=${EMUL_NT}")
+_tt_default(RMS_NCHT 2)
+_tt_default(RMS_WT 4)
+tt_foil_hw_test(test_rmsnorm test_rmsnorm.cpp "${OPS}/rmsnorm/prebuilt"
+    "RMS_NCHT=${RMS_NCHT}" "RMS_WT=${RMS_WT}")
+
 # ---- v10.2: CIFAR-10 ResNet-20 end-to-end inference ----
 # Reads pretrained weights + sample image + golden logits from
 # data/cifar10_resnet20/ (produced by tools/export_cifar10_resnet20.py).

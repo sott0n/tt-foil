@@ -9,6 +9,7 @@ generated/
 # Example and model kernel build outputs (per-dir prebuilt/)
 examples/*/prebuilt/
 models/*/prebuilt/
+ops/*/prebuilt/
 
 # Editor / OS noise
 *.swp
