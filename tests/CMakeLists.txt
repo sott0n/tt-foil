@@ -242,6 +242,7 @@ _tt_default(SOFTMAX_NCHT 2)
 _tt_default(SOFTMAX_WT 4)
 tt_foil_hw_test(test_softmax test_softmax.cpp "${OPS}/softmax/prebuilt"
     "SOFTMAX_NCHT=${SOFTMAX_NCHT}" "SOFTMAX_WT=${SOFTMAX_WT}")
+tt_foil_hw_test(test_mha test_mha.cpp "${OPS}/mha/prebuilt")
 
 # ---- v10.2: CIFAR-10 ResNet-20 end-to-end inference ----
 # Reads pretrained weights + sample image + golden logits from
