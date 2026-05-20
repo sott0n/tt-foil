@@ -291,6 +291,13 @@ tt_foil_hw_test(test_qwen3_mlp test_qwen3_mlp.cpp "${OPS}")
 set_tests_properties(test_qwen3_mlp PROPERTIES
     ENVIRONMENT "TT_FOIL_OPS_DIR=${OPS};TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_QWEN3_DATA=${CMAKE_SOURCE_DIR}/data/qwen3_06b/layer0")
 set_tests_properties(test_qwen3_mlp PROPERTIES TIMEOUT 300)
+# Real-weights attention test: Qwen3-VL-2B layer-0 attention block.
+# Needs data/qwen3_vl_2b/layer0/ populated by tools/export_qwen3_layer.py +
+# tools/qwen3_attn_golden.py.
+tt_foil_hw_test(test_qwen3_attn test_qwen3_attn.cpp "${OPS}")
+set_tests_properties(test_qwen3_attn PROPERTIES
+    ENVIRONMENT "TT_FOIL_OPS_DIR=${OPS};TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_QWEN3_DATA=${CMAKE_SOURCE_DIR}/data/qwen3_vl_2b/layer0")
+set_tests_properties(test_qwen3_attn PROPERTIES TIMEOUT 600)
 
 # ---- v10.2: CIFAR-10 ResNet-20 end-to-end inference ----
 # Reads pretrained weights + sample image + golden logits from
