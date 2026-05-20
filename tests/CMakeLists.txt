@@ -254,6 +254,9 @@ tt_foil_hw_test(test_silu_op test_silu_op.cpp "${OPS}/eltwise_unary/prebuilt"
 _tt_default(EMUL_OP_NT 4)
 tt_foil_hw_test(test_eltwise_mul_op test_eltwise_mul_op.cpp "${OPS}/eltwise_binary/prebuilt"
     "EMUL_OP_NT=${EMUL_OP_NT}")
+_tt_default(EADD_OP_NT 4)
+tt_foil_hw_test(test_eltwise_add_op test_eltwise_add_op.cpp "${OPS}/eltwise_binary/prebuilt"
+    "EADD_OP_NT=${EADD_OP_NT}")
 _tt_default(SOFTMAX_OP_NCHT 2)
 _tt_default(SOFTMAX_OP_WT 4)
 tt_foil_hw_test(test_softmax_op test_softmax_op.cpp "${OPS}/softmax/prebuilt"

@@ -172,3 +172,4 @@ EOF
 build_dataflow brisc  0 "$HERE/reader.cpp" reader.brisc
 build_dataflow ncrisc 1 "$HERE/writer.cpp" writer.ncrisc
 build_compute "$HERE/compute_mul.cpp" mul
+build_compute "$HERE/compute_add.cpp" add

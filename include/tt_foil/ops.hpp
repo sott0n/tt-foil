@@ -94,6 +94,23 @@ EltwiseMulOp make_eltwise_mul(tt::foil::Device& dev,
 void execute(tt::foil::Device& dev, EltwiseMulOp& op);
 
 // =====================================================================
+// ElementwiseAdd
+//   y = a + b   (elementwise, per-tile) — Transformer residual connection
+// =====================================================================
+struct EltwiseAddOp {
+    std::shared_ptr<tt::foil::Kernel> kernel;
+    std::shared_ptr<tt::foil::Buffer> l1_a;
+    std::shared_ptr<tt::foil::Buffer> l1_b;
+    std::shared_ptr<tt::foil::Buffer> l1_out;
+};
+EltwiseAddOp make_eltwise_add(tt::foil::Device& dev,
+                              const TensorDesc& a, const TensorDesc& b,
+                              TensorDesc& out,
+                              tt::foil::CoreCoord core = {},
+                              const std::string& kernel_dir = "");
+void execute(tt::foil::Device& dev, EltwiseAddOp& op);
+
+// =====================================================================
 // RMSNorm
 //   y = x * 1/sqrt(mean(x²) + eps) * gamma
 //
