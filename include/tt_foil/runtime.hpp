@@ -135,6 +135,17 @@ std::shared_ptr<Kernel> load_kernel(
 //   • The launch_msg slot the firmware polls is untouched.
 void release_kernels(Device& device, CoreCoord logical_core);
 
+// Reset the per-core L1 bump allocator: subsequent allocate_buffer(L1, …)
+// calls reclaim the whole user L1 region from the base.
+//
+// The caller MUST ensure no live shared_ptr<Buffer> still references an L1
+// address from this core (otherwise the next op writing to the reused
+// region will overwrite live data the holder still expects). Typical
+// pattern: run each op in its own scope so the Op handle (and its L1
+// shared_ptrs) drops before reset_l1 is called. DRAM buffers and the
+// per-core KERNEL_CONFIG region are untouched.
+void reset_l1(Device& device, CoreCoord logical_core);
+
 // Write runtime arguments for a specific RISC processor.
 void set_runtime_args(
     Device& device,
