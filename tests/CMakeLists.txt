@@ -283,6 +283,13 @@ tt_foil_hw_test(test_transformer_block test_transformer_block.cpp "${OPS}")
 set_tests_properties(test_transformer_block PROPERTIES
     ENVIRONMENT "TT_FOIL_OPS_DIR=${OPS};TT_FOIL_DEVICE=${TT_FOIL_DEVICE}")
 set_tests_properties(test_transformer_block PROPERTIES TIMEOUT 180)
+# Real-weights smoke test: Qwen3-0.6B layer-0 MLP half.
+# Needs data/qwen3_06b/layer0/ populated by tools/export_qwen3_layer.py +
+# tools/qwen3_mlp_golden.py.
+tt_foil_hw_test(test_qwen3_mlp test_qwen3_mlp.cpp "${OPS}")
+set_tests_properties(test_qwen3_mlp PROPERTIES
+    ENVIRONMENT "TT_FOIL_OPS_DIR=${OPS};TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_QWEN3_DATA=${CMAKE_SOURCE_DIR}/data/qwen3_06b/layer0")
+set_tests_properties(test_qwen3_mlp PROPERTIES TIMEOUT 300)
 
 # ---- v10.2: CIFAR-10 ResNet-20 end-to-end inference ----
 # Reads pretrained weights + sample image + golden logits from
