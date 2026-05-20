@@ -305,6 +305,15 @@ tt_foil_hw_test(test_qwen3_layer test_qwen3_layer.cpp "${OPS}")
 set_tests_properties(test_qwen3_layer PROPERTIES
     ENVIRONMENT "TT_FOIL_OPS_DIR=${OPS};TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_QWEN3_DATA=${CMAKE_SOURCE_DIR}/data/qwen3_vl_2b/layer0")
 set_tests_properties(test_qwen3_layer PROPERTIES TIMEOUT 900)
+# Multi-layer chain: stacks N full layers (default 3). Needs
+# data/qwen3_vl_2b/{layer0..layer<N-1>}/ + chain<N>/ from
+# tools/qwen3_multilayer_golden.py.
+_tt_default(CHAIN_NUM_LAYERS 3)
+tt_foil_hw_test(test_qwen3_multilayer test_qwen3_multilayer.cpp "${OPS}"
+    "CHAIN_NUM_LAYERS=${CHAIN_NUM_LAYERS}")
+set_tests_properties(test_qwen3_multilayer PROPERTIES
+    ENVIRONMENT "TT_FOIL_OPS_DIR=${OPS};TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_QWEN3_DATA=${CMAKE_SOURCE_DIR}/data/qwen3_vl_2b")
+set_tests_properties(test_qwen3_multilayer PROPERTIES TIMEOUT 1800)
 
 # ---- v10.2: CIFAR-10 ResNet-20 end-to-end inference ----
 # Reads pretrained weights + sample image + golden logits from
