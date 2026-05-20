@@ -45,6 +45,7 @@ add_library(tt_foil STATIC
     src/op_lib/kv_cache.cpp
     src/op_lib/matmul.cpp
     src/op_lib/rope.cpp
+    src/op_lib/transpose_2d.cpp
 )
 add_library(TT::Foil ALIAS tt_foil)
 

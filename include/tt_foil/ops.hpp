@@ -179,11 +179,21 @@ struct MhaOp {
     std::vector<std::shared_ptr<tt::foil::Buffer>> l1_cbs;
     std::shared_ptr<tt::foil::Buffer> dram_scaler;
 };
+// Optional per-buffer DRAM byte offsets — handy when Q / KT / V / out are
+// "views" into bigger multi-head buffers and we want to launch MHA per head
+// without copying data first. Set to 0 for the contiguous case.
+struct MhaOffsets {
+    uint64_t q_bytes  = 0;
+    uint64_t kt_bytes = 0;
+    uint64_t v_bytes  = 0;
+    uint64_t out_bytes = 0;
+};
 MhaOp make_mha(tt::foil::Device& dev,
                const TensorDesc& q, const TensorDesc& kt,
                const TensorDesc& v, const TensorDesc& mask,
                TensorDesc& out,
                uint32_t St, uint32_t Dt,
+               MhaOffsets offsets = {},
                tt::foil::CoreCoord core = {},
                const std::string& kernel_dir = "");
 void execute(tt::foil::Device& dev, MhaOp& op);
@@ -242,5 +252,24 @@ RopeOp make_rope(tt::foil::Device& dev,
                  tt::foil::CoreCoord core = {},
                  const std::string& kernel_dir = "");
 void execute(tt::foil::Device& dev, RopeOp& op);
+
+// =====================================================================
+// Transpose2d
+//   Transposes a [Rt, Ct] tile-format tensor to [Ct, Rt], with within-tile
+//   WH transpose so the result is correct in tile-format too. Used to turn
+//   K (post-RoPE, layout [St, num_kv*Dt]) into K^T (layout [num_kv*Dt, St])
+//   so the fused per-head MHA loop can read it without per-head host trips.
+// =====================================================================
+struct Transpose2dOp {
+    std::shared_ptr<tt::foil::Kernel> kernel;
+    std::shared_ptr<tt::foil::Buffer> l1_in;
+    std::shared_ptr<tt::foil::Buffer> l1_out;
+};
+Transpose2dOp make_transpose_2d(tt::foil::Device& dev,
+                                const TensorDesc& in, TensorDesc& out,
+                                uint32_t Rt, uint32_t Ct,
+                                tt::foil::CoreCoord core = {},
+                                const std::string& kernel_dir = "");
+void execute(tt::foil::Device& dev, Transpose2dOp& op);
 
 }  // namespace tt::foil::op_lib
