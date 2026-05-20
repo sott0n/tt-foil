@@ -224,13 +224,17 @@ int main() try {
     // -----------------------------------------------------------------
     run([&] { return ol::make_rmsnorm(*dev, T_x, T_ln1g, T_xnorm, kSt, kHt, kEps); });
     tt::foil::release_kernels(*dev, core);
+    tt::foil::reset_l1(*dev, core);
 
     run([&] { return ol::make_matmul(*dev, T_xnorm, T_Wq, T_Q, kSt, kHt, kNqDt); });
     tt::foil::release_kernels(*dev, core);
+    tt::foil::reset_l1(*dev, core);
     run([&] { return ol::make_matmul(*dev, T_xnorm, T_Wk, T_K, kSt, kHt, kNkDt); });
     tt::foil::release_kernels(*dev, core);
+    tt::foil::reset_l1(*dev, core);
     run([&] { return ol::make_matmul(*dev, T_xnorm, T_Wv, T_V, kSt, kHt, kNkDt); });
     tt::foil::release_kernels(*dev, core);
+    tt::foil::reset_l1(*dev, core);
 
     // -----------------------------------------------------------------
     // 4. q_norm / k_norm: standard RMSNorm with NCHt = St*num_heads, Wt = Dt.
@@ -240,19 +244,23 @@ int main() try {
                                 kSt * kNumQ, kDt, kEps);
     });
     tt::foil::release_kernels(*dev, core);
+    tt::foil::reset_l1(*dev, core);
     run([&] {
         return ol::make_rmsnorm(*dev, T_K, T_kng, T_Kn,
                                 kSt * kNumKv, kDt, kEps);
     });
     tt::foil::release_kernels(*dev, core);
+    tt::foil::reset_l1(*dev, core);
 
     // -----------------------------------------------------------------
     // 5. RoPE on Q and K (multi-head, in-place into T_Qr / T_Kr).
     // -----------------------------------------------------------------
     run([&] { return ol::make_rope(*dev, T_Qn, T_cos, T_sin, T_Qr, kSt, kNumQ,  kDtHalf); });
     tt::foil::release_kernels(*dev, core);
+    tt::foil::reset_l1(*dev, core);
     run([&] { return ol::make_rope(*dev, T_Kn, T_cos, T_sin, T_Kr, kSt, kNumKv, kDtHalf); });
     tt::foil::release_kernels(*dev, core);
+    tt::foil::reset_l1(*dev, core);
 
     // -----------------------------------------------------------------
     // 6. Per-head GQA loop on host: extract Q_h / K_h / V_h, transpose K,
@@ -299,6 +307,7 @@ int main() try {
             return ol::make_mha(*dev, T_Qh, T_KhT, T_Vh, T_mask, T_AttnH, kSt, kDt);
         });
         tt::foil::release_kernels(*dev, core);
+    tt::foil::reset_l1(*dev, core);
 
         std::vector<uint16_t> attn_h_tiles(kSt * kDt * kTileWords);
         tt::foil::read_buffer(*dev, *T_AttnH.buf, attn_h_tiles.data(), attn_h_tiles.size() * 2);
@@ -315,8 +324,10 @@ int main() try {
 
     run([&] { return ol::make_matmul(*dev, T_attn, T_Wo, T_proj, kSt, kNqDt, kHt); });
     tt::foil::release_kernels(*dev, core);
+    tt::foil::reset_l1(*dev, core);
     run([&] { return ol::make_eltwise_add(*dev, T_x, T_proj, T_out); });
     tt::foil::release_kernels(*dev, core);
+    tt::foil::reset_l1(*dev, core);
 
     // -----------------------------------------------------------------
     // 7. Compare.
