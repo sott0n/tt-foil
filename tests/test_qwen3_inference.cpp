@@ -397,10 +397,22 @@ int main() try {
 
     tt::foil::close_device(std::move(dev));
 
-    std::printf("top-1 (got / ref) first 8 of %u rows: ", kS);
-    for (uint32_t s = 0; s < 8; ++s)
-        std::printf("[%u / %u] ", got_top1[s], golden_top1[s]);
+    std::printf("top-1 all %u rows (got / ref):\n  ", kS);
+    for (uint32_t s = 0; s < kS; ++s) {
+        const bool eq = got_top1[s] == golden_top1[s];
+        std::printf("%s[%u/%u]%s ",
+                    eq ? "" : "\x1b[31m",
+                    got_top1[s], golden_top1[s],
+                    eq ? "" : "\x1b[0m");
+        if (s == 15) std::printf("\n  ");
+    }
     std::printf("\n");
+    if (mismatch > 0) {
+        std::printf("mismatched positions:");
+        for (uint32_t s = 0; s < kS; ++s)
+            if (got_top1[s] != golden_top1[s]) std::printf(" %u", s);
+        std::printf("\n");
+    }
 
     // Loose threshold: BF16 drift through 3 layers + final norm + lm_head
     // can shuffle close ties. Accept up to 8/32 = 25% argmax mismatches as
