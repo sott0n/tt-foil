@@ -247,10 +247,26 @@ _tt_default(MHA_DT 2)
 tt_foil_hw_test(test_mha test_mha.cpp "${OPS}/mha/prebuilt"
     "MHA_ST=${MHA_ST}" "MHA_DT=${MHA_DT}")
 tt_foil_hw_test(test_embedding test_embedding.cpp "${OPS}/embedding/prebuilt")
-# op_lib host abstraction (TensorDesc + SiluOp first cut)
+# op_lib host abstraction
 _tt_default(SILU_OP_NT 4)
 tt_foil_hw_test(test_silu_op test_silu_op.cpp "${OPS}/eltwise_unary/prebuilt"
     "SILU_OP_NT=${SILU_OP_NT}")
+_tt_default(EMUL_OP_NT 4)
+tt_foil_hw_test(test_eltwise_mul_op test_eltwise_mul_op.cpp "${OPS}/eltwise_binary/prebuilt"
+    "EMUL_OP_NT=${EMUL_OP_NT}")
+_tt_default(SOFTMAX_OP_NCHT 2)
+_tt_default(SOFTMAX_OP_WT 4)
+tt_foil_hw_test(test_softmax_op test_softmax_op.cpp "${OPS}/softmax/prebuilt"
+    "SOFTMAX_OP_NCHT=${SOFTMAX_OP_NCHT}" "SOFTMAX_OP_WT=${SOFTMAX_OP_WT}")
+_tt_default(RMS_OP_NCHT 2)
+_tt_default(RMS_OP_WT 4)
+tt_foil_hw_test(test_rmsnorm_op test_rmsnorm_op.cpp "${OPS}/rmsnorm/prebuilt"
+    "RMS_OP_NCHT=${RMS_OP_NCHT}" "RMS_OP_WT=${RMS_OP_WT}")
+_tt_default(MHA_OP_ST 2)
+_tt_default(MHA_OP_DT 2)
+tt_foil_hw_test(test_mha_op test_mha_op.cpp "${OPS}/mha/prebuilt"
+    "MHA_OP_ST=${MHA_OP_ST}" "MHA_OP_DT=${MHA_OP_DT}")
+tt_foil_hw_test(test_embedding_op test_embedding_op.cpp "${OPS}/embedding/prebuilt")
 
 # ---- v10.2: CIFAR-10 ResNet-20 end-to-end inference ----
 # Reads pretrained weights + sample image + golden logits from

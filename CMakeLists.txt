@@ -34,8 +34,13 @@ add_library(tt_foil STATIC
     # MetalContext::instance() call patched out (XIP-dump debug path).
     src/llrt_local/tt_memory.cpp
     src/llrt_local/tt_elffile.cpp
-    # op_lib: host-side primitive op wrappers (first cut, see include/tt_foil/ops.hpp)
+    # op_lib: host-side primitive op wrappers (see include/tt_foil/ops.hpp)
     src/op_lib/silu.cpp
+    src/op_lib/eltwise_mul.cpp
+    src/op_lib/softmax.cpp
+    src/op_lib/embedding.cpp
+    src/op_lib/rmsnorm.cpp
+    src/op_lib/mha.cpp
 )
 add_library(TT::Foil ALIAS tt_foil)
 
