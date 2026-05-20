@@ -329,6 +329,15 @@ tt_foil_hw_test(test_qwen3_lm_head test_qwen3_lm_head.cpp "${OPS}/matmul/prebuil
 set_tests_properties(test_qwen3_lm_head PROPERTIES
     ENVIRONMENT "TT_FOIL_KERNEL_DIR=${OPS}/matmul/prebuilt;TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_QWEN3_DATA=${CMAKE_SOURCE_DIR}/data/qwen3_vl_2b")
 set_tests_properties(test_qwen3_lm_head PROPERTIES TIMEOUT 1800)
+# Full prefill forward pass: embed → N layers → final norm → lm_head → argmax.
+# Default INF_NUM_LAYERS=3 (matches data/qwen3_vl_2b/chain3/ produced by
+# tools/qwen3_inference_golden.py).
+_tt_default(INF_NUM_LAYERS 3)
+tt_foil_hw_test(test_qwen3_inference test_qwen3_inference.cpp "${OPS}"
+    "INF_NUM_LAYERS=${INF_NUM_LAYERS}")
+set_tests_properties(test_qwen3_inference PROPERTIES
+    ENVIRONMENT "TT_FOIL_OPS_DIR=${OPS};TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_QWEN3_DATA=${CMAKE_SOURCE_DIR}/data/qwen3_vl_2b")
+set_tests_properties(test_qwen3_inference PROPERTIES TIMEOUT 3600)
 
 # ---- v10.2: CIFAR-10 ResNet-20 end-to-end inference ----
 # Reads pretrained weights + sample image + golden logits from
