@@ -247,6 +247,10 @@ _tt_default(MHA_DT 2)
 tt_foil_hw_test(test_mha test_mha.cpp "${OPS}/mha/prebuilt"
     "MHA_ST=${MHA_ST}" "MHA_DT=${MHA_DT}")
 tt_foil_hw_test(test_embedding test_embedding.cpp "${OPS}/embedding/prebuilt")
+# op_lib host abstraction (TensorDesc + SiluOp first cut)
+_tt_default(SILU_OP_NT 4)
+tt_foil_hw_test(test_silu_op test_silu_op.cpp "${OPS}/eltwise_unary/prebuilt"
+    "SILU_OP_NT=${SILU_OP_NT}")
 
 # ---- v10.2: CIFAR-10 ResNet-20 end-to-end inference ----
 # Reads pretrained weights + sample image + golden logits from
