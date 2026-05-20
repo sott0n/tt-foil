@@ -127,11 +127,20 @@ int main() try {
             scores[i * kS + j] = s;
         }
 
+    // Causal mask: M[i, j] = 1 if j <= i, else 0.
+    std::vector<float> mask_f(kS * kS, 0.0f);
+    for (uint32_t i = 0; i < kS; ++i)
+        for (uint32_t j = 0; j <= i; ++j)
+            mask_f[i * kS + j] = 1.0f;
+
     std::vector<float> attn(kS * kS, 0.0f);
     for (uint32_t i = 0; i < kS; ++i) {
         double sum = 0.0;
-        for (uint32_t j = 0; j < kS; ++j) sum += std::exp(scores[i * kS + j]);
-        for (uint32_t j = 0; j < kS; ++j) attn[i * kS + j] = std::exp(scores[i * kS + j]) / sum;
+        for (uint32_t j = 0; j < kS; ++j) sum += std::exp(scores[i * kS + j]) * mask_f[i * kS + j];
+        for (uint32_t j = 0; j < kS; ++j) {
+            float v = std::exp(scores[i * kS + j]) * mask_f[i * kS + j];
+            attn[i * kS + j] = static_cast<float>(v / sum);
+        }
     }
 
     std::vector<float> ref_f(kElems, 0.0f);
@@ -161,8 +170,15 @@ int main() try {
     tile_stream_2d(q_rm,    kS, kD, q_tiles);
     tile_stream_2d(kt_rm_DxS, kD, kS, kt_tiles);
     tile_stream_2d(v_rm,    kS, kD, v_tiles);
-    const uint32_t qkv_bytes = kSt * kDt * kTileBytes;
-    const uint32_t kt_bytes  = kDt * kSt * kTileBytes;
+    const uint32_t qkv_bytes  = kSt * kDt * kTileBytes;
+    const uint32_t kt_bytes   = kDt * kSt * kTileBytes;
+    const uint32_t mask_bytes = kSt * kSt * kTileBytes;
+
+    // mask: [S, S] BF16, then tile to [St, St] grid of tiles
+    std::vector<uint16_t> mask_rm(kS * kS);
+    for (uint32_t i = 0; i < kS * kS; ++i) mask_rm[i] = f32_to_bf16(mask_f[i]);
+    std::vector<uint16_t> mask_tiles;
+    tile_stream_2d(mask_rm, kS, kS, mask_tiles);
 
     std::vector<uint16_t> scaler_tile;
     make_const_tile(1.0f, scaler_tile);
@@ -174,6 +190,7 @@ int main() try {
     auto buf_kt     = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, kt_bytes,   core);
     auto buf_v      = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, qkv_bytes,  core);
     auto buf_scaler = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, kTileBytes, core);
+    auto buf_mask   = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, mask_bytes, core);
     auto buf_out    = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::DRAM, qkv_bytes,  core);
 
     // L1 CB buffers. fifo_size == num_pages * page_size.
@@ -186,12 +203,15 @@ int main() try {
     auto l1_sum       = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, kTileBytes,           core);
     auto l1_recip     = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, kTileBytes,           core);
     auto l1_softmaxed = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, kSt * kTileBytes,     core);
+    auto l1_exp_m     = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, kSt * kTileBytes,     core);
+    auto l1_mask      = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, mask_bytes,           core);
     auto l1_out       = tt::foil::allocate_buffer(*dev, tt::foil::BufferLocation::L1, kTileBytes,           core);
 
     tt::foil::write_buffer(*dev, *buf_q,      q_tiles.data(),     qkv_bytes);
     tt::foil::write_buffer(*dev, *buf_kt,     kt_tiles.data(),    kt_bytes);
     tt::foil::write_buffer(*dev, *buf_v,      v_tiles.data(),     qkv_bytes);
     tt::foil::write_buffer(*dev, *buf_scaler, scaler_tile.data(), kTileBytes);
+    tt::foil::write_buffer(*dev, *buf_mask,   mask_tiles.data(),  mask_bytes);
     {
         std::vector<uint8_t> zero(qkv_bytes, 0);
         tt::foil::write_buffer(*dev, *buf_out, zero.data(), qkv_bytes);
@@ -201,6 +221,7 @@ int main() try {
     uint64_t kt_noc     = tt::foil::make_noc_dram_addr(*dev, buf_kt->device_addr);
     uint64_t v_noc      = tt::foil::make_noc_dram_addr(*dev, buf_v->device_addr);
     uint64_t scaler_noc = tt::foil::make_noc_dram_addr(*dev, buf_scaler->device_addr);
+    uint64_t mask_noc   = tt::foil::make_noc_dram_addr(*dev, buf_mask->device_addr);
     uint64_t dst_noc    = tt::foil::make_noc_dram_addr(*dev, buf_out->device_addr);
 
     using R = tt::foil::RiscBinary;
@@ -213,7 +234,7 @@ int main() try {
     }};
     auto kernel = tt::foil::load_kernel(*dev, bins, core);
 
-    std::array<tt::foil::CbConfig, 10> cbs = {{
+    std::array<tt::foil::CbConfig, 12> cbs = {{
         {0,  l1_q->device_addr,         qkv_bytes,         kSt * kDt, kTileBytes},
         {1,  l1_kt->device_addr,        kt_bytes,          kDt * kSt, kTileBytes},
         {2,  l1_v->device_addr,         qkv_bytes,         kSt * kDt, kTileBytes},
@@ -223,15 +244,18 @@ int main() try {
         {6,  l1_sum->device_addr,       kTileBytes,        1,         kTileBytes},
         {7,  l1_recip->device_addr,     kTileBytes,        1,         kTileBytes},
         {8,  l1_softmaxed->device_addr, kSt * kTileBytes,  kSt,       kTileBytes},
+        {9,  l1_exp_m->device_addr,     kSt * kTileBytes,  kSt,       kTileBytes},
+        {10, l1_mask->device_addr,      mask_bytes,        kSt * kSt, kTileBytes},
         {16, l1_out->device_addr,       kTileBytes,        1,         kTileBytes},
     }};
     tt::foil::register_cbs(*dev, *kernel, cbs);
 
-    std::array<uint32_t, 10> ra_brisc = {
+    std::array<uint32_t, 12> ra_brisc = {
         static_cast<uint32_t>(q_noc & 0xffffffffu),      static_cast<uint32_t>(q_noc >> 32),
         static_cast<uint32_t>(kt_noc & 0xffffffffu),     static_cast<uint32_t>(kt_noc >> 32),
         static_cast<uint32_t>(v_noc & 0xffffffffu),      static_cast<uint32_t>(v_noc >> 32),
         static_cast<uint32_t>(scaler_noc & 0xffffffffu), static_cast<uint32_t>(scaler_noc >> 32),
+        static_cast<uint32_t>(mask_noc & 0xffffffffu),   static_cast<uint32_t>(mask_noc >> 32),
         kSt, kDt,
     };
     std::array<uint32_t, 2> ra_trisc = {kSt, kDt};
