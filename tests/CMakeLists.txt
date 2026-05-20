@@ -321,6 +321,14 @@ tt_foil_hw_test(test_qwen3_embed test_qwen3_embed.cpp "${OPS}/embedding/prebuilt
 set_tests_properties(test_qwen3_embed PROPERTIES
     ENVIRONMENT "TT_FOIL_KERNEL_DIR=${OPS}/embedding/prebuilt;TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_QWEN3_DATA=${CMAKE_SOURCE_DIR}/data/qwen3_vl_2b")
 set_tests_properties(test_qwen3_embed PROPERTIES TIMEOUT 120)
+# lm_head matmul on real (tied) embed weights. Needs the pre-tiled
+# lm_head_tiled.bin + hidden / golden binaries from
+# tools/qwen3_lm_head_golden.py. Nt=4748 is much larger than any other
+# matmul in tt-foil so the timeout is generous.
+tt_foil_hw_test(test_qwen3_lm_head test_qwen3_lm_head.cpp "${OPS}/matmul/prebuilt")
+set_tests_properties(test_qwen3_lm_head PROPERTIES
+    ENVIRONMENT "TT_FOIL_KERNEL_DIR=${OPS}/matmul/prebuilt;TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_QWEN3_DATA=${CMAKE_SOURCE_DIR}/data/qwen3_vl_2b")
+set_tests_properties(test_qwen3_lm_head PROPERTIES TIMEOUT 1800)
 
 # ---- v10.2: CIFAR-10 ResNet-20 end-to-end inference ----
 # Reads pretrained weights + sample image + golden logits from
