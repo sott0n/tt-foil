@@ -140,6 +140,11 @@ def main() -> int:
     ap.add_argument("--rope-theta", required=True, type=float)
     ap.add_argument("--eps",        default=1e-6, type=float)
     ap.add_argument("--seed",       default=0xBABE, type=int)
+    ap.add_argument("--prompt",     default=None, type=str,
+                    help="If set, tokenize this prompt (Qwen3 tokenizer) "
+                         "and pad/truncate to --seq instead of using --seed.")
+    ap.add_argument("--tokenizer",  default=None, type=Path,
+                    help="Path to tokenizer.json (defaults to HF cache).")
     args = ap.parse_args()
 
     if args.seq % 32 != 0:
@@ -159,13 +164,31 @@ def main() -> int:
 
     layers = [load_layer(args.data_dir / f"layer{i}") for i in range(args.num_layers)]
 
-    # ---- Deterministic token IDs ----
-    rng = np.random.default_rng(args.seed)
-    token_ids = rng.integers(low=0, high=V, size=args.seq, dtype=np.uint32)
-    token_ids[0] = 0
-    token_ids[1] = 151643      # <|endoftext|>
-    token_ids[-1] = V - 1
-    print(f"token_ids[:8] = {token_ids[:8].tolist()}")
+    # ---- Token IDs: real prompt (if --prompt) or deterministic synthetic. ----
+    if args.prompt is not None:
+        from tokenizers import Tokenizer
+        tk_path = args.tokenizer or Path(
+            "/home/kyamaguchi/.cache/huggingface/hub/"
+            "models--Qwen--Qwen3-VL-2B-Instruct/snapshots/"
+            "89644892e4d85e24eaac8bacfd4f463576704203/tokenizer.json"
+        )
+        tk = Tokenizer.from_file(str(tk_path))
+        ids = tk.encode(args.prompt).ids
+        # Pad with the endoftext token (151643) or truncate to --seq.
+        pad = 151643
+        if len(ids) < args.seq:
+            ids = ids + [pad] * (args.seq - len(ids))
+        else:
+            ids = ids[: args.seq]
+        token_ids = np.array(ids, dtype=np.uint32)
+        print(f"prompt → {args.seq} tokens; first 8 = {token_ids[:8].tolist()}")
+    else:
+        rng = np.random.default_rng(args.seed)
+        token_ids = rng.integers(low=0, high=V, size=args.seq, dtype=np.uint32)
+        token_ids[0] = 0
+        token_ids[1] = 151643      # <|endoftext|>
+        token_ids[-1] = V - 1
+        print(f"token_ids[:8] = {token_ids[:8].tolist()}")
 
     # ---- Embedding lookup ----
     x = embed[token_ids]                                        # [S, H]  bf16-bit float
