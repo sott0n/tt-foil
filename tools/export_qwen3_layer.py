@@ -159,6 +159,52 @@ def _detect_prefix(weight_map: dict) -> str:
 LAYER_TENSORS = None  # populated in main() based on detected prefix
 
 
+# Non-layer ("model-level") tensors: token embeddings + final RMSNorm.
+# Qwen3-VL has tie_word_embeddings=True, so lm_head shares weights with
+# embed_tokens — no separate lm_head export needed.
+def _model_tensors(prefix: str):
+    return {
+        # embed_tokens is used row-major as a lookup table (token_id → row),
+        # NOT as a matmul B operand, so we keep it [vocab, hidden] without
+        # transposing. See `no_transpose=True` handling in export_model().
+        "embed_tokens": (f"{prefix}.embed_tokens.weight",  True),   # [vocab, hidden]
+        "final_norm":   (f"{prefix}.norm.weight",          False),  # [hidden]
+    }
+
+
+def export_model(weight_map, shard_handles, prefix: str, out_dir: Path, dry_run: bool):
+    out_dir.mkdir(parents=True, exist_ok=True)
+    manifest = {"tensors": {}}
+    import torch as _torch  # noqa: F811 — explicit alias for clarity
+    for short, (name, no_transpose) in _model_tensors(prefix).items():
+        if name not in weight_map:
+            print(f"  {short:13s}  (not present in this model — skipping)")
+            continue
+        t = fetch(weight_map, shard_handles, name)
+        if t.ndim == 2 and not no_transpose:
+            t = t.transpose(0, 1).contiguous()
+        if t.dtype != _torch.bfloat16:
+            t = t.to(_torch.bfloat16)
+        bytes_view = t.view(_torch.uint16).numpy()
+        path = out_dir / f"{short}.bin"
+        shape = list(t.shape)
+        manifest["tensors"][short] = {
+            "shape": shape,
+            "dtype": "bf16",
+            "path":  path.name,
+            "src":   name,
+            "no_transpose": no_transpose,
+        }
+        if not dry_run:
+            with open(path, "wb") as f:
+                f.write(bytes_view.tobytes())
+        print(f"  {short:13s}  {str(shape):s}  {bytes_view.nbytes / 1e6:.1f} MB"
+              + ("  (dry-run)" if dry_run else ""))
+    if not dry_run:
+        with open(out_dir / "manifest.json", "w") as f:
+            json.dump(manifest, f, indent=2)
+
+
 def export_layer(weight_map, shard_handles, layer_idx: int, out_dir: Path, dry_run: bool):
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest = {"layer": layer_idx, "tensors": {}}
@@ -202,7 +248,9 @@ def main() -> int:
     ap.add_argument("--model", default="Qwen/Qwen3-VL-2B-Instruct",
                     help="HuggingFace repo id")
     ap.add_argument("--layer", default="0",
-                    help="layer index (int) or 'all'")
+                    help="layer index (int), 'all', or 'none' (skip layers)")
+    ap.add_argument("--model-tensors", action="store_true",
+                    help="Also export embed_tokens + final norm to <out-dir>/model/")
     ap.add_argument("--out-dir", default="data/qwen3_vl_2b",
                     type=Path)
     ap.add_argument("--cache-dir", default=Path(".cache"), type=Path)
@@ -218,12 +266,14 @@ def main() -> int:
     LAYER_TENSORS = _layer_tensors(prefix)
 
     # Pick the layer indices to export.
-    if args.layer == "all":
-        # Scan weight_map for unique layer indices.
+    if args.layer == "none":
+        layers = []
+    elif args.layer == "all":
+        # Scan weight_map for unique layer indices, scoped to the detected prefix.
         layers = sorted({
-            int(k.split("model.layers.")[1].split(".")[0])
+            int(k.split(f"{prefix}.layers.")[1].split(".")[0])
             for k in weight_map
-            if k.startswith("model.layers.")
+            if k.startswith(f"{prefix}.layers.")
         })
     else:
         layers = [int(args.layer)]
@@ -232,6 +282,11 @@ def main() -> int:
         layer_dir = args.out_dir / f"layer{L}"
         print(f"exporting layer {L} → {layer_dir}")
         export_layer(weight_map, shard_handles, L, layer_dir, args.dry_run)
+
+    if args.model_tensors:
+        model_dir = args.out_dir / "model"
+        print(f"exporting model-level tensors → {model_dir}")
+        export_model(weight_map, shard_handles, prefix, model_dir, args.dry_run)
 
     print("done.")
     return 0
