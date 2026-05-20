@@ -131,17 +131,32 @@ def fetch(weight_map, shard_handles, name):
 # Layer export
 # ---------------------------------------------------------------------------
 # Weight names follow the standard HuggingFace Llama/Qwen layout.
-LAYER_TENSORS = {
-    "ln1_gamma": "model.layers.{L}.input_layernorm.weight",        # [hidden]
-    "W_q":       "model.layers.{L}.self_attn.q_proj.weight",       # [out=Q*head_dim, in=hidden]
-    "W_k":       "model.layers.{L}.self_attn.k_proj.weight",       # [out=KV*head_dim, in=hidden]
-    "W_v":       "model.layers.{L}.self_attn.v_proj.weight",       # [out=KV*head_dim, in=hidden]
-    "W_o":       "model.layers.{L}.self_attn.o_proj.weight",       # [out=hidden, in=Q*head_dim]
-    "ln2_gamma": "model.layers.{L}.post_attention_layernorm.weight",
-    "W_gate":    "model.layers.{L}.mlp.gate_proj.weight",          # [ffn, hidden]
-    "W_up":      "model.layers.{L}.mlp.up_proj.weight",            # [ffn, hidden]
-    "W_down":    "model.layers.{L}.mlp.down_proj.weight",          # [hidden, ffn]
-}
+# Qwen3-VL nests under `language_model.`; pure Qwen3 omits it.
+def _layer_tensors(prefix: str):
+    return {
+        "ln1_gamma": f"{prefix}.layers.{{L}}.input_layernorm.weight",        # [hidden]
+        "W_q":       f"{prefix}.layers.{{L}}.self_attn.q_proj.weight",       # [out=Q*head_dim, in=hidden]
+        "W_k":       f"{prefix}.layers.{{L}}.self_attn.k_proj.weight",       # [out=KV*head_dim, in=hidden]
+        "W_v":       f"{prefix}.layers.{{L}}.self_attn.v_proj.weight",       # [out=KV*head_dim, in=hidden]
+        "W_o":       f"{prefix}.layers.{{L}}.self_attn.o_proj.weight",       # [out=hidden, in=Q*head_dim]
+        "q_norm":    f"{prefix}.layers.{{L}}.self_attn.q_norm.weight",       # [head_dim]
+        "k_norm":    f"{prefix}.layers.{{L}}.self_attn.k_norm.weight",       # [head_dim]
+        "ln2_gamma": f"{prefix}.layers.{{L}}.post_attention_layernorm.weight",
+        "W_gate":    f"{prefix}.layers.{{L}}.mlp.gate_proj.weight",          # [ffn, hidden]
+        "W_up":      f"{prefix}.layers.{{L}}.mlp.up_proj.weight",            # [ffn, hidden]
+        "W_down":    f"{prefix}.layers.{{L}}.mlp.down_proj.weight",          # [hidden, ffn]
+    }
+
+
+def _detect_prefix(weight_map: dict) -> str:
+    """Return the model-prefix that owns `.layers.0.input_layernorm.weight`."""
+    for prefix in ("model.language_model", "model"):
+        if f"{prefix}.layers.0.input_layernorm.weight" in weight_map:
+            return prefix
+    raise RuntimeError("could not locate .layers.0.input_layernorm.weight in safetensors index")
+
+
+LAYER_TENSORS = None  # populated in main() based on detected prefix
 
 
 def export_layer(weight_map, shard_handles, layer_idx: int, out_dir: Path, dry_run: bool):
@@ -151,6 +166,9 @@ def export_layer(weight_map, shard_handles, layer_idx: int, out_dir: Path, dry_r
     torch = _require("torch")  # noqa: F841 — used via fetch()
     for short, fmt in LAYER_TENSORS.items():
         name = fmt.format(L=layer_idx)
+        if name not in weight_map:
+            print(f"  {short:9s}  (not present in this model — skipping)")
+            continue
         t = fetch(weight_map, shard_handles, name)  # torch tensor
         # Transpose 2D weights from HF's [out, in] to our matmul's [in, out].
         if t.ndim == 2:
@@ -193,6 +211,11 @@ def main() -> int:
 
     print(f"opening model: {args.model}")
     weight_map, shard_handles = open_model(args.model, args.cache_dir)
+
+    prefix = _detect_prefix(weight_map)
+    print(f"  detected weight prefix: {prefix}")
+    global LAYER_TENSORS
+    LAYER_TENSORS = _layer_tensors(prefix)
 
     # Pick the layer indices to export.
     if args.layer == "all":
