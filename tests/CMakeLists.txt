@@ -314,6 +314,13 @@ tt_foil_hw_test(test_qwen3_multilayer test_qwen3_multilayer.cpp "${OPS}"
 set_tests_properties(test_qwen3_multilayer PROPERTIES
     ENVIRONMENT "TT_FOIL_OPS_DIR=${OPS};TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_QWEN3_DATA=${CMAKE_SOURCE_DIR}/data/qwen3_vl_2b")
 set_tests_properties(test_qwen3_multilayer PROPERTIES TIMEOUT 1800)
+# Real-weights embedding lookup test on Qwen3-VL-2B.
+# Needs data/qwen3_vl_2b/model/embed_tokens.bin from
+# tools/export_qwen3_layer.py --model-tensors.
+tt_foil_hw_test(test_qwen3_embed test_qwen3_embed.cpp "${OPS}/embedding/prebuilt")
+set_tests_properties(test_qwen3_embed PROPERTIES
+    ENVIRONMENT "TT_FOIL_KERNEL_DIR=${OPS}/embedding/prebuilt;TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_QWEN3_DATA=${CMAKE_SOURCE_DIR}/data/qwen3_vl_2b")
+set_tests_properties(test_qwen3_embed PROPERTIES TIMEOUT 120)
 
 # ---- v10.2: CIFAR-10 ResNet-20 end-to-end inference ----
 # Reads pretrained weights + sample image + golden logits from
