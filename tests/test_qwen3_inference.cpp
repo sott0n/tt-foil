@@ -150,6 +150,16 @@ LayerW load_and_upload_layer(tt::foil::Device& dev, const std::string& d) {
     auto Wup   = LD("W_up.bin",      kH * kFFN);
     auto Wdown = LD("W_down.bin",    kFFN * kH);
 
+    // Absorb the 1/sqrt(head_dim) attention scale into the q_norm gamma:
+    //   Q_normed = RMSNorm(Q) * (gamma * 1/sqrt(d))  ==  (Q after q_norm) * 1/sqrt(d)
+    // and RoPE is linear, so the scale carries through to MHA's Q operand
+    // without needing a separate device-side scalar-multiply op.
+    const float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(kHeadDim));
+    for (auto& v : qng) {
+        float f = bf16_to_f32(v) * inv_sqrt_d;
+        v = f32_to_bf16(f);
+    }
+
     LayerW L;
     L.ln1g  = ol::allocate_tensor_dram(dev, kHt);
     L.ln2g  = ol::allocate_tensor_dram(dev, kHt);
@@ -257,6 +267,7 @@ int main() try {
     auto T_Qr = ol::allocate_tensor_dram(*dev, kSt * kNqDt);
     auto T_Kr = ol::allocate_tensor_dram(*dev, kSt * kNkDt);
     auto T_attn = ol::allocate_tensor_dram(*dev, kSt * kNqDt);
+    auto T_Kt   = ol::allocate_tensor_dram(*dev, kNkDt * kSt);   // K after on-device transpose
     auto T_proj = ol::allocate_tensor_dram(*dev, kSt * kHt);
     auto T_xmid = ol::allocate_tensor_dram(*dev, kSt * kHt);
     auto T_ynorm = ol::allocate_tensor_dram(*dev, kSt * kHt);
@@ -265,10 +276,8 @@ int main() try {
     auto T_silu = ol::allocate_tensor_dram(*dev, kSt * kFFt);
     auto T_fused = ol::allocate_tensor_dram(*dev, kSt * kFFt);
     auto T_down = ol::allocate_tensor_dram(*dev, kSt * kHt);
-    auto T_Qh   = ol::allocate_tensor_dram(*dev, kSt * kDt);
-    auto T_KhT  = ol::allocate_tensor_dram(*dev, kDt * kSt);
-    auto T_Vh   = ol::allocate_tensor_dram(*dev, kSt * kDt);
-    auto T_AttnH = ol::allocate_tensor_dram(*dev, kSt * kDt);
+    // (Per-head Qh / KhT / Vh / AttnH no longer needed — offset-based MHA
+    // reads directly from the full multi-head buffers.)
     auto T_normed = ol::allocate_tensor_dram(*dev, kSt * kHt);
     auto T_logits = ol::allocate_tensor_dram(*dev, kSt * kVt);
 
@@ -299,7 +308,6 @@ int main() try {
     for (uint32_t i = 0; i < kNumLayers; ++i)
         layers.push_back(load_and_upload_layer(*dev, root + "/layer" + std::to_string(i)));
 
-    const float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(kHeadDim));
     for (uint32_t li = 0; li < kNumLayers; ++li) {
         const LayerW& w = layers[li];
         std::printf("  layer %u …\n", li);
@@ -313,43 +321,26 @@ int main() try {
         run([&] { return ol::make_rope(*dev, T_Qn, T_cos, T_sin, T_Qr, kSt, kNumQ,  kDtHalf); }); step();
         run([&] { return ol::make_rope(*dev, T_Kn, T_cos, T_sin, T_Kr, kSt, kNumKv, kDtHalf); }); step();
 
-        std::vector<uint16_t> Qr_all(kSt * kNqDt * kTileWords);
-        std::vector<uint16_t> Kr_all(kSt * kNkDt * kTileWords);
-        std::vector<uint16_t> V_all (kSt * kNkDt * kTileWords);
-        tt::foil::read_buffer(*dev, *T_Qr.buf, Qr_all.data(), Qr_all.size() * 2);
-        tt::foil::read_buffer(*dev, *T_Kr.buf, Kr_all.data(), Kr_all.size() * 2);
-        tt::foil::read_buffer(*dev, *T_V.buf,  V_all.data(),  V_all.size()  * 2);
-        auto Qr_rm = untile2d(Qr_all, kS, kNumQ  * kHeadDim);
-        auto Kr_rm = untile2d(Kr_all, kS, kNumKv * kHeadDim);
-        auto V_rm  = untile2d(V_all,  kS, kNumKv * kHeadDim);
+        // On-device K transpose: [St, num_kv*Dt] → [num_kv*Dt, St] (tile
+        // layout with WH-flipped tiles), one shot for all KV heads.
+        run([&] { return ol::make_transpose_2d(*dev, T_Kr, T_Kt, kSt, kNkDt); }); step();
 
-        std::vector<uint16_t> attn_concat_rm(kS * kNumQ * kHeadDim, 0);
+        // Per-head GQA loop runs entirely on device: each iteration only
+        // launches one MHA kernel, reading Q / KT / V slices at the right
+        // DRAM offset and writing attn_h directly into T_attn.
         for (uint32_t h = 0; h < kNumQ; ++h) {
             uint32_t kv = h / kGqaGroups;
-            std::vector<uint16_t> Qh_rm(kS * kHeadDim);
-            std::vector<uint16_t> KhT_rm(kHeadDim * kS);
-            std::vector<uint16_t> Vh_rm(kS * kHeadDim);
-            for (uint32_t s = 0; s < kS; ++s) {
-                for (uint32_t d = 0; d < kHeadDim; ++d) {
-                    float q_val = bf16_to_f32(Qr_rm[s * kNumQ  * kHeadDim + h  * kHeadDim + d]);
-                    Qh_rm[s * kHeadDim + d] = f32_to_bf16(q_val * inv_sqrt_d);
-                    KhT_rm[d * kS + s]      = Kr_rm[s * kNumKv * kHeadDim + kv * kHeadDim + d];
-                    Vh_rm[s * kHeadDim + d] = V_rm [s * kNumKv * kHeadDim + kv * kHeadDim + d];
-                }
-            }
-            upload(T_Qh,  tile2d(Qh_rm,  kS, kHeadDim));
-            upload(T_KhT, tile2d(KhT_rm, kHeadDim, kS));
-            upload(T_Vh,  tile2d(Vh_rm,  kS, kHeadDim));
-            run([&] { return ol::make_mha(*dev, T_Qh, T_KhT, T_Vh, T_mask, T_AttnH, kSt, kDt); });
+            ol::MhaOffsets off;
+            off.q_bytes   = static_cast<uint64_t>(h)  * kDt      * kTileBytes;
+            off.kt_bytes  = static_cast<uint64_t>(kv) * kDt * kSt * kTileBytes;
+            off.v_bytes   = static_cast<uint64_t>(kv) * kDt      * kTileBytes;
+            off.out_bytes = static_cast<uint64_t>(h)  * kDt      * kTileBytes;
+            run([&] {
+                return ol::make_mha(*dev, T_Qr, T_Kt, T_V, T_mask, T_attn,
+                                    kSt, kDt, off);
+            });
             step();
-            std::vector<uint16_t> ah_tiles(kSt * kDt * kTileWords);
-            tt::foil::read_buffer(*dev, *T_AttnH.buf, ah_tiles.data(), ah_tiles.size() * 2);
-            auto ah_rm = untile2d(ah_tiles, kS, kHeadDim);
-            for (uint32_t s = 0; s < kS; ++s)
-                for (uint32_t d = 0; d < kHeadDim; ++d)
-                    attn_concat_rm[s * kNumQ * kHeadDim + h * kHeadDim + d] = ah_rm[s * kHeadDim + d];
         }
-        upload(T_attn, tile2d(attn_concat_rm, kS, kNumQ * kHeadDim));
         run([&] { return ol::make_matmul(*dev, T_attn, w.Wo, T_proj, kSt, kNqDt, kHt); }); step();
         run([&] { return ol::make_eltwise_add(*dev, T_layer_in, T_proj, T_xmid); });        step();
 
