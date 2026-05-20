@@ -1,19 +1,21 @@
 // SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
 // SPDX-License-Identifier: Apache-2.0
 //
-// BRISC reader for MHA (single-tile, single-head, first cut).
+// BRISC reader for MHA.
 //
-// Loads:
-//   - Q   tile (cb_q)
-//   - KT  tile (cb_kt, K transposed on host)
-//   - V   tile (cb_v)
-//   - scaler tile (cb_reduce, BF16(1.0) — for SUM reduce in softmax)
+// Loads (all upfront — only valid for small St, Dt that fit in L1):
+//   - scaler tile (cb_reduce, BF16(1.0))
+//   - Q   [St × Dt] tiles (cb_q)
+//   - KT  [Dt × St] tiles (cb_kt, K transposed on host)
+//   - V   [St × Dt] tiles (cb_v)
 //
 // Runtime args:
-//   arg[0..1]  = Q_noc  (lo, hi)
-//   arg[2..3]  = KT_noc (lo, hi)
-//   arg[4..5]  = V_noc  (lo, hi)
-//   arg[6..7]  = scaler_noc (lo, hi)
+//   arg[0..1]  = Q_noc       (lo, hi)
+//   arg[2..3]  = KT_noc      (lo, hi)
+//   arg[4..5]  = V_noc       (lo, hi)
+//   arg[6..7]  = scaler_noc  (lo, hi)
+//   arg[8]     = St
+//   arg[9]     = Dt
 
 #include <cstdint>
 #include "dataflow_api.h"
@@ -27,6 +29,8 @@ void kernel_main() {
     const uint64_t kt_noc     = join64(get_arg_val<uint32_t>(2), get_arg_val<uint32_t>(3));
     const uint64_t v_noc      = join64(get_arg_val<uint32_t>(4), get_arg_val<uint32_t>(5));
     const uint64_t scaler_noc = join64(get_arg_val<uint32_t>(6), get_arg_val<uint32_t>(7));
+    const uint32_t St         = get_arg_val<uint32_t>(8);
+    const uint32_t Dt         = get_arg_val<uint32_t>(9);
 
     constexpr uint32_t cb_q      = 0;
     constexpr uint32_t cb_kt     = 1;
@@ -39,17 +43,29 @@ void kernel_main() {
     noc_async_read_barrier();
     cb_push_back(cb_reduce, 1);
 
-    cb_reserve_back(cb_q, 1);
-    noc_async_read(q_noc, get_write_ptr(cb_q), kTileBytes);
+    const uint32_t qkv_tiles = St * Dt;
+    const uint32_t kt_tiles  = Dt * St;
 
-    cb_reserve_back(cb_kt, 1);
-    noc_async_read(kt_noc, get_write_ptr(cb_kt), kTileBytes);
+    cb_reserve_back(cb_q, qkv_tiles);
+    for (uint32_t i = 0; i < qkv_tiles; ++i) {
+        noc_async_read(q_noc + static_cast<uint64_t>(i) * kTileBytes,
+                       get_write_ptr(cb_q) + i * kTileBytes, kTileBytes);
+    }
 
-    cb_reserve_back(cb_v, 1);
-    noc_async_read(v_noc, get_write_ptr(cb_v), kTileBytes);
+    cb_reserve_back(cb_kt, kt_tiles);
+    for (uint32_t i = 0; i < kt_tiles; ++i) {
+        noc_async_read(kt_noc + static_cast<uint64_t>(i) * kTileBytes,
+                       get_write_ptr(cb_kt) + i * kTileBytes, kTileBytes);
+    }
+
+    cb_reserve_back(cb_v, qkv_tiles);
+    for (uint32_t i = 0; i < qkv_tiles; ++i) {
+        noc_async_read(v_noc + static_cast<uint64_t>(i) * kTileBytes,
+                       get_write_ptr(cb_v) + i * kTileBytes, kTileBytes);
+    }
 
     noc_async_read_barrier();
-    cb_push_back(cb_q,  1);
-    cb_push_back(cb_kt, 1);
-    cb_push_back(cb_v,  1);
+    cb_push_back(cb_q,  qkv_tiles);
+    cb_push_back(cb_kt, kt_tiles);
+    cb_push_back(cb_v,  qkv_tiles);
 }

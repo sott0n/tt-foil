@@ -242,7 +242,10 @@ _tt_default(SOFTMAX_NCHT 2)
 _tt_default(SOFTMAX_WT 4)
 tt_foil_hw_test(test_softmax test_softmax.cpp "${OPS}/softmax/prebuilt"
     "SOFTMAX_NCHT=${SOFTMAX_NCHT}" "SOFTMAX_WT=${SOFTMAX_WT}")
-tt_foil_hw_test(test_mha test_mha.cpp "${OPS}/mha/prebuilt")
+_tt_default(MHA_ST 2)
+_tt_default(MHA_DT 2)
+tt_foil_hw_test(test_mha test_mha.cpp "${OPS}/mha/prebuilt"
+    "MHA_ST=${MHA_ST}" "MHA_DT=${MHA_DT}")
 tt_foil_hw_test(test_embedding test_embedding.cpp "${OPS}/embedding/prebuilt")
 
 # ---- v10.2: CIFAR-10 ResNet-20 end-to-end inference ----
