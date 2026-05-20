@@ -277,6 +277,12 @@ tt_foil_hw_test(test_matmul_op test_matmul_op.cpp "${OPS}/matmul/prebuilt"
     "MM_OP_MT=${MM_OP_MT}" "MM_OP_KT=${MM_OP_KT}" "MM_OP_NT=${MM_OP_NT}")
 # KV cache (Phase 1-C minimum): no kernels, but needs HW for buffer R/W.
 tt_foil_hw_test(test_kv_cache test_kv_cache.cpp "${OPS}/eltwise_unary/prebuilt")
+# Multi-op chain — needs all op_lib kernels; TT_FOIL_OPS_DIR points at ops/
+# so each make_* picks up its own prebuilt subdir.
+tt_foil_hw_test(test_transformer_block test_transformer_block.cpp "${OPS}")
+set_tests_properties(test_transformer_block PROPERTIES
+    ENVIRONMENT "TT_FOIL_OPS_DIR=${OPS};TT_FOIL_DEVICE=${TT_FOIL_DEVICE}")
+set_tests_properties(test_transformer_block PROPERTIES TIMEOUT 180)
 
 # ---- v10.2: CIFAR-10 ResNet-20 end-to-end inference ----
 # Reads pretrained weights + sample image + golden logits from
