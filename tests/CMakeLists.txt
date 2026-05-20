@@ -267,6 +267,11 @@ _tt_default(MHA_OP_DT 2)
 tt_foil_hw_test(test_mha_op test_mha_op.cpp "${OPS}/mha/prebuilt"
     "MHA_OP_ST=${MHA_OP_ST}" "MHA_OP_DT=${MHA_OP_DT}")
 tt_foil_hw_test(test_embedding_op test_embedding_op.cpp "${OPS}/embedding/prebuilt")
+_tt_default(MM_OP_MT 2)
+_tt_default(MM_OP_KT 4)
+_tt_default(MM_OP_NT 2)
+tt_foil_hw_test(test_matmul_op test_matmul_op.cpp "${OPS}/matmul/prebuilt"
+    "MM_OP_MT=${MM_OP_MT}" "MM_OP_KT=${MM_OP_KT}" "MM_OP_NT=${MM_OP_NT}")
 # KV cache (Phase 1-C minimum): no kernels, but needs HW for buffer R/W.
 tt_foil_hw_test(test_kv_cache test_kv_cache.cpp "${OPS}/eltwise_unary/prebuilt")
 

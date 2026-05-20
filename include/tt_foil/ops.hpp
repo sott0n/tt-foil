@@ -56,6 +56,27 @@ SiluOp make_silu(tt::foil::Device& dev,
 void execute(tt::foil::Device& dev, SiluOp& op);
 
 // =====================================================================
+// MatMul
+//   C = A · B
+//   A: [Mt × Kt] tiles row-major, B: [Kt × Nt] tiles row-major,
+//   C: [Mt × Nt] tiles row-major. Single ELF — Mt/Kt/Nt are runtime args
+//   so the same handle supports every Qwen3 matmul shape.
+// =====================================================================
+struct MatMulOp {
+    std::shared_ptr<tt::foil::Kernel> kernel;
+    std::shared_ptr<tt::foil::Buffer> l1_a;
+    std::shared_ptr<tt::foil::Buffer> l1_b;
+    std::shared_ptr<tt::foil::Buffer> l1_out;
+};
+MatMulOp make_matmul(tt::foil::Device& dev,
+                     const TensorDesc& a, const TensorDesc& b,
+                     TensorDesc& out,
+                     uint32_t Mt, uint32_t Kt, uint32_t Nt,
+                     tt::foil::CoreCoord core = {},
+                     const std::string& kernel_dir = "");
+void execute(tt::foil::Device& dev, MatMulOp& op);
+
+// =====================================================================
 // ElementwiseMul
 //   y = x * z   (elementwise, per-tile)
 // =====================================================================
