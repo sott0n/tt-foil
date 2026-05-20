@@ -209,4 +209,38 @@ EmbeddingOp make_embedding(tt::foil::Device& dev,
                            const std::string& kernel_dir = "");
 void execute(tt::foil::Device& dev, EmbeddingOp& op);
 
+// =====================================================================
+// RoPE (Rotary Position Embedding)
+//   Applies RoPE in-place to a packed multi-head Q or K buffer.
+//
+//   x_out[st, h*Dt : (h+1)*Dt] = rope(x[st, h*Dt:(h+1)*Dt], cos[st], sin[st])
+//
+//   Rotation formula (split-half, matching Llama/Qwen3 style):
+//     out_first  = x_first * cos - x_second * sin
+//     out_second = x_second * cos + x_first * sin
+//
+//   cos/sin tables have shape [St, Dt_half] where Dt_half = Dt_per_head / 2.
+//   The same cos/sin are shared across all heads (position-only encoding).
+//
+// Parameters:
+//   x       : input  [St, num_heads * Dt_per_head] tiles  (modified in-place)
+//   cos_sin : pair of DRAM tensors with Dt_half tiles each (St * Dt_half total)
+//   out     : output [St, num_heads * Dt_per_head] — may alias x.buf for in-place
+//   St      : sequence tile count
+//   num_heads : number of attention heads to rotate
+//   Dt_half : Dt_per_head / 2  (= head_dim / 64 for BF16 tile size)
+// =====================================================================
+struct RopeOp {
+    std::shared_ptr<tt::foil::Kernel> kernel;
+    std::vector<std::shared_ptr<tt::foil::Buffer>> l1_cbs;  // x0,x1,cos,sin,tmp0,tmp1,out
+};
+RopeOp make_rope(tt::foil::Device& dev,
+                 const TensorDesc& x,
+                 const TensorDesc& cos, const TensorDesc& sin,
+                 TensorDesc& out,
+                 uint32_t St, uint32_t num_heads, uint32_t Dt_half,
+                 tt::foil::CoreCoord core = {},
+                 const std::string& kernel_dir = "");
+void execute(tt::foil::Device& dev, RopeOp& op);
+
 }  // namespace tt::foil::op_lib

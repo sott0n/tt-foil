@@ -270,6 +270,7 @@ _tt_default(MHA_OP_DT 2)
 tt_foil_hw_test(test_mha_op test_mha_op.cpp "${OPS}/mha/prebuilt"
     "MHA_OP_ST=${MHA_OP_ST}" "MHA_OP_DT=${MHA_OP_DT}")
 tt_foil_hw_test(test_embedding_op test_embedding_op.cpp "${OPS}/embedding/prebuilt")
+tt_foil_hw_test(test_rope_op test_rope_op.cpp "${OPS}/rope/prebuilt")
 _tt_default(MM_OP_MT 2)
 _tt_default(MM_OP_KT 4)
 _tt_default(MM_OP_NT 2)
