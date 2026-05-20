@@ -95,12 +95,12 @@ runtime the binary has exactly one TT-specific dynamic dep —
 │                                                  │                       │
 │                                                  ▼                       │
 │                                          Blackhole chip                  │
-│                                            • firmware ELFs (loaded into │
-│                                              Tensix L1 by tt-foil at    │
-│                                              device_open)               │
-│                                            • kernel ELFs    (loaded     │
-│                                              into Tensix L1 by tt-foil │
-│                                              at execute())             │
+│                                            • firmware ELFs (loaded into  │
+│                                              Tensix L1 by tt-foil at     │
+│                                              device_open)                │
+│                                            • kernel ELFs    (loaded      │
+│                                              into Tensix L1 by tt-foil   │
+│                                              at execute())               │
 │                                                                          │
 │   Not linked at all:                                                     │
 │     ✗ libtt_metal.so   ✗ MetalContext   ✗ tt::Cluster   ✗ JIT cache      │
