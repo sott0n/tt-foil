@@ -41,6 +41,7 @@ add_library(tt_foil STATIC
     src/op_lib/embedding.cpp
     src/op_lib/rmsnorm.cpp
     src/op_lib/mha.cpp
+    src/op_lib/kv_cache.cpp
 )
 add_library(TT::Foil ALIAS tt_foil)
 
