@@ -24,21 +24,24 @@ MhaOp make_mha(tt::foil::Device& dev,
                const TensorDesc& v, const TensorDesc& mask,
                TensorDesc& out,
                uint32_t St, uint32_t Dt,
+               MhaOffsets offsets,
                tt::foil::CoreCoord core,
                const std::string& kernel_dir) {
     const uint32_t qkv_tiles  = St * Dt;
     const uint32_t kt_tiles   = Dt * St;
     const uint32_t mask_tiles = St * St;
-    if (q.num_tiles != qkv_tiles || v.num_tiles != qkv_tiles)
-        throw std::runtime_error("op_lib::make_mha: q/v num_tiles must be St*Dt");
-    if (kt.num_tiles != kt_tiles)
-        throw std::runtime_error("op_lib::make_mha: kt.num_tiles must be Dt*St");
+    // With non-zero offsets, q/kt/v/out may be views into bigger multi-head
+    // buffers — accept any size ≥ the slice we're reading.
+    if (q.num_tiles < qkv_tiles || v.num_tiles < qkv_tiles)
+        throw std::runtime_error("op_lib::make_mha: q/v num_tiles must be ≥ St*Dt");
+    if (kt.num_tiles < kt_tiles)
+        throw std::runtime_error("op_lib::make_mha: kt.num_tiles must be ≥ Dt*St");
     if (mask.num_tiles != mask_tiles)
         throw std::runtime_error("op_lib::make_mha: mask.num_tiles must be St*St");
     if (out.num_tiles == 0)
         out = allocate_tensor_dram(dev, qkv_tiles);
-    else if (out.num_tiles != qkv_tiles)
-        throw std::runtime_error("op_lib::make_mha: out.num_tiles != St*Dt");
+    else if (out.num_tiles < qkv_tiles)
+        throw std::runtime_error("op_lib::make_mha: out.num_tiles < St*Dt");
 
     const std::string dir = resolve_kernel_dir(kernel_dir, "mha");
 
@@ -98,12 +101,12 @@ MhaOp make_mha(tt::foil::Device& dev,
     }};
     tt::foil::register_cbs(dev, *op.kernel, cbs);
 
-    const uint64_t q_noc   = tt::foil::make_noc_dram_addr(dev, q.buf->device_addr);
-    const uint64_t kt_noc  = tt::foil::make_noc_dram_addr(dev, kt.buf->device_addr);
-    const uint64_t v_noc   = tt::foil::make_noc_dram_addr(dev, v.buf->device_addr);
+    const uint64_t q_noc   = tt::foil::make_noc_dram_addr(dev, q.buf->device_addr   + offsets.q_bytes);
+    const uint64_t kt_noc  = tt::foil::make_noc_dram_addr(dev, kt.buf->device_addr  + offsets.kt_bytes);
+    const uint64_t v_noc   = tt::foil::make_noc_dram_addr(dev, v.buf->device_addr   + offsets.v_bytes);
     const uint64_t sc_noc  = tt::foil::make_noc_dram_addr(dev, op.dram_scaler->device_addr);
     const uint64_t m_noc   = tt::foil::make_noc_dram_addr(dev, mask.buf->device_addr);
-    const uint64_t dst_noc = tt::foil::make_noc_dram_addr(dev, out.buf->device_addr);
+    const uint64_t dst_noc = tt::foil::make_noc_dram_addr(dev, out.buf->device_addr + offsets.out_bytes);
 
     std::array<uint32_t, 12> ra_brisc = {
         (uint32_t)q_noc,   (uint32_t)(q_noc >> 32),
