@@ -90,6 +90,11 @@ void free_buffer(std::shared_ptr<Buffer> buffer);
 // Blocking host -> device write.
 void write_buffer(Device& device, Buffer& buf, const void* src, std::size_t bytes);
 
+// Blocking host -> device write, at a byte offset within the buffer. Useful
+// for partial updates of large buffers (e.g. a KV cache slot).
+void write_buffer(Device& device, Buffer& buf, std::size_t offset_bytes,
+                  const void* src, std::size_t bytes);
+
 // Blocking device -> host read.
 void read_buffer(Device& device, Buffer& buf, void* dst, std::size_t bytes);
 

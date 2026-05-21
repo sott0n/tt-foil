@@ -322,9 +322,17 @@ int main() try {
     auto T_normed = ol::allocate_tensor_dram(*dev, kSt * kHt);
     auto T_logits = ol::allocate_tensor_dram(*dev, kSt * kVt);
 
-    // Decode-step extra tensors (St_kv=2 caches, St_q=1 attn output).
-    auto T_Kt_cache = ol::allocate_tensor_dram(*dev, kNkDt * kStKvDec);
-    auto T_V_cache  = ol::allocate_tensor_dram(*dev, kStKvDec * kNkDt);
+    // Per-layer device-resident KV caches. Layout is slot-major for both
+    // K_T (= [St_kv, num_kv*Dt] tiles) and V (= [St_kv, num_kv*Dt] tiles)
+    // so slot 0 lives in the first total_Nk tiles and slot 1 in the next
+    // total_Nk tiles — both contiguous in DRAM. Prefill writes slot 0
+    // once; each decode step writes only slot 1 via the offset-write API.
+    std::vector<ol::TensorDesc> T_Kt_cache(kNumLayers);
+    std::vector<ol::TensorDesc> T_V_cache (kNumLayers);
+    for (uint32_t li = 0; li < kNumLayers; ++li) {
+        T_Kt_cache[li] = ol::allocate_tensor_dram(*dev, kNkDt * kStKvDec);
+        T_V_cache[li]  = ol::allocate_tensor_dram(*dev, kStKvDec * kNkDt);
+    }
 
     auto upload = [&](auto& t, const std::vector<uint16_t>& tiles) {
         tt::foil::write_buffer(*dev, *t.buf, tiles.data(), tiles.size() * 2);
@@ -349,14 +357,16 @@ int main() try {
     for (uint32_t i = 0; i < kNumLayers; ++i)
         layers.push_back(load_and_upload_layer(*dev, root + "/layer" + std::to_string(i)));
 
-    // Per-layer KV caches — row-major, padded to St_kv*32 rows. Filled
-    // during prefill (rows 0..S-1) and extended one row per decode step
-    // (row S, S+1, ...).
-    const uint32_t kTotalNk = kNkDt * kTileW;  // = num_kv * head_dim = 1024
-    std::vector<std::vector<uint16_t>> cache_K_rm(kNumLayers,
-        std::vector<uint16_t>(static_cast<size_t>(kCacheRowsPad) * kTotalNk, 0));
-    std::vector<std::vector<uint16_t>> cache_V_rm(kNumLayers,
-        std::vector<uint16_t>(static_cast<size_t>(kCacheRowsPad) * kTotalNk, 0));
+    // Host slot-1 scratch caches — row-major bf16 [(St_kv*32 - S), num_kv*head_dim]
+    // per layer. Slot 0 lives device-resident after the prefill upload; slot 1
+    // is rebuilt and re-uploaded from this scratch each decode step.
+    const uint32_t kTotalNk    = kNkDt * kTileW;            // = num_kv * head_dim = 1024
+    const uint32_t kSlot1Rows  = kCacheRowsPad - kS;         // = 32 with St_kv=2
+    const std::size_t kSlot0Bytes = static_cast<std::size_t>(kNkDt) * kTileBytes;
+    std::vector<std::vector<uint16_t>> cache_K_slot1_rm(kNumLayers,
+        std::vector<uint16_t>(static_cast<size_t>(kSlot1Rows) * kTotalNk, 0));
+    std::vector<std::vector<uint16_t>> cache_V_slot1_rm(kNumLayers,
+        std::vector<uint16_t>(static_cast<size_t>(kSlot1Rows) * kTotalNk, 0));
 
     // -----------------------------------------------------------------
     // Prefill — identical to test_qwen3_inference, plus per-layer KT/V
@@ -376,8 +386,9 @@ int main() try {
         run([&] { return ol::make_rope(*dev, T_Kn, T_cos, T_sin, T_Kr, kSt, kNumKv, kDtHalf); }); step();
         run([&] { return ol::make_transpose_2d(*dev, T_Kr, T_Kt, kSt, kNkDt); }); step();
 
-        // Snapshot post-RoPE K and raw V as row-major bf16 into the
-        // host KV cache (rows 0..S-1).
+        // Build slot 0 (= prefill positions 0..S-1) of this layer's
+        // device-resident K_T / V cache and write it once. Slot 1 is
+        // zero-initialised below; subsequent decode steps overwrite it.
         {
             std::vector<uint16_t> Kr_tiles(static_cast<size_t>(kSt) * kNkDt * kTileWords);
             std::vector<uint16_t> V_tiles (static_cast<size_t>(kSt) * kNkDt * kTileWords);
@@ -385,11 +396,28 @@ int main() try {
             tt::foil::read_buffer(*dev, *T_V.buf,  V_tiles.data(),  V_tiles.size()  * 2);
             auto Kr_rm = untile2d(Kr_tiles, kS, kTotalNk);
             auto V_rm  = untile2d(V_tiles,  kS, kTotalNk);
+
+            // K_T slot 0 row-major: [num_kv*head_dim, kS] = transpose(K_rm).
+            std::vector<uint16_t> KT_slot0_rm(static_cast<size_t>(kTotalNk) * kS, 0);
             for (uint32_t r = 0; r < kS; ++r)
-                for (uint32_t c = 0; c < kTotalNk; ++c) {
-                    cache_K_rm[li][r * kTotalNk + c] = Kr_rm[r * kTotalNk + c];
-                    cache_V_rm[li][r * kTotalNk + c] = V_rm[r * kTotalNk + c];
-                }
+                for (uint32_t c = 0; c < kTotalNk; ++c)
+                    KT_slot0_rm[c * kS + r] = Kr_rm[r * kTotalNk + c];
+
+            auto KT_slot0_tiles = tile2d(KT_slot0_rm, kTotalNk, kS);
+            auto V_slot0_tiles  = tile2d(V_rm,        kS, kTotalNk);
+
+            tt::foil::write_buffer(*dev, *T_Kt_cache[li].buf, 0,
+                                   KT_slot0_tiles.data(), KT_slot0_tiles.size() * 2);
+            tt::foil::write_buffer(*dev, *T_V_cache[li].buf, 0,
+                                   V_slot0_tiles.data(),  V_slot0_tiles.size()  * 2);
+
+            // Zero slot 1 so an early decode step that hasn't yet
+            // populated some position reads zeros (mask hides them).
+            std::vector<uint16_t> zeros(kSlot0Bytes / 2, 0);
+            tt::foil::write_buffer(*dev, *T_Kt_cache[li].buf, kSlot0Bytes,
+                                   zeros.data(), zeros.size() * 2);
+            tt::foil::write_buffer(*dev, *T_V_cache[li].buf, kSlot0Bytes,
+                                   zeros.data(), zeros.size() * 2);
         }
 
         run([&] {
@@ -442,20 +470,20 @@ int main() try {
 
     auto T_dembed_rm = ol::allocate_tensor_dram(*dev, kHt);
 
-    // Build the K^T cache tile-format buffer from row-major K cache:
-    //   cache_K_rm  : [kCacheRowsPad rows × kTotalNk cols]   (rows ≥ valid: zero)
-    //   K_T row-maj : [kTotalNk rows × kCacheRowsPad cols]   (transpose)
-    //   → tile2d → [num_kv*Dt, St_kv] tile-format buffer.
-    auto build_cache_KT_tiles = [&](const std::vector<uint16_t>& K_rm,
-                                    uint32_t valid_rows) {
-        std::vector<uint16_t> KT_rm(static_cast<size_t>(kTotalNk) * kCacheRowsPad, 0);
-        for (uint32_t r = 0; r < valid_rows; ++r)
+    // Build slot-1-only tile buffers from the host slot-1 row-major caches.
+    // K_T slot 1: transpose [kSlot1Rows, kTotalNk] → [kTotalNk, kSlot1Rows].
+    // V   slot 1: tile2d directly of [kSlot1Rows, kTotalNk].
+    // Each yields num_kv*Dt = 32 tiles (= 64 KB), written at the slot 1
+    // offset (= kSlot0Bytes) of the per-layer device cache.
+    auto build_slot1_KT_tiles = [&](const std::vector<uint16_t>& slot1_K_rm) {
+        std::vector<uint16_t> KT_rm(static_cast<size_t>(kTotalNk) * kSlot1Rows, 0);
+        for (uint32_t r = 0; r < kSlot1Rows; ++r)
             for (uint32_t c = 0; c < kTotalNk; ++c)
-                KT_rm[c * kCacheRowsPad + r] = K_rm[r * kTotalNk + c];
-        return tile2d(KT_rm, kTotalNk, kCacheRowsPad);
+                KT_rm[c * kSlot1Rows + r] = slot1_K_rm[r * kTotalNk + c];
+        return tile2d(KT_rm, kTotalNk, kSlot1Rows);
     };
-    auto build_cache_V_tiles = [&](const std::vector<uint16_t>& V_rm) {
-        return tile2d(V_rm, kCacheRowsPad, kTotalNk);
+    auto build_slot1_V_tiles = [&](const std::vector<uint16_t>& slot1_V_rm) {
+        return tile2d(slot1_V_rm, kSlot1Rows, kTotalNk);
     };
 
     std::vector<uint32_t> got_seq(kNumDecode, 0);
@@ -494,8 +522,10 @@ int main() try {
             run([&] { return ol::make_rope(*dev, T_Qn, T_dcos, T_dsin, T_Qr, kSt, kNumQ,  kDtHalf); }); step();
             run([&] { return ol::make_rope(*dev, T_Kn, T_dcos, T_dsin, T_Kr, kSt, kNumKv, kDtHalf); }); step();
 
-            // Read new K_rope / V row 0 into the host cache (row = pos).
+            // Read new K_rope / V row 0 → append to this layer's slot-1
+            // host scratch at row index (pos - S).
             {
+                const uint32_t slot1_r = pos - kS;
                 std::vector<uint16_t> Kr_tiles(static_cast<size_t>(kSt) * kNkDt * kTileWords);
                 std::vector<uint16_t> V_tiles (static_cast<size_t>(kSt) * kNkDt * kTileWords);
                 tt::foil::read_buffer(*dev, *T_Kr.buf, Kr_tiles.data(), Kr_tiles.size() * 2);
@@ -503,16 +533,24 @@ int main() try {
                 auto Kr_rm = untile2d(Kr_tiles, kTileH, kTotalNk);
                 auto V_rm  = untile2d(V_tiles,  kTileH, kTotalNk);
                 for (uint32_t c = 0; c < kTotalNk; ++c) {
-                    cache_K_rm[li][pos * kTotalNk + c] = Kr_rm[c];   // row 0
-                    cache_V_rm[li][pos * kTotalNk + c] = V_rm [c];
+                    cache_K_slot1_rm[li][slot1_r * kTotalNk + c] = Kr_rm[c];
+                    cache_V_slot1_rm[li][slot1_r * kTotalNk + c] = V_rm [c];
                 }
             }
 
-            upload(T_Kt_cache, build_cache_KT_tiles(cache_K_rm[li], valid_kv));
-            upload(T_V_cache,  build_cache_V_tiles (cache_V_rm[li]));
+            // Write only slot 1 of this layer's device-resident caches.
+            {
+                auto KT_slot1 = build_slot1_KT_tiles(cache_K_slot1_rm[li]);
+                auto V_slot1  = build_slot1_V_tiles (cache_V_slot1_rm[li]);
+                tt::foil::write_buffer(*dev, *T_Kt_cache[li].buf, kSlot0Bytes,
+                                       KT_slot1.data(), KT_slot1.size() * 2);
+                tt::foil::write_buffer(*dev, *T_V_cache[li].buf, kSlot0Bytes,
+                                       V_slot1.data(),  V_slot1.size()  * 2);
+            }
 
             run([&] {
-                return ol::make_gqa_decode(*dev, T_Qr, T_Kt_cache, T_V_cache, T_dmask, T_attn,
+                return ol::make_gqa_decode(*dev, T_Qr, T_Kt_cache[li], T_V_cache[li],
+                                           T_dmask, T_attn,
                                            kStDec, kStKvDec, kDt, kNumQ, kNumKv);
             }); step();
             run([&] { return ol::make_matmul(*dev, T_attn, w.Wo, T_proj, kSt, kNqDt, kHt); }); step();
