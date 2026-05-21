@@ -88,6 +88,18 @@ set_target_properties(tt_foil_weaken PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tools"
 )
 
+# ---- qwen3_run device CLI ----
+# Device-only Qwen3-VL-2B inference. Reads token IDs from a binary file,
+# runs prefill+decode on the chip, prints generated token IDs to stdout.
+# Pair with tools/qwen3_chat.py for prompt → text round-tripping.
+add_executable(qwen3_run tools/qwen3_run.cpp)
+target_include_directories(qwen3_run PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+target_link_libraries(qwen3_run PRIVATE TT::Foil tt_foil_llrt)
+set_target_properties(qwen3_run PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tools")
+
 # ---- tt_foil_inspect host CLI ----
 # Reads soft-reset/L1 state of every Tensix core without doing init.
 # Used to diagnose chip-state degradation after heavy workloads.
