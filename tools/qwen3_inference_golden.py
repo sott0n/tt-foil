@@ -98,7 +98,10 @@ def causal_attention(Q, K, V, num_q, num_kv, head_dim, gqa):
     return out.reshape(seq, num_q * head_dim)
 
 
-def transformer_layer(x, w, cos, sin, num_q, num_kv, head_dim, gqa, eps):
+def transformer_layer(x, w, cos, sin, num_q, num_kv, head_dim, gqa, eps,
+                      cache=None):
+    """Prefill layer. If `cache` is a dict, populates cache['K'], cache['V']
+    with the post-RoPE K and the raw V (used by the decode step)."""
     x_norm1 = rmsnorm(x, w["ln1g"], eps)
     Q = x_norm1 @ w["Wq"]
     K = x_norm1 @ w["Wk"]
@@ -108,12 +111,59 @@ def transformer_layer(x, w, cos, sin, num_q, num_kv, head_dim, gqa, eps):
     K = rmsnorm(K.reshape(S, num_kv, head_dim), w["kng"], eps).reshape(S, num_kv * head_dim)
     Q = apply_rope_split_half(Q, cos, sin)
     K = apply_rope_split_half(K, cos, sin)
+    if cache is not None:
+        cache["K"] = K.copy()
+        cache["V"] = V.copy()
     attn = causal_attention(Q, K, V, num_q, num_kv, head_dim, gqa)
     proj = attn @ w["Wo"]
     x_mid = x + proj
     y_norm = rmsnorm(x_mid, w["ln2g"], eps)
     mlp = (silu(y_norm @ w["Wgate"]) * (y_norm @ w["Wup"])) @ w["Wdown"]
     return x_mid + mlp
+
+
+def transformer_layer_decode(x_new, w, cos_pos, sin_pos, K_cache, V_cache,
+                             num_q, num_kv, head_dim, gqa, eps):
+    """Decode-step layer for a single new token.
+
+    x_new      : [1, H]
+    cos_pos/sin_pos : [1, head_dim/2]  — RoPE cos/sin at the new position
+    K_cache    : [S_prev, num_kv*head_dim]  — post-RoPE K from prefill
+    V_cache    : [S_prev, num_kv*head_dim]  — raw V from prefill
+
+    Returns (x_out [1, H], K_all [S_prev+1, ...], V_all [...]).
+    """
+    x_norm1 = rmsnorm(x_new, w["ln1g"], eps)
+    Q = x_norm1 @ w["Wq"]
+    K = x_norm1 @ w["Wk"]
+    V = x_norm1 @ w["Wv"]
+    Q = rmsnorm(Q.reshape(1, num_q,  head_dim), w["qng"], eps).reshape(1, num_q  * head_dim)
+    K = rmsnorm(K.reshape(1, num_kv, head_dim), w["kng"], eps).reshape(1, num_kv * head_dim)
+    Q = apply_rope_split_half(Q, cos_pos, sin_pos)
+    K = apply_rope_split_half(K, cos_pos, sin_pos)
+
+    K_all = np.concatenate([K_cache, K], axis=0)        # [S_prev+1, ...]
+    V_all = np.concatenate([V_cache, V], axis=0)
+
+    # Single-query attention over all cached + new positions (no future to mask).
+    scale = 1.0 / np.sqrt(head_dim)
+    Qh = Q.reshape(1, num_q,  head_dim)
+    Kh = K_all.reshape(-1, num_kv, head_dim)
+    Vh = V_all.reshape(-1, num_kv, head_dim)
+    out = np.zeros((1, num_q, head_dim), dtype=np.float32)
+    for h in range(num_q):
+        kv = h // gqa
+        scores = (Qh[0, h] @ Kh[:, kv].T) * scale       # [S_prev+1]
+        scores -= scores.max()
+        e = np.exp(scores)
+        p = e / e.sum()
+        out[0, h] = p @ Vh[:, kv]
+    attn = out.reshape(1, num_q * head_dim)
+    proj = attn @ w["Wo"]
+    x_mid = x_new + proj
+    y_norm = rmsnorm(x_mid, w["ln2g"], eps)
+    mlp = (silu(y_norm @ w["Wgate"]) * (y_norm @ w["Wup"])) @ w["Wdown"]
+    return x_mid + mlp, K_all, V_all
 
 
 def load_layer(layer_dir: Path):
@@ -197,10 +247,12 @@ def main() -> int:
 
     cos, sin = build_rope_tables(args.seq, args.head_dim, args.rope_theta)
 
-    # ---- N Transformer layers ----
+    # ---- N Transformer layers (capture KV cache per layer for decode) ----
+    kv_caches = [{} for _ in layers]
     for i, w in enumerate(layers):
         x = transformer_layer(x, w, cos, sin,
-                              args.num_q, args.num_kv, args.head_dim, gqa, args.eps)
+                              args.num_q, args.num_kv, args.head_dim, gqa, args.eps,
+                              cache=kv_caches[i])
         print(f"  after layer {i}: |x| mean={float(np.mean(np.abs(x))):.4f} "
               f"max={float(np.max(np.abs(x))):.4f}")
 
@@ -235,6 +287,41 @@ def main() -> int:
             "top1_first8":        top1[:8].tolist(),
         }, f, indent=2)
     print(f"wrote {chain}/inf_token_ids.bin, inf_logits_golden.bin, inf_top1.bin")
+
+    # =================================================================
+    # ---- 1-step decode: feed last predicted token, attend over the
+    #      S-token cache + the new K/V, save next-token argmax.
+    # =================================================================
+    decode_in = int(top1[args.seq - 1])
+    print(f"decode input token = {decode_in}")
+
+    x_new = embed[np.array([decode_in], dtype=np.uint32)]  # [1, H]
+    x_new = bf16_to_f32(f32_to_bf16(x_new)).reshape(1, H)
+
+    # cos/sin at the decode position (= seq, 0-indexed past the prompt).
+    half = args.head_dim // 2
+    freqs = 1.0 / (args.rope_theta ** (np.arange(half, dtype=np.float64) / half))
+    angle = float(args.seq) * freqs
+    cos_pos = np.cos(angle).astype(np.float32).reshape(1, half)
+    sin_pos = np.sin(angle).astype(np.float32).reshape(1, half)
+
+    for i, w in enumerate(layers):
+        x_new, kv_caches[i]["K"], kv_caches[i]["V"] = transformer_layer_decode(
+            x_new, w, cos_pos, sin_pos,
+            kv_caches[i]["K"], kv_caches[i]["V"],
+            args.num_q, args.num_kv, args.head_dim, gqa, args.eps,
+        )
+
+    x_new = rmsnorm(x_new, final_g, args.eps)
+    logits_dec = x_new @ embed.T                         # [1, V]
+    top1_dec = int(np.argmax(logits_dec[0]))
+    print(f"decode top1 next token = {top1_dec}")
+
+    np.array([decode_in], dtype=np.uint32).tofile(chain / "decode_input.bin")
+    np.array([top1_dec], dtype=np.uint32).tofile(chain / "decode_top1.bin")
+    np.asarray(f32_to_bf16(cos_pos), dtype=np.uint16).tofile(chain / "decode_cos.bin")
+    np.asarray(f32_to_bf16(sin_pos), dtype=np.uint16).tofile(chain / "decode_sin.bin")
+    print(f"wrote {chain}/decode_input.bin, decode_top1.bin, decode_cos.bin, decode_sin.bin")
     return 0
 
 

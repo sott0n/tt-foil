@@ -341,6 +341,17 @@ set_tests_properties(test_qwen3_inference PROPERTIES
     ENVIRONMENT "TT_FOIL_OPS_DIR=${OPS};TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_QWEN3_DATA=${CMAKE_SOURCE_DIR}/data/qwen3_vl_2b")
 set_tests_properties(test_qwen3_inference PROPERTIES TIMEOUT 3600)
 
+# Prefill + 1-step decode w/ KV cache. Default DEC_NUM_LAYERS=3
+# (matches chain3/, produced by tools/qwen3_inference_golden.py which
+# now also emits decode_input.bin / decode_top1.bin / decode_cos.bin /
+# decode_sin.bin alongside the prefill golden).
+_tt_default(DEC_NUM_LAYERS 3)
+tt_foil_hw_test(test_qwen3_decode test_qwen3_decode.cpp "${OPS}"
+    "DEC_NUM_LAYERS=${DEC_NUM_LAYERS}")
+set_tests_properties(test_qwen3_decode PROPERTIES
+    ENVIRONMENT "TT_FOIL_OPS_DIR=${OPS};TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_QWEN3_DATA=${CMAKE_SOURCE_DIR}/data/qwen3_vl_2b")
+set_tests_properties(test_qwen3_decode PROPERTIES TIMEOUT 3600)
+
 # ---- v10.2: CIFAR-10 ResNet-20 end-to-end inference ----
 # Reads pretrained weights + sample image + golden logits from
 # data/cifar10_resnet20/ (produced by tools/export_cifar10_resnet20.py).
