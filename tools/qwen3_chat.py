@@ -39,6 +39,40 @@ DEFAULT_TOKENIZER = (
 )
 
 
+def _preflight(args) -> None:
+    """Check for the artifacts qwen3_run needs and point at the setup
+    scripts when something is missing — saves a confused round-trip
+    through the C++ binary's first failing fopen()."""
+    problems = []
+    if not args.binary.exists():
+        problems.append(
+            f"missing executable {args.binary}\n"
+            "  → cmake -B build -DTT_FOIL_HW_TESTS=ON "
+            "-DTT_METAL_BUILD_DIR=<tt-metal>/build_Release\n"
+            "    cmake --build build -j --target qwen3_run"
+        )
+    data_root = os.environ.get("TT_FOIL_QWEN3_DATA")
+    if not data_root or not (Path(data_root) / "model" / "embed_tokens.bin").exists():
+        problems.append(
+            "missing weights (data/qwen3_vl_2b/model/embed_tokens.bin)\n"
+            "  → scripts/qwen3_export_weights.sh\n"
+            "    (then set TT_FOIL_QWEN3_DATA to that directory)"
+        )
+    ops_root = os.environ.get("TT_FOIL_OPS_DIR")
+    if not ops_root or not (Path(ops_root) / "embedding" / "prebuilt" /
+                            "reader.brisc.elf").exists():
+        problems.append(
+            "missing kernel ELFs (ops/*/prebuilt/)\n"
+            "  → scripts/build_ops.sh\n"
+            "    (then set TT_FOIL_OPS_DIR to the ops/ directory)"
+        )
+    if problems:
+        print("qwen3_chat: setup incomplete:\n", file=sys.stderr)
+        for p in problems:
+            print(f"  - {p}\n", file=sys.stderr)
+        sys.exit(2)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--prompt", required=True, help="Text prompt (≤ 32 tokens)")
@@ -49,6 +83,8 @@ def main() -> int:
                     default=Path("build/tools/qwen3_run"),
                     help="Path to the compiled qwen3_run executable")
     args = ap.parse_args()
+
+    _preflight(args)
 
     from tokenizers import Tokenizer
     tk = Tokenizer.from_file(str(args.tokenizer))
