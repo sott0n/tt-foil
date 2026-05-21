@@ -272,4 +272,30 @@ Transpose2dOp make_transpose_2d(tt::foil::Device& dev,
                                 const std::string& kernel_dir = "");
 void execute(tt::foil::Device& dev, Transpose2dOp& op);
 
+// =====================================================================
+// GqaFused
+//   Single-kernel multi-head GQA causal attention. Q, KT (= K^T from
+//   transpose_2d), V are the full multi-head tensors:
+//     Q   shape [St, num_q  * Dt]
+//     KT  shape [num_kv*Dt, St]
+//     V   shape [St, num_kv * Dt]
+//   The kernel loops over the num_q query heads internally, with
+//   kv_head = q_head / (num_q / num_kv). One launch replaces the
+//   num_q × (per-head MHA) host loop.
+// =====================================================================
+struct GqaFusedOp {
+    std::shared_ptr<tt::foil::Kernel> kernel;
+    std::vector<std::shared_ptr<tt::foil::Buffer>> l1_cbs;
+    std::shared_ptr<tt::foil::Buffer> dram_scaler;
+};
+GqaFusedOp make_gqa_fused(tt::foil::Device& dev,
+                          const TensorDesc& q, const TensorDesc& kt,
+                          const TensorDesc& v, const TensorDesc& mask,
+                          TensorDesc& out,
+                          uint32_t St, uint32_t Dt,
+                          uint32_t num_q, uint32_t num_kv,
+                          tt::foil::CoreCoord core = {},
+                          const std::string& kernel_dir = "");
+void execute(tt::foil::Device& dev, GqaFusedOp& op);
+
 }  // namespace tt::foil::op_lib
