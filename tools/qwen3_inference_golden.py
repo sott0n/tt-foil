@@ -190,6 +190,8 @@ def main() -> int:
     ap.add_argument("--rope-theta", required=True, type=float)
     ap.add_argument("--eps",        default=1e-6, type=float)
     ap.add_argument("--seed",       default=0xBABE, type=int)
+    ap.add_argument("--num-decode", default=8, type=int,
+                    help="How many decode steps to run after prefill.")
     ap.add_argument("--prompt",     default=None, type=str,
                     help="If set, tokenize this prompt (Qwen3 tokenizer) "
                          "and pad/truncate to --seq instead of using --seed.")
@@ -289,39 +291,41 @@ def main() -> int:
     print(f"wrote {chain}/inf_token_ids.bin, inf_logits_golden.bin, inf_top1.bin")
 
     # =================================================================
-    # ---- 1-step decode: feed last predicted token, attend over the
-    #      S-token cache + the new K/V, save next-token argmax.
+    # ---- N-step autoregressive decode with the KV cache captured above.
     # =================================================================
     decode_in = int(top1[args.seq - 1])
-    print(f"decode input token = {decode_in}")
+    print(f"decode input token (= prefill last-row top1) = {decode_in}")
 
-    x_new = embed[np.array([decode_in], dtype=np.uint32)]  # [1, H]
-    x_new = bf16_to_f32(f32_to_bf16(x_new)).reshape(1, H)
-
-    # cos/sin at the decode position (= seq, 0-indexed past the prompt).
     half = args.head_dim // 2
     freqs = 1.0 / (args.rope_theta ** (np.arange(half, dtype=np.float64) / half))
-    angle = float(args.seq) * freqs
-    cos_pos = np.cos(angle).astype(np.float32).reshape(1, half)
-    sin_pos = np.sin(angle).astype(np.float32).reshape(1, half)
 
-    for i, w in enumerate(layers):
-        x_new, kv_caches[i]["K"], kv_caches[i]["V"] = transformer_layer_decode(
-            x_new, w, cos_pos, sin_pos,
-            kv_caches[i]["K"], kv_caches[i]["V"],
-            args.num_q, args.num_kv, args.head_dim, gqa, args.eps,
-        )
+    cur_token = decode_in
+    decoded_seq = []
+    for t in range(args.num_decode):
+        pos = args.seq + t        # absolute position of the new token
+        x_new = embed[np.array([cur_token], dtype=np.uint32)]
+        x_new = bf16_to_f32(f32_to_bf16(x_new)).reshape(1, H)
 
-    x_new = rmsnorm(x_new, final_g, args.eps)
-    logits_dec = x_new @ embed.T                         # [1, V]
-    top1_dec = int(np.argmax(logits_dec[0]))
-    print(f"decode top1 next token = {top1_dec}")
+        angle = float(pos) * freqs
+        cos_pos = np.cos(angle).astype(np.float32).reshape(1, half)
+        sin_pos = np.sin(angle).astype(np.float32).reshape(1, half)
+
+        for i, w in enumerate(layers):
+            x_new, kv_caches[i]["K"], kv_caches[i]["V"] = transformer_layer_decode(
+                x_new, w, cos_pos, sin_pos,
+                kv_caches[i]["K"], kv_caches[i]["V"],
+                args.num_q, args.num_kv, args.head_dim, gqa, args.eps,
+            )
+        x_new = rmsnorm(x_new, final_g, args.eps)
+        logits_dec = x_new @ embed.T
+        nxt = int(np.argmax(logits_dec[0]))
+        decoded_seq.append(nxt)
+        print(f"  decode step {t}: pos={pos} input={cur_token} → {nxt}")
+        cur_token = nxt
 
     np.array([decode_in], dtype=np.uint32).tofile(chain / "decode_input.bin")
-    np.array([top1_dec], dtype=np.uint32).tofile(chain / "decode_top1.bin")
-    np.asarray(f32_to_bf16(cos_pos), dtype=np.uint16).tofile(chain / "decode_cos.bin")
-    np.asarray(f32_to_bf16(sin_pos), dtype=np.uint16).tofile(chain / "decode_sin.bin")
-    print(f"wrote {chain}/decode_input.bin, decode_top1.bin, decode_cos.bin, decode_sin.bin")
+    np.array(decoded_seq, dtype=np.uint32).tofile(chain / "decode_topN.bin")
+    print(f"wrote {chain}/decode_input.bin, decode_topN.bin (N={args.num_decode})")
     return 0
 
 

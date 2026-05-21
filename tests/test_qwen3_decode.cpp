@@ -49,6 +49,9 @@
 #ifndef DEC_NUM_LAYERS
 #define DEC_NUM_LAYERS 3
 #endif
+#ifndef DEC_NUM_DECODE
+#define DEC_NUM_DECODE 8
+#endif
 
 namespace {
 
@@ -60,6 +63,8 @@ using tt::foil::test::f32_to_bf16;
 using tt::foil::test::bf16_to_f32;
 
 constexpr uint32_t kNumLayers = DEC_NUM_LAYERS;
+constexpr uint32_t kNumDecode = DEC_NUM_DECODE;
+constexpr float    kRopeTheta = 5000000.0f;
 
 constexpr uint32_t kS         = 32;
 constexpr uint32_t kH         = 2048;
@@ -206,13 +211,11 @@ int main() try {
     const std::string chain = root + "/chain" + std::to_string(kNumLayers);
 
     // ---- Load inputs / golden / model tensors ----
-    auto token_ids   = load_u32(chain + "/inf_token_ids.bin", kS);
-    auto cos_rm      = load_bin(chain + "/cos_table.bin", kS * kHeadDim / 2);
-    auto sin_rm      = load_bin(chain + "/sin_table.bin", kS * kHeadDim / 2);
-    auto decode_in   = load_u32(chain + "/decode_input.bin", 1);
-    auto decode_top1 = load_u32(chain + "/decode_top1.bin",  1);
-    auto decode_cos_rm = load_bin(chain + "/decode_cos.bin", kHeadDim / 2);
-    auto decode_sin_rm = load_bin(chain + "/decode_sin.bin", kHeadDim / 2);
+    auto token_ids    = load_u32(chain + "/inf_token_ids.bin", kS);
+    auto cos_rm       = load_bin(chain + "/cos_table.bin", kS * kHeadDim / 2);
+    auto sin_rm       = load_bin(chain + "/sin_table.bin", kS * kHeadDim / 2);
+    auto decode_in    = load_u32(chain + "/decode_input.bin", 1);
+    auto decode_topN  = load_u32(chain + "/decode_topN.bin", kNumDecode);
 
     std::printf("loading embed_tokens (622 MB)...\n");
     auto embed_table = load_bin(mdir + "/embed_tokens.bin",
@@ -232,21 +235,36 @@ int main() try {
     auto sin_tiles  = tile2d(sin_rm,  kS, kHeadDim / 2);
     auto final_g_tiles = gamma_to_tiles(final_g, kH);
 
-    // Decode mask [St_q=1 tile = 32 rows, St_kv=2 tiles = 64 cols]:
-    // only row 0 of Q is the real new token; it attends to cols 0..kS
-    // (prefill positions 0..S-1 plus the new position S = kS).
-    std::vector<uint16_t> dmask_rm(kTileH * (kStKvDec * kTileW), 0);
-    for (uint32_t c = 0; c <= kS; ++c) dmask_rm[0 * (kStKvDec * kTileW) + c] = one_bf16;
-    auto dmask_tiles = tile2d(dmask_rm, kTileH, kStKvDec * kTileW);
+    // Compile-time invariant: with S=32 and N decode steps, we need
+    // St_kv = ceil((S+N)/32). The test fixes St_kv=2 so cap N at 32.
+    static_assert(kS + kNumDecode <= kStKvDec * kTileH,
+                  "kNumDecode would push KV cache beyond St_kv=2 tiles");
 
-    // Decode cos/sin tile: row 0 carries the per-dim cos/sin for position S.
-    auto build_decode_rope_tile = [&](const std::vector<uint16_t>& row) {
-        std::vector<uint16_t> rm(kTileH * (kDtHalf * kTileW), 0);
-        for (uint32_t c = 0; c < kHeadDim / 2; ++c) rm[c] = row[c];
-        return tile2d(rm, kTileH, kDtHalf * kTileW);
+    // Host helpers for per-step cos/sin / mask / cache tile builds.
+    const uint32_t kCacheRowsPad = kStKvDec * kTileH;   // = 64
+    const uint32_t kHalf         = kHeadDim / 2;
+
+    auto rope_at = [&](uint32_t pos) {
+        std::vector<uint16_t> cos_row(kHalf), sin_row(kHalf);
+        for (uint32_t i = 0; i < kHalf; ++i) {
+            double freq  = 1.0 / std::pow(static_cast<double>(kRopeTheta),
+                                          static_cast<double>(i) / static_cast<double>(kHalf));
+            double angle = static_cast<double>(pos) * freq;
+            cos_row[i] = f32_to_bf16(static_cast<float>(std::cos(angle)));
+            sin_row[i] = f32_to_bf16(static_cast<float>(std::sin(angle)));
+        }
+        return std::make_pair(std::move(cos_row), std::move(sin_row));
     };
-    auto dcos_tiles = build_decode_rope_tile(decode_cos_rm);
-    auto dsin_tiles = build_decode_rope_tile(decode_sin_rm);
+    auto rope_tile = [&](const std::vector<uint16_t>& row) {
+        std::vector<uint16_t> rm(kTileH * kHalf, 0);
+        for (uint32_t c = 0; c < kHalf; ++c) rm[c] = row[c];
+        return tile2d(rm, kTileH, kHalf);
+    };
+    auto build_mask_tile = [&](uint32_t valid_cols) {
+        std::vector<uint16_t> rm(kTileH * (kStKvDec * kTileW), 0);
+        for (uint32_t c = 0; c < valid_cols; ++c) rm[c] = one_bf16;
+        return tile2d(rm, kTileH, kStKvDec * kTileW);
+    };
 
     // ---- Open device, allocate persistent tensors ----
     auto dev = tt::foil::open_device(pcie_index, "", {{0, 0}});
@@ -275,13 +293,10 @@ int main() try {
     tt::foil::write_buffer(*dev, *T_final_g.buf, final_g_tiles.data(),
                            final_g_tiles.size() * 2);
 
-    // Decode-only RoPE table + mask DRAM tensors.
-    auto T_dcos = ol::allocate_tensor_dram(*dev, kStDec * kDtHalf);
-    auto T_dsin = ol::allocate_tensor_dram(*dev, kStDec * kDtHalf);
+    // Decode-only RoPE table + mask DRAM tensors (rebuilt per step).
+    auto T_dcos  = ol::allocate_tensor_dram(*dev, kStDec * kDtHalf);
+    auto T_dsin  = ol::allocate_tensor_dram(*dev, kStDec * kDtHalf);
     auto T_dmask = ol::allocate_tensor_dram(*dev, kStDec * kStKvDec);
-    tt::foil::write_buffer(*dev, *T_dcos.buf,  dcos_tiles.data(),  dcos_tiles.size() * 2);
-    tt::foil::write_buffer(*dev, *T_dsin.buf,  dsin_tiles.data(),  dsin_tiles.size() * 2);
-    tt::foil::write_buffer(*dev, *T_dmask.buf, dmask_tiles.data(), dmask_tiles.size() * 2);
 
     auto T_embed_rm  = ol::allocate_tensor_dram(*dev, kSt * kHt);
     auto T_layer_in  = ol::allocate_tensor_dram(*dev, kSt * kHt);
@@ -334,12 +349,14 @@ int main() try {
     for (uint32_t i = 0; i < kNumLayers; ++i)
         layers.push_back(load_and_upload_layer(*dev, root + "/layer" + std::to_string(i)));
 
-    // Per-layer KV caches captured during prefill — host-side tile vectors,
-    // sized for one prefill slot (kSt = 1 tile-row).
-    //   KT slot 0:  num_kv*Dt rows × kSt cols of tiles (= kNkDt * kSt tiles)
-    //   V  slot 0:  kSt rows × num_kv*Dt cols of tiles (= kSt * kNkDt tiles)
-    std::vector<std::vector<uint16_t>> cache_KT_prefill(kNumLayers);
-    std::vector<std::vector<uint16_t>> cache_V_prefill(kNumLayers);
+    // Per-layer KV caches — row-major, padded to St_kv*32 rows. Filled
+    // during prefill (rows 0..S-1) and extended one row per decode step
+    // (row S, S+1, ...).
+    const uint32_t kTotalNk = kNkDt * kTileW;  // = num_kv * head_dim = 1024
+    std::vector<std::vector<uint16_t>> cache_K_rm(kNumLayers,
+        std::vector<uint16_t>(static_cast<size_t>(kCacheRowsPad) * kTotalNk, 0));
+    std::vector<std::vector<uint16_t>> cache_V_rm(kNumLayers,
+        std::vector<uint16_t>(static_cast<size_t>(kCacheRowsPad) * kTotalNk, 0));
 
     // -----------------------------------------------------------------
     // Prefill — identical to test_qwen3_inference, plus per-layer KT/V
@@ -359,13 +376,21 @@ int main() try {
         run([&] { return ol::make_rope(*dev, T_Kn, T_cos, T_sin, T_Kr, kSt, kNumKv, kDtHalf); }); step();
         run([&] { return ol::make_transpose_2d(*dev, T_Kr, T_Kt, kSt, kNkDt); }); step();
 
-        // Snapshot prefill KT (= post-RoPE K transposed) and V tiles.
-        cache_KT_prefill[li].resize(static_cast<size_t>(kNkDt) * kSt * kTileWords);
-        cache_V_prefill[li].resize(static_cast<size_t>(kSt) * kNkDt * kTileWords);
-        tt::foil::read_buffer(*dev, *T_Kt.buf, cache_KT_prefill[li].data(),
-                              cache_KT_prefill[li].size() * 2);
-        tt::foil::read_buffer(*dev, *T_V.buf,  cache_V_prefill[li].data(),
-                              cache_V_prefill[li].size() * 2);
+        // Snapshot post-RoPE K and raw V as row-major bf16 into the
+        // host KV cache (rows 0..S-1).
+        {
+            std::vector<uint16_t> Kr_tiles(static_cast<size_t>(kSt) * kNkDt * kTileWords);
+            std::vector<uint16_t> V_tiles (static_cast<size_t>(kSt) * kNkDt * kTileWords);
+            tt::foil::read_buffer(*dev, *T_Kr.buf, Kr_tiles.data(), Kr_tiles.size() * 2);
+            tt::foil::read_buffer(*dev, *T_V.buf,  V_tiles.data(),  V_tiles.size()  * 2);
+            auto Kr_rm = untile2d(Kr_tiles, kS, kTotalNk);
+            auto V_rm  = untile2d(V_tiles,  kS, kTotalNk);
+            for (uint32_t r = 0; r < kS; ++r)
+                for (uint32_t c = 0; c < kTotalNk; ++c) {
+                    cache_K_rm[li][r * kTotalNk + c] = Kr_rm[r * kTotalNk + c];
+                    cache_V_rm[li][r * kTotalNk + c] = V_rm[r * kTotalNk + c];
+                }
+        }
 
         run([&] {
             return ol::make_gqa_fused(*dev, T_Qr, T_Kt, T_V, T_mask, T_attn,
@@ -409,117 +434,143 @@ int main() try {
                 last_top1, decode_in[0]);
 
     // -----------------------------------------------------------------
-    // Decode step.
+    // Multi-step decode loop. Use the golden decode_input (not last_top1)
+    // so the test isolates decode-path numeric error from any prefill
+    // drift at the last row of the prefill logits.
     // -----------------------------------------------------------------
-    // Use the golden decode_input (not last_top1) so the test isolates
-    // decode-path numeric error from any prefill drift at the last row.
-    std::printf("decode: input token = %u, expected next = %u\n",
-                decode_in[0], decode_top1[0]);
+    std::printf("decode: input token = %u, %u steps\n", decode_in[0], kNumDecode);
 
-    // Embed the new token into a 32-row tile (row 0 = embed, rest 0).
-    std::vector<uint32_t> dec_tid = {decode_in[0]};
-    auto T_dembed_rm = ol::allocate_tensor_dram(*dev, kHt);  // [1, H] worth of row-major bytes
-    run([&] { return ol::make_embedding(*dev, T_embed_table, dec_tid, kH, T_dembed_rm); });
-    step();
-    std::vector<uint16_t> dec_row(kH);
-    tt::foil::read_buffer(*dev, *T_dembed_rm.buf, dec_row.data(), kH * 2);
-    std::vector<uint16_t> dec_hidden_rm(kTileH * kH, 0);
-    for (uint32_t c = 0; c < kH; ++c) dec_hidden_rm[c] = dec_row[c];  // row 0 only
-    upload(T_layer_in, tile2d(dec_hidden_rm, kTileH, kH));
+    auto T_dembed_rm = ol::allocate_tensor_dram(*dev, kHt);
 
-    // Helper: build cache KT [num_kv*Dt, St_kv=2] tiles from (prefill, new).
-    // tile (r, s) at flat index r*St_kv + s.
-    auto build_cache_KT = [&](const std::vector<uint16_t>& prefill,
-                              const std::vector<uint16_t>& new_kt) {
-        std::vector<uint16_t> out(static_cast<size_t>(kNkDt) * kStKvDec * kTileWords, 0);
-        for (uint32_t r = 0; r < kNkDt; ++r) {
-            std::copy_n(prefill.data() + r * kTileWords,        kTileWords,
-                        out.data()    + (r * kStKvDec + 0) * kTileWords);
-            std::copy_n(new_kt.data() + r * kTileWords,         kTileWords,
-                        out.data()    + (r * kStKvDec + 1) * kTileWords);
+    // Build the K^T cache tile-format buffer from row-major K cache:
+    //   cache_K_rm  : [kCacheRowsPad rows × kTotalNk cols]   (rows ≥ valid: zero)
+    //   K_T row-maj : [kTotalNk rows × kCacheRowsPad cols]   (transpose)
+    //   → tile2d → [num_kv*Dt, St_kv] tile-format buffer.
+    auto build_cache_KT_tiles = [&](const std::vector<uint16_t>& K_rm,
+                                    uint32_t valid_rows) {
+        std::vector<uint16_t> KT_rm(static_cast<size_t>(kTotalNk) * kCacheRowsPad, 0);
+        for (uint32_t r = 0; r < valid_rows; ++r)
+            for (uint32_t c = 0; c < kTotalNk; ++c)
+                KT_rm[c * kCacheRowsPad + r] = K_rm[r * kTotalNk + c];
+        return tile2d(KT_rm, kTotalNk, kCacheRowsPad);
+    };
+    auto build_cache_V_tiles = [&](const std::vector<uint16_t>& V_rm) {
+        return tile2d(V_rm, kCacheRowsPad, kTotalNk);
+    };
+
+    std::vector<uint32_t> got_seq(kNumDecode, 0);
+    uint32_t cur_token = decode_in[0];
+
+    for (uint32_t t = 0; t < kNumDecode; ++t) {
+        const uint32_t pos        = kS + t;          // absolute position of new token
+        const uint32_t valid_kv   = pos + 1;         // cache cols 0..pos inclusive
+        std::printf("  step %u: pos=%u input=%u\n", t, pos, cur_token);
+
+        // Embed cur_token → row 0 of a 32-row tile.
+        std::vector<uint32_t> dec_tid = {cur_token};
+        run([&] { return ol::make_embedding(*dev, T_embed_table, dec_tid, kH, T_dembed_rm); });
+        step();
+        std::vector<uint16_t> dec_row(kH);
+        tt::foil::read_buffer(*dev, *T_dembed_rm.buf, dec_row.data(), kH * 2);
+        std::vector<uint16_t> dec_hidden_rm(kTileH * kH, 0);
+        for (uint32_t c = 0; c < kH; ++c) dec_hidden_rm[c] = dec_row[c];
+        upload(T_layer_in, tile2d(dec_hidden_rm, kTileH, kH));
+
+        // Per-step cos/sin (row 0 of a 32-row tile) and decode mask.
+        auto [cos_row, sin_row] = rope_at(pos);
+        upload(T_dcos,  rope_tile(cos_row));
+        upload(T_dsin,  rope_tile(sin_row));
+        upload(T_dmask, build_mask_tile(valid_kv));
+
+        for (uint32_t li = 0; li < kNumLayers; ++li) {
+            const LayerW& w = layers[li];
+
+            run([&] { return ol::make_rmsnorm(*dev, T_layer_in, w.ln1g, T_xnorm1, kSt, kHt, kEps); }); step();
+            run([&] { return ol::make_matmul(*dev, T_xnorm1, w.Wq, T_Q, kSt, kHt, kNqDt); }); step();
+            run([&] { return ol::make_matmul(*dev, T_xnorm1, w.Wk, T_K, kSt, kHt, kNkDt); }); step();
+            run([&] { return ol::make_matmul(*dev, T_xnorm1, w.Wv, T_V, kSt, kHt, kNkDt); }); step();
+            run([&] { return ol::make_rmsnorm(*dev, T_Q, w.qng, T_Qn, kSt * kNumQ,  kDt, kEps); }); step();
+            run([&] { return ol::make_rmsnorm(*dev, T_K, w.kng, T_Kn, kSt * kNumKv, kDt, kEps); }); step();
+            run([&] { return ol::make_rope(*dev, T_Qn, T_dcos, T_dsin, T_Qr, kSt, kNumQ,  kDtHalf); }); step();
+            run([&] { return ol::make_rope(*dev, T_Kn, T_dcos, T_dsin, T_Kr, kSt, kNumKv, kDtHalf); }); step();
+
+            // Read new K_rope / V row 0 into the host cache (row = pos).
+            {
+                std::vector<uint16_t> Kr_tiles(static_cast<size_t>(kSt) * kNkDt * kTileWords);
+                std::vector<uint16_t> V_tiles (static_cast<size_t>(kSt) * kNkDt * kTileWords);
+                tt::foil::read_buffer(*dev, *T_Kr.buf, Kr_tiles.data(), Kr_tiles.size() * 2);
+                tt::foil::read_buffer(*dev, *T_V.buf,  V_tiles.data(),  V_tiles.size()  * 2);
+                auto Kr_rm = untile2d(Kr_tiles, kTileH, kTotalNk);
+                auto V_rm  = untile2d(V_tiles,  kTileH, kTotalNk);
+                for (uint32_t c = 0; c < kTotalNk; ++c) {
+                    cache_K_rm[li][pos * kTotalNk + c] = Kr_rm[c];   // row 0
+                    cache_V_rm[li][pos * kTotalNk + c] = V_rm [c];
+                }
+            }
+
+            upload(T_Kt_cache, build_cache_KT_tiles(cache_K_rm[li], valid_kv));
+            upload(T_V_cache,  build_cache_V_tiles (cache_V_rm[li]));
+
+            run([&] {
+                return ol::make_gqa_decode(*dev, T_Qr, T_Kt_cache, T_V_cache, T_dmask, T_attn,
+                                           kStDec, kStKvDec, kDt, kNumQ, kNumKv);
+            }); step();
+            run([&] { return ol::make_matmul(*dev, T_attn, w.Wo, T_proj, kSt, kNqDt, kHt); }); step();
+            run([&] { return ol::make_eltwise_add(*dev, T_layer_in, T_proj, T_xmid); });        step();
+
+            run([&] { return ol::make_rmsnorm(*dev, T_xmid, w.ln2g, T_ynorm, kSt, kHt, kEps); }); step();
+            run([&] { return ol::make_matmul(*dev, T_ynorm, w.Wgate, T_gate, kSt, kHt, kFFt); }); step();
+            run([&] { return ol::make_matmul(*dev, T_ynorm, w.Wup,   T_up,   kSt, kHt, kFFt); }); step();
+            run([&] { return ol::make_silu(*dev, T_gate, T_silu); });                              step();
+            run([&] { return ol::make_eltwise_mul(*dev, T_silu, T_up, T_fused); });                step();
+            run([&] { return ol::make_matmul(*dev, T_fused, w.Wdown, T_down, kSt, kFFt, kHt); });  step();
+            run([&] { return ol::make_eltwise_add(*dev, T_xmid, T_down, T_layer_out); });          step();
+
+            std::swap(T_layer_in, T_layer_out);
         }
-        return out;
-    };
-    // V cache [St_kv=2, num_kv*Dt]: slot 0 = prefill tiles, slot 1 = new tiles.
-    // Layout is row-major in tile-space so it's just concat.
-    auto build_cache_V = [&](const std::vector<uint16_t>& prefill,
-                             const std::vector<uint16_t>& new_v) {
-        std::vector<uint16_t> out;
-        out.reserve(prefill.size() + new_v.size());
-        out.insert(out.end(), prefill.begin(), prefill.end());
-        out.insert(out.end(), new_v.begin(),    new_v.end());
-        return out;
-    };
 
-    for (uint32_t li = 0; li < kNumLayers; ++li) {
-        const LayerW& w = layers[li];
-        std::printf("  decode layer %u …\n", li);
-
-        run([&] { return ol::make_rmsnorm(*dev, T_layer_in, w.ln1g, T_xnorm1, kSt, kHt, kEps); }); step();
-        run([&] { return ol::make_matmul(*dev, T_xnorm1, w.Wq, T_Q, kSt, kHt, kNqDt); }); step();
-        run([&] { return ol::make_matmul(*dev, T_xnorm1, w.Wk, T_K, kSt, kHt, kNkDt); }); step();
-        run([&] { return ol::make_matmul(*dev, T_xnorm1, w.Wv, T_V, kSt, kHt, kNkDt); }); step();
-        run([&] { return ol::make_rmsnorm(*dev, T_Q, w.qng, T_Qn, kSt * kNumQ,  kDt, kEps); }); step();
-        run([&] { return ol::make_rmsnorm(*dev, T_K, w.kng, T_Kn, kSt * kNumKv, kDt, kEps); }); step();
-        run([&] { return ol::make_rope(*dev, T_Qn, T_dcos, T_dsin, T_Qr, kSt, kNumQ,  kDtHalf); }); step();
-        run([&] { return ol::make_rope(*dev, T_Kn, T_dcos, T_dsin, T_Kr, kSt, kNumKv, kDtHalf); }); step();
-        run([&] { return ol::make_transpose_2d(*dev, T_Kr, T_Kt, kSt, kNkDt); }); step();
-
-        std::vector<uint16_t> new_KT(static_cast<size_t>(kNkDt) * kSt * kTileWords);
-        std::vector<uint16_t> new_V (static_cast<size_t>(kSt) * kNkDt * kTileWords);
-        tt::foil::read_buffer(*dev, *T_Kt.buf, new_KT.data(), new_KT.size() * 2);
-        tt::foil::read_buffer(*dev, *T_V.buf,  new_V.data(),  new_V.size()  * 2);
-
-        upload(T_Kt_cache, build_cache_KT(cache_KT_prefill[li], new_KT));
-        upload(T_V_cache,  build_cache_V (cache_V_prefill[li],  new_V));
-
-        run([&] {
-            return ol::make_gqa_decode(*dev, T_Qr, T_Kt_cache, T_V_cache, T_dmask, T_attn,
-                                       kStDec, kStKvDec, kDt, kNumQ, kNumKv);
-        }); step();
-        run([&] { return ol::make_matmul(*dev, T_attn, w.Wo, T_proj, kSt, kNqDt, kHt); }); step();
-        run([&] { return ol::make_eltwise_add(*dev, T_layer_in, T_proj, T_xmid); });        step();
-
-        run([&] { return ol::make_rmsnorm(*dev, T_xmid, w.ln2g, T_ynorm, kSt, kHt, kEps); }); step();
-        run([&] { return ol::make_matmul(*dev, T_ynorm, w.Wgate, T_gate, kSt, kHt, kFFt); }); step();
-        run([&] { return ol::make_matmul(*dev, T_ynorm, w.Wup,   T_up,   kSt, kHt, kFFt); }); step();
-        run([&] { return ol::make_silu(*dev, T_gate, T_silu); });                              step();
-        run([&] { return ol::make_eltwise_mul(*dev, T_silu, T_up, T_fused); });                step();
-        run([&] { return ol::make_matmul(*dev, T_fused, w.Wdown, T_down, kSt, kFFt, kHt); });  step();
-        run([&] { return ol::make_eltwise_add(*dev, T_xmid, T_down, T_layer_out); });          step();
-
-        std::swap(T_layer_in, T_layer_out);
-    }
-
-    // ---- Decode final norm + lm_head + argmax(row 0) ----
-    run([&] { return ol::make_rmsnorm(*dev, T_layer_in, T_final_g, T_normed, kSt, kHt, kEps); });
-    step();
-    {
-        auto op = ol::make_matmul(*dev, T_normed, T_W_lm, T_logits, kSt, kHt, kVt);
-        ol::execute(*dev, op);
-    }
-    tt::foil::read_buffer(*dev, *T_logits.buf, logits_tiles.data(), logits_tiles.size() * 2);
-    auto dec_logits_rm = untile2d(logits_tiles, kS, kV);
-    uint32_t dec_pred = 0;
-    {
+        // Final norm + lm_head + argmax(row 0) → next token.
+        run([&] { return ol::make_rmsnorm(*dev, T_layer_in, T_final_g, T_normed, kSt, kHt, kEps); });
+        step();
+        {
+            auto op = ol::make_matmul(*dev, T_normed, T_W_lm, T_logits, kSt, kHt, kVt);
+            ol::execute(*dev, op);
+            step();
+        }
+        tt::foil::read_buffer(*dev, *T_logits.buf, logits_tiles.data(), logits_tiles.size() * 2);
+        auto dec_logits_rm = untile2d(logits_tiles, kS, kV);
+        uint32_t nxt = 0;
         float best = -1e30f;
         for (uint32_t v = 0; v < kV; ++v) {
             float lv = bf16_to_f32(dec_logits_rm[v]);  // row 0 only
-            if (lv > best) { best = lv; dec_pred = v; }
+            if (lv > best) { best = lv; nxt = v; }
         }
+        got_seq[t] = nxt;
+        std::printf("    → %u  (golden %u)%s\n", nxt, decode_topN[t],
+                    nxt == decode_topN[t] ? "" : "  <-- mismatch");
+        cur_token = nxt;
     }
 
     tt::foil::close_device(std::move(dev));
 
-    std::printf("test_qwen3_decode: predicted=%u  golden=%u\n", dec_pred, decode_top1[0]);
-    if (dec_pred != decode_top1[0]) {
+    uint32_t mismatch = 0;
+    for (uint32_t t = 0; t < kNumDecode; ++t)
+        if (got_seq[t] != decode_topN[t]) ++mismatch;
+
+    std::printf("test_qwen3_decode: got [");
+    for (uint32_t t = 0; t < kNumDecode; ++t) std::printf("%u ", got_seq[t]);
+    std::printf("]\n                   ref [");
+    for (uint32_t t = 0; t < kNumDecode; ++t) std::printf("%u ", decode_topN[t]);
+    std::printf("]\n");
+
+    if (mismatch) {
         std::fprintf(stderr,
-            "test_qwen3_decode: FAIL (got %u, expected %u)\n",
-            dec_pred, decode_top1[0]);
+            "test_qwen3_decode: FAIL (%u/%u step mismatches)\n",
+            mismatch, kNumDecode);
         return 1;
     }
-    std::printf("test_qwen3_decode: PASS  (N=%u layers, input=%u → next=%u)\n",
-                kNumLayers, decode_in[0], dec_pred);
+    std::printf("test_qwen3_decode: PASS  (N=%u layers, %u decode steps all match)\n",
+                kNumLayers, kNumDecode);
     return 0;
 } catch (const std::exception& e) {
     std::fprintf(stderr, "test_qwen3_decode: FAIL — %s\n", e.what());
