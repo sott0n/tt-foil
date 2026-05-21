@@ -298,4 +298,30 @@ GqaFusedOp make_gqa_fused(tt::foil::Device& dev,
                           const std::string& kernel_dir = "");
 void execute(tt::foil::Device& dev, GqaFusedOp& op);
 
+// =====================================================================
+// GqaDecode
+//   Multi-head GQA attention with decoupled Q and K/V sequence dimensions:
+//     Q   [St_q, num_q  * Dt]
+//     KT  [num_kv * Dt, St_kv]
+//     V   [St_kv, num_kv * Dt]
+//     mask[St_q, St_kv]                    — 0/1 BF16, masks padding K rows
+//     out [St_q, num_q  * Dt]
+//   Typical decode: St_q = 1 (a single query padded into a 32-row tile),
+//   St_kv = ceil((prev_seq + 1) / 32).
+// =====================================================================
+struct GqaDecodeOp {
+    std::shared_ptr<tt::foil::Kernel> kernel;
+    std::vector<std::shared_ptr<tt::foil::Buffer>> l1_cbs;
+    std::shared_ptr<tt::foil::Buffer> dram_scaler;
+};
+GqaDecodeOp make_gqa_decode(tt::foil::Device& dev,
+                            const TensorDesc& q, const TensorDesc& kt,
+                            const TensorDesc& v, const TensorDesc& mask,
+                            TensorDesc& out,
+                            uint32_t St_q, uint32_t St_kv, uint32_t Dt,
+                            uint32_t num_q, uint32_t num_kv,
+                            tt::foil::CoreCoord core = {},
+                            const std::string& kernel_dir = "");
+void execute(tt::foil::Device& dev, GqaDecodeOp& op);
+
 }  // namespace tt::foil::op_lib
