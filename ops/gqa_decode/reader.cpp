@@ -5,7 +5,11 @@
 //
 // Layouts (Q has just St_q = 1 query tile-row; K/V are the full cache):
 //   Q   [St_q, num_q  * Dt]
-//   KT  [num_kv * Dt, St_kv]
+//   KT  [St_kv, num_kv * Dt]                — slot-major: slot s occupies a
+//                                              contiguous num_kv*Dt tile block
+//                                              (matches V layout). Enables
+//                                              single-shot offset writes when
+//                                              appending to the cache.
 //   V   [St_kv, num_kv * Dt]
 //   mask[St_q, St_kv]                     — 0/1 BF16, lets the kernel
 //                                            ignore padding positions in
@@ -91,13 +95,18 @@ void kernel_main() {
         }
         cb_push_back(cb_q, q_tiles);
 
-        // KT_h tiles: contiguous Dt*St_kv block in [num_kv*Dt, St_kv]
+        // KT_h tiles: gather (dt, st) at slot-major offset (s*total_Nk + kv*Dt + dt)
+        // and place into the CB in dt-major order (cb_idx = dt*St_kv + st) so the
+        // compute kernel's existing matmul indexing (k*St_kv + st) keeps working.
         cb_reserve_back(cb_kt, kt_tiles);
         {
-            uint32_t base    = get_write_ptr(cb_kt);
-            uint64_t src_blk = kt_noc + (kv * Dt) * St_kv * kTileBytes;
-            for (uint32_t i = 0; i < kt_tiles; ++i) {
-                noc_async_read(src_blk + i * kTileBytes, base + i * kTileBytes, kTileBytes);
+            uint32_t base = get_write_ptr(cb_kt);
+            for (uint32_t st = 0; st < St_kv; ++st) {
+                for (uint32_t dt = 0; dt < Dt; ++dt) {
+                    uint32_t cb_idx = dt * St_kv + st;
+                    uint64_t src   = kt_noc + (st * total_Nk + kv * Dt + dt) * kTileBytes;
+                    noc_async_read(src, base + cb_idx * kTileBytes, kTileBytes);
+                }
             }
             noc_async_read_barrier();
         }

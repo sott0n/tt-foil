@@ -50,15 +50,20 @@ void free_buffer(std::shared_ptr<Buffer> buffer) {
 }
 
 void write_buffer(Device& device, Buffer& buf, const void* src, std::size_t bytes) {
-    if (bytes > buf.size_bytes) {
-        throw std::runtime_error("tt-foil: write_buffer size exceeds allocation");
+    write_buffer(device, buf, 0, src, bytes);
+}
+
+void write_buffer(Device& device, Buffer& buf, std::size_t offset_bytes,
+                  const void* src, std::size_t bytes) {
+    if (offset_bytes + bytes > buf.size_bytes) {
+        throw std::runtime_error("tt-foil: write_buffer offset+size exceeds allocation");
     }
     switch (buf.location) {
         case BufferLocation::L1:
-            write_l1(device, buf.core, buf.device_addr, src, bytes);
+            write_l1(device, buf.core, buf.device_addr + offset_bytes, src, bytes);
             break;
         case BufferLocation::DRAM:
-            write_dram(device, buf.device_addr, src, bytes);
+            write_dram(device, buf.device_addr + offset_bytes, src, bytes);
             break;
     }
 }
