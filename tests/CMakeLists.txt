@@ -272,6 +272,7 @@ tt_foil_hw_test(test_mha_op test_mha_op.cpp "${OPS}/mha/prebuilt"
 tt_foil_hw_test(test_embedding_op test_embedding_op.cpp "${OPS}/embedding/prebuilt")
 tt_foil_hw_test(test_rope_op test_rope_op.cpp "${OPS}/rope/prebuilt")
 tt_foil_hw_test(test_gqa_fused_op test_gqa_fused_op.cpp "${OPS}/gqa_fused/prebuilt")
+tt_foil_hw_test(test_gqa_decode_op test_gqa_decode_op.cpp "${OPS}/gqa_decode/prebuilt")
 _tt_default(MM_OP_MT 2)
 _tt_default(MM_OP_KT 4)
 _tt_default(MM_OP_NT 2)
