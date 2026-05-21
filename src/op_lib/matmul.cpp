@@ -59,6 +59,15 @@ MatMulOp make_matmul(tt::foil::Device& dev,
     }};
     tt::foil::register_cbs(dev, *op.kernel, cbs);
 
+    set_matmul_args(dev, op, a, b, out, Mt, Kt, Nt);
+    return op;
+}
+
+void set_matmul_args(tt::foil::Device& dev, MatMulOp& op,
+                     const TensorDesc& a, const TensorDesc& b,
+                     const TensorDesc& out,
+                     uint32_t Mt, uint32_t Kt, uint32_t Nt) {
+    using R = tt::foil::RiscBinary;
     const uint64_t a_noc   = tt::foil::make_noc_dram_addr(dev, a.buf->device_addr);
     const uint64_t b_noc   = tt::foil::make_noc_dram_addr(dev, b.buf->device_addr);
     const uint64_t dst_noc = tt::foil::make_noc_dram_addr(dev, out.buf->device_addr);
@@ -78,8 +87,6 @@ MatMulOp make_matmul(tt::foil::Device& dev,
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::TRISC1, ra_trisc);
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::TRISC2, ra_trisc);
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::NCRISC, ra_ncrisc);
-
-    return op;
 }
 
 void execute(tt::foil::Device& dev, MatMulOp& op) {

@@ -56,6 +56,19 @@ EmbeddingOp make_embedding(tt::foil::Device& dev,
     }};
     tt::foil::register_cbs(dev, *op.kernel, cbs);
 
+    set_embedding_args(dev, op, table, token_ids, D, out);
+    return op;
+}
+
+void set_embedding_args(tt::foil::Device& dev, EmbeddingOp& op,
+                        const TensorDesc& table,
+                        const std::vector<uint32_t>& token_ids,
+                        uint32_t D,
+                        const TensorDesc& out) {
+    using R = tt::foil::RiscBinary;
+    const uint32_t N        = static_cast<uint32_t>(token_ids.size());
+    const uint32_t D_bytes  = D * 2;
+    const uint32_t out_bytes = N * D_bytes;
     const uint64_t emb_noc = tt::foil::make_noc_dram_addr(dev, table.buf->device_addr);
     const uint64_t dst_noc = tt::foil::make_noc_dram_addr(dev, out.buf->device_addr);
 
@@ -71,8 +84,6 @@ EmbeddingOp make_embedding(tt::foil::Device& dev,
 
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::BRISC,  ra_brisc);
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::NCRISC, ra_ncrisc);
-
-    return op;
 }
 
 void execute(tt::foil::Device& dev, EmbeddingOp& op) {

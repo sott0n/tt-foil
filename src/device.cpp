@@ -38,7 +38,12 @@ Device::~Device() = default;
 uint64_t L1Allocator::alloc(std::size_t bytes, uint32_t alignment) {
     uint64_t aligned = (current + alignment - 1) & ~static_cast<uint64_t>(alignment - 1);
     if (aligned + bytes > end) {
-        throw std::runtime_error("tt-foil: L1 out of memory");
+        throw std::runtime_error(
+            "tt-foil: L1 out of memory: need " + std::to_string(bytes) +
+            " B aligned to " + std::to_string(alignment) +
+            ", base=0x" + std::to_string(base) +
+            " current=0x" + std::to_string(current) +
+            " end=0x" + std::to_string(end));
     }
     current = aligned + bytes;
     return aligned;

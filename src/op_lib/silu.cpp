@@ -59,6 +59,13 @@ SiluOp make_silu(tt::foil::Device& dev,
     }};
     tt::foil::register_cbs(dev, *op.kernel, cbs);
 
+    set_silu_args(dev, op, x, out);
+    return op;
+}
+
+void set_silu_args(tt::foil::Device& dev, SiluOp& op,
+                   const TensorDesc& x, const TensorDesc& out) {
+    using R = tt::foil::RiscBinary;
     const uint64_t src_noc = tt::foil::make_noc_dram_addr(dev, x.buf->device_addr);
     const uint64_t dst_noc = tt::foil::make_noc_dram_addr(dev, out.buf->device_addr);
     std::array<uint32_t, 3> ra_brisc  = {(uint32_t)src_noc, (uint32_t)(src_noc >> 32), x.num_tiles};
@@ -70,8 +77,6 @@ SiluOp make_silu(tt::foil::Device& dev,
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::TRISC0, ra_trisc);
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::TRISC1, ra_trisc);
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::TRISC2, ra_trisc);
-
-    return op;
 }
 
 void execute(tt::foil::Device& dev, SiluOp& op) {

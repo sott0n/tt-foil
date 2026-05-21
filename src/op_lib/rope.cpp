@@ -76,26 +76,32 @@ RopeOp make_rope(tt::foil::Device& dev,
     }};
     tt::foil::register_cbs(dev, *op.kernel, cbs);
 
+    set_rope_args(dev, op, x, cos, sin, out, St, num_heads, Dt_half);
+    return op;
+}
+
+void set_rope_args(tt::foil::Device& dev, RopeOp& op,
+                   const TensorDesc& x,
+                   const TensorDesc& cos, const TensorDesc& sin,
+                   const TensorDesc& out,
+                   uint32_t St, uint32_t num_heads, uint32_t Dt_half) {
+    using R = tt::foil::RiscBinary;
+    const uint32_t total_iters = St * num_heads * Dt_half;
     const uint64_t x_noc   = tt::foil::make_noc_dram_addr(dev, x.buf->device_addr);
     const uint64_t cos_noc = tt::foil::make_noc_dram_addr(dev, cos.buf->device_addr);
     const uint64_t sin_noc = tt::foil::make_noc_dram_addr(dev, sin.buf->device_addr);
     const uint64_t out_noc = tt::foil::make_noc_dram_addr(dev, out.buf->device_addr);
 
-    // BRISC reader: x_noc, cos_noc, sin_noc, St, num_heads, Dt_half
     std::array<uint32_t, 9> ra_brisc = {{
         (uint32_t)x_noc,   (uint32_t)(x_noc >> 32),
         (uint32_t)cos_noc, (uint32_t)(cos_noc >> 32),
         (uint32_t)sin_noc, (uint32_t)(sin_noc >> 32),
         St, num_heads, Dt_half,
     }};
-
-    // NCRISC writer: out_noc, St, num_heads, Dt_half
     std::array<uint32_t, 5> ra_ncrisc = {{
         (uint32_t)out_noc, (uint32_t)(out_noc >> 32),
         St, num_heads, Dt_half,
     }};
-
-    // TRISCs: total_iters
     std::array<uint32_t, 1> ra_trisc = {{total_iters}};
 
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::BRISC,  ra_brisc);
@@ -103,8 +109,6 @@ RopeOp make_rope(tt::foil::Device& dev,
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::TRISC0, ra_trisc);
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::TRISC1, ra_trisc);
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::TRISC2, ra_trisc);
-
-    return op;
 }
 
 void execute(tt::foil::Device& dev, RopeOp& op) {

@@ -106,6 +106,17 @@ GqaFusedOp make_gqa_fused(tt::foil::Device& dev,
     }};
     tt::foil::register_cbs(dev, *op.kernel, cbs);
 
+    set_gqa_fused_args(dev, op, q, kt, v, mask, out, St, Dt, num_q, num_kv);
+    return op;
+}
+
+void set_gqa_fused_args(tt::foil::Device& dev, GqaFusedOp& op,
+                        const TensorDesc& q, const TensorDesc& kt,
+                        const TensorDesc& v, const TensorDesc& mask,
+                        const TensorDesc& out,
+                        uint32_t St, uint32_t Dt,
+                        uint32_t num_q, uint32_t num_kv) {
+    using R = tt::foil::RiscBinary;
     const uint64_t q_noc   = tt::foil::make_noc_dram_addr(dev, q.buf->device_addr);
     const uint64_t kt_noc  = tt::foil::make_noc_dram_addr(dev, kt.buf->device_addr);
     const uint64_t v_noc   = tt::foil::make_noc_dram_addr(dev, v.buf->device_addr);
@@ -132,8 +143,6 @@ GqaFusedOp make_gqa_fused(tt::foil::Device& dev,
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::TRISC0, ra_trisc);
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::TRISC1, ra_trisc);
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::TRISC2, ra_trisc);
-
-    return op;
 }
 
 void execute(tt::foil::Device& dev, GqaFusedOp& op) {

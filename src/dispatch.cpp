@@ -54,14 +54,25 @@ void dispatch_stage_setup(
         hal.get_dev_msgs_factory(tt_metal::HalProgrammableCoreType::TENSIX);
 
     // ---- Kernel ELF binaries -> kernel_text_addr in KERNEL_CONFIG region ----
-    for (const auto& lr : kernel.riscs) {
-        lr.mem->process_spans([&](std::vector<uint32_t>::const_iterator mem_ptr,
-                                  uint64_t /*addr*/, uint32_t len_words) {
-            driver.write_to_device(
-                &*mem_ptr,
-                static_cast<std::size_t>(len_words) * sizeof(uint32_t),
-                chip, cc, lr.kernel_text_addr);
-        });
+    // Skip the NOC write if the same Kernel was last dispatched to this
+    // core — the L1 still holds its text. Saves ~3ms per dispatch on
+    // small ops where the ELF transfer dominated. Invalidated whenever
+    // release_kernels() runs (which rewinds the KERNEL_CONFIG arena, so
+    // the next load_kernel may reuse this Kernel's L1 region for a
+    // different binary).
+    const uint64_t core_key = Device::core_key(kernel.core.x, kernel.core.y);
+    auto& resident = dev.resident_kernels[core_key];
+    if (!resident.contains(&kernel)) {
+        for (const auto& lr : kernel.riscs) {
+            lr.mem->process_spans([&](std::vector<uint32_t>::const_iterator mem_ptr,
+                                      uint64_t /*addr*/, uint32_t len_words) {
+                driver.write_to_device(
+                    &*mem_ptr,
+                    static_cast<std::size_t>(len_words) * sizeof(uint32_t),
+                    chip, cc, lr.kernel_text_addr);
+            });
+        }
+        resident.insert(&kernel);
     }
 
     // ---- Runtime args -> per-RISC RTA slot ----
