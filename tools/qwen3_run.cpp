@@ -277,7 +277,14 @@ int main(int argc, char** argv) try {
     // -----------------------------------------------------------------
     // Open device, upload static tensors.
     // -----------------------------------------------------------------
-    auto dev = tt::foil::open_device(pcie_index, "", {{0, 0}});
+    // Boot a 1×4 grid so decode matmul can shard across 4 cores via
+    // make_matmul_grid. Other ops (rmsnorm, rope, gqa_decode, …) keep
+    // running on (0,0) — the extra cores are idle for those.
+    const std::vector<tt::foil::CoreCoord> kMatmulGrid = {
+        {0, 0}, {0, 1}, {0, 2}, {0, 3},
+    };
+    std::vector<tt::foil::CoreCoord> boot_cores = kMatmulGrid;
+    auto dev = tt::foil::open_device(pcie_index, "", boot_cores);
     tt::foil::CoreCoord core{0, 0};
 
     ol::TensorDesc T_embed_table;
@@ -347,6 +354,24 @@ int main(int argc, char** argv) try {
         auto t0 = Clock::now();
         auto op = factory(); ol::execute(*dev, op);
         tt::foil::release_kernels(*dev, core); tt::foil::reset_l1(*dev, core);
+        g_prof.add(tag, std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+    };
+    // Multi-core matmul: builds an N-core MatMulGridOp, dispatches via
+    // dispatch_execute_multi, then releases per-core kernel-config +
+    // L1 across the whole grid so the next caller starts from clean
+    // L1 on every core.
+    auto run_matmul_grid = [&](const char* tag,
+                               const ol::TensorDesc& a,
+                               const ol::TensorDesc& b,
+                               ol::TensorDesc& out,
+                               uint32_t Mt, uint32_t Kt, uint32_t Nt) {
+        auto t0 = Clock::now();
+        auto op = ol::make_matmul_grid(*dev, a, b, out, Mt, Kt, Nt, kMatmulGrid);
+        ol::execute(*dev, op);
+        for (const auto& c : kMatmulGrid) {
+            tt::foil::release_kernels(*dev, c);
+            tt::foil::reset_l1(*dev, c);
+        }
         g_prof.add(tag, std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
     };
 
@@ -526,9 +551,9 @@ int main(int argc, char** argv) try {
             const LayerW& w = layers[li];
 
             run1("dec:rmsnorm",    [&] { return ol::make_rmsnorm(*dev, T_layer_in, w.ln1g, T_xnorm1, kSt, kHt, kEps); });
-            run1("dec:matmul_qkv", [&] { return ol::make_matmul(*dev, T_xnorm1, w.Wq, T_Q, kSt, kHt, kNqDt); });
-            run1("dec:matmul_qkv", [&] { return ol::make_matmul(*dev, T_xnorm1, w.Wk, T_K, kSt, kHt, kNkDt); });
-            run1("dec:matmul_qkv", [&] { return ol::make_matmul(*dev, T_xnorm1, w.Wv, T_V, kSt, kHt, kNkDt); });
+            run_matmul_grid("dec:matmul_qkv", T_xnorm1, w.Wq, T_Q, kSt, kHt, kNqDt);
+            run_matmul_grid("dec:matmul_qkv", T_xnorm1, w.Wk, T_K, kSt, kHt, kNkDt);
+            run_matmul_grid("dec:matmul_qkv", T_xnorm1, w.Wv, T_V, kSt, kHt, kNkDt);
             run1("dec:rmsnorm_qk", [&] { return ol::make_rmsnorm(*dev, T_Q, w.qng, T_Qn, kSt * kNumQ,  kDt, kEps); });
             run1("dec:rmsnorm_qk", [&] { return ol::make_rmsnorm(*dev, T_K, w.kng, T_Kn, kSt * kNumKv, kDt, kEps); });
             run1("dec:rope",       [&] { return ol::make_rope(*dev, T_Qn, T_dcos, T_dsin, T_Qr, kSt, kNumQ,  kDtHalf); });
@@ -560,20 +585,20 @@ int main(int argc, char** argv) try {
                                            T_dmask, T_attn,
                                            kStDec, kStKvDec, kDt, kNumQ, kNumKv);
             });
-            run1("dec:matmul_o",   [&] { return ol::make_matmul(*dev, T_attn, w.Wo, T_proj, kSt, kNqDt, kHt); });
+            run_matmul_grid("dec:matmul_o", T_attn, w.Wo, T_proj, kSt, kNqDt, kHt);
             run1("dec:add",        [&] { return ol::make_eltwise_add(*dev, T_layer_in, T_proj, T_xmid); });
             run1("dec:rmsnorm",    [&] { return ol::make_rmsnorm(*dev, T_xmid, w.ln2g, T_ynorm, kSt, kHt, kEps); });
-            run1("dec:matmul_ffn", [&] { return ol::make_matmul(*dev, T_ynorm, w.Wgate, T_gate, kSt, kHt, kFFt); });
-            run1("dec:matmul_ffn", [&] { return ol::make_matmul(*dev, T_ynorm, w.Wup,   T_up,   kSt, kHt, kFFt); });
+            run_matmul_grid("dec:matmul_ffn", T_ynorm, w.Wgate, T_gate, kSt, kHt, kFFt);
+            run_matmul_grid("dec:matmul_ffn", T_ynorm, w.Wup,   T_up,   kSt, kHt, kFFt);
             run1("dec:silu",       [&] { return ol::make_silu(*dev, T_gate, T_silu); });
             run1("dec:mul",        [&] { return ol::make_eltwise_mul(*dev, T_silu, T_up, T_fused); });
-            run1("dec:matmul_ffn", [&] { return ol::make_matmul(*dev, T_fused, w.Wdown, T_down, kSt, kFFt, kHt); });
+            run_matmul_grid("dec:matmul_ffn", T_fused, w.Wdown, T_down, kSt, kFFt, kHt);
             run1("dec:add",        [&] { return ol::make_eltwise_add(*dev, T_xmid, T_down, T_layer_out); });
             std::swap(T_layer_in, T_layer_out);
         }
 
         run1("dec:final_rmsnorm", [&] { return ol::make_rmsnorm(*dev, T_layer_in, T_final_g, T_normed, kSt, kHt, kEps); });
-        run1("dec:lm_head",       [&] { return ol::make_matmul(*dev, T_normed, T_W_lm, T_logits, kSt, kHt, kVt); });
+        run_matmul_grid("dec:lm_head", T_normed, T_W_lm, T_logits, kSt, kHt, kVt);
         {
             TIMED("dec:logits_readback");
             tt::foil::read_buffer(*dev, *T_logits.buf, logits_tiles.data(), logits_tiles.size() * 2);

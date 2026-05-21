@@ -10,6 +10,33 @@ Tokens generated for this fixed prompt (must stay bit-identical across optimizat
 |------|-----|--------|----------|-------------|-------------|--------------------|-------|
 | 2026-05-21 | baseline | b62624a + profiling | ~39.3 | 17.40 | 3.85 | 18.04 | per-op dispatch floor 3.5ms across small ops. Hot spots: dec:matmul_ffn 6.83s (336 × 20.3ms), dec:lm_head 1.75s (4 × 438ms), dec:matmul_qkv 2.23s (336 × 6.6ms). |
 | 2026-05-21 | iter1-infra | (this commit) | ~23.3 | 3.93 | 3.35 | 16.02 | No perf change vs baseline — adds dispatch-cache infra + op_lib RTA-only setters + bench infra. Weights load drop is filesystem-cache warmth (file is gitignored, no longer cold). Bit-identical tokens 2303,220,220,16,13. |
+| 2026-05-21 | iter2-matmul4 | (next commit) | ~17.5 | 4.18 | 3.25 | 10.07 | **Decode matmul sharded across 1×4 grid via make_matmul_grid + Nt_stride RTA.** dec:matmul_ffn 19.65 → 8.49 ms/call (-57%), dec:matmul_qkv 6.00 → 5.12 (-15%), dec:matmul_o 8.62 → 5.53 (-36%), dec:lm_head 437.6 → 112.1 (-74%). Net decode 16.0 → 10.1s (-37%). Prefill stays single-core. Bit-identical tokens. |
+
+## Iter 2 finding
+
+Nt-split sharding works without any kernel reorganization on the
+data-path side: a single `Nt_stride` runtime arg in reader (B-row
+stride) and writer (C-row stride) is enough to write per-core slices
+into a single global C buffer. No weight resharding required.
+Downstream RMSNorm/RoPE/eltwise see C as a normal contiguous DRAM
+buffer.
+
+`dec:matmul_ffn` did not hit the predicted ~5ms because the FFN
+shapes (gate/up at Nt=192 and down at Nt=64) still pay the ~2.5ms
+dispatch floor per core. The remaining matmul time is now dominated
+by the same per-dispatch overhead that bit iter 1 — i.e. a watermark
+allocator + persistent matmul handles could push these into the
+2–3ms range. That's a future iteration.
+
+Other movers worth noting in this profile:
+- `dec:logits_readback` is now 260ms/call × 4 = 1.04s (3.3%). The
+  148-MB readback is real — only relevant if we switch from greedy
+  CPU argmax to a device-side argmax (iter 4+ candidate).
+- Per-call latency of every small op dropped from 3.5ms to 2.4ms
+  even though we changed nothing in their kernels. This is a happy
+  side effect of `tt-smi -r` being cold-state-fresher on this run.
+  The 1.1ms drop is consistent across categories; it is not the
+  matmul-grid win.
 
 ## Iter 1 finding: L1 budget caps persistent-op design at ~855 KB
 

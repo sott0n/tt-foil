@@ -82,7 +82,49 @@ void set_matmul_args(tt::foil::Device& dev, MatMulOp& op,
                      const TensorDesc& a, const TensorDesc& b,
                      const TensorDesc& out,
                      uint32_t Mt, uint32_t Kt, uint32_t Nt);
+// Column-shard variant: this kernel handles tiles
+//   B[kt, b_tile_offset + nt'] and writes C[mt, out_tile_offset + nt']
+// for nt' in [0, Nt). B reads use Nt_stride as the row stride (= the
+// global Nt), so a column-shard of B can be expressed as a per-core
+// base offset + the global stride. out_tile_offset works the same way:
+// each core writes its column slice into a single global C buffer at
+// `out_base + (mt * Nt_stride + nt') * tile_bytes`.
+void set_matmul_args(tt::foil::Device& dev, MatMulOp& op,
+                     const TensorDesc& a, const TensorDesc& b,
+                     const TensorDesc& out,
+                     uint32_t Mt, uint32_t Kt, uint32_t Nt,
+                     uint32_t Nt_stride,
+                     uint64_t a_tile_offset,
+                     uint64_t b_tile_offset,
+                     uint64_t out_tile_offset);
 void execute(tt::foil::Device& dev, MatMulOp& op);
+
+// =====================================================================
+// MatMulGrid — Nt-sharded matmul across N Tensix cores. Each per-core
+// kernel handles `Nt_per_core = Nt_global / cores.size()` consecutive
+// output columns. B reads + C writes use Nt_global as their row stride
+// so all cores read/write into one global B / one global C with no
+// copying. A is shared (full Mt × Kt) — each core reads it identically.
+// Single dispatch fires all kernels through dispatch_execute_multi.
+// =====================================================================
+struct MatMulGridOp {
+    std::vector<std::shared_ptr<tt::foil::Kernel>> kernels;
+    // Per-core L1 CBs in flattened groups of 3 (a, b, out) so we keep
+    // ownership of every allocated L1 region in one place.
+    std::vector<std::shared_ptr<tt::foil::Buffer>> l1_bufs;
+};
+MatMulGridOp make_matmul_grid(tt::foil::Device& dev,
+                              const TensorDesc& a, const TensorDesc& b,
+                              TensorDesc& out,
+                              uint32_t Mt, uint32_t Kt, uint32_t Nt,
+                              const std::vector<tt::foil::CoreCoord>& cores,
+                              const std::string& kernel_dir = "");
+void set_matmul_grid_args(tt::foil::Device& dev, MatMulGridOp& op,
+                          const TensorDesc& a, const TensorDesc& b,
+                          const TensorDesc& out,
+                          uint32_t Mt, uint32_t Kt, uint32_t Nt,
+                          const std::vector<tt::foil::CoreCoord>& cores);
+void execute(tt::foil::Device& dev, MatMulGridOp& op);
 
 // =====================================================================
 // ElementwiseMul
