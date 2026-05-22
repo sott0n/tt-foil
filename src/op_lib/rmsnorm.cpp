@@ -84,6 +84,15 @@ RmsNormOp make_rmsnorm(tt::foil::Device& dev,
     }};
     tt::foil::register_cbs(dev, *op.kernel, cbs);
 
+    set_rmsnorm_args(dev, op, x, gamma, out, NCHt, Wt);
+    return op;
+}
+
+void set_rmsnorm_args(tt::foil::Device& dev, RmsNormOp& op,
+                      const TensorDesc& x, const TensorDesc& gamma,
+                      const TensorDesc& out,
+                      uint32_t NCHt, uint32_t Wt) {
+    using R = tt::foil::RiscBinary;
     const uint64_t x_noc     = tt::foil::make_noc_dram_addr(dev, x.buf->device_addr);
     const uint64_t g_noc     = tt::foil::make_noc_dram_addr(dev, gamma.buf->device_addr);
     const uint64_t sc_noc    = tt::foil::make_noc_dram_addr(dev, op.dram_scaler->device_addr);
@@ -108,8 +117,6 @@ RmsNormOp make_rmsnorm(tt::foil::Device& dev,
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::TRISC1, ra_trisc);
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::TRISC2, ra_trisc);
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::NCRISC, ra_ncrisc);
-
-    return op;
 }
 
 void execute(tt::foil::Device& dev, RmsNormOp& op) {

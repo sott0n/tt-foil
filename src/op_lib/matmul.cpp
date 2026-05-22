@@ -11,7 +11,10 @@
 #include <cstdint>
 #include <stdexcept>
 
+#include <span>
+
 #include "cb_config.hpp"
+#include "dispatch.hpp"
 #include "op_lib_internal.hpp"
 
 namespace tt::foil::op_lib {
@@ -59,18 +62,47 @@ MatMulOp make_matmul(tt::foil::Device& dev,
     }};
     tt::foil::register_cbs(dev, *op.kernel, cbs);
 
-    const uint64_t a_noc   = tt::foil::make_noc_dram_addr(dev, a.buf->device_addr);
-    const uint64_t b_noc   = tt::foil::make_noc_dram_addr(dev, b.buf->device_addr);
-    const uint64_t dst_noc = tt::foil::make_noc_dram_addr(dev, out.buf->device_addr);
+    set_matmul_args(dev, op, a, b, out, Mt, Kt, Nt);
+    return op;
+}
 
-    std::array<uint32_t, 7> ra_brisc = {
+void set_matmul_args(tt::foil::Device& dev, MatMulOp& op,
+                     const TensorDesc& a, const TensorDesc& b,
+                     const TensorDesc& out,
+                     uint32_t Mt, uint32_t Kt, uint32_t Nt) {
+    // Single-core call: Nt_stride collapses to Nt (no column sharding).
+    set_matmul_args(dev, op, a, b, out, Mt, Kt, Nt, /*Nt_stride=*/Nt,
+                    /*a_tile_offset=*/0,
+                    /*b_tile_offset=*/0,
+                    /*out_tile_offset=*/0);
+}
+
+void set_matmul_args(tt::foil::Device& dev, MatMulOp& op,
+                     const TensorDesc& a, const TensorDesc& b,
+                     const TensorDesc& out,
+                     uint32_t Mt, uint32_t Kt, uint32_t Nt,
+                     uint32_t Nt_stride,
+                     uint64_t a_tile_offset,
+                     uint64_t b_tile_offset,
+                     uint64_t out_tile_offset) {
+    using R = tt::foil::RiscBinary;
+    constexpr std::size_t kTileBytes = 32 * 32 * 2;
+    const uint64_t a_noc   = tt::foil::make_noc_dram_addr(
+        dev, a.buf->device_addr + a_tile_offset * kTileBytes);
+    const uint64_t b_noc   = tt::foil::make_noc_dram_addr(
+        dev, b.buf->device_addr + b_tile_offset * kTileBytes);
+    const uint64_t dst_noc = tt::foil::make_noc_dram_addr(
+        dev, out.buf->device_addr + out_tile_offset * kTileBytes);
+
+    std::array<uint32_t, 8> ra_brisc = {
         (uint32_t)a_noc, (uint32_t)(a_noc >> 32),
         (uint32_t)b_noc, (uint32_t)(b_noc >> 32),
-        Mt, Kt, Nt,
+        Mt, Kt, Nt, Nt_stride,
     };
     std::array<uint32_t, 3> ra_trisc  = {Mt, Kt, Nt};
-    std::array<uint32_t, 3> ra_ncrisc = {
-        (uint32_t)dst_noc, (uint32_t)(dst_noc >> 32), Mt * Nt,
+    std::array<uint32_t, 5> ra_ncrisc = {
+        (uint32_t)dst_noc, (uint32_t)(dst_noc >> 32),
+        Mt, Nt, Nt_stride,
     };
 
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::BRISC,  ra_brisc);
@@ -78,12 +110,112 @@ MatMulOp make_matmul(tt::foil::Device& dev,
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::TRISC1, ra_trisc);
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::TRISC2, ra_trisc);
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::NCRISC, ra_ncrisc);
-
-    return op;
 }
 
 void execute(tt::foil::Device& dev, MatMulOp& op) {
     tt::foil::execute(dev, *op.kernel);
+}
+
+// ---------------------------------------------------------------------------
+// MatMulGrid — Nt-sharded matmul across N Tensix cores.
+// ---------------------------------------------------------------------------
+
+MatMulGridOp make_matmul_grid(tt::foil::Device& dev,
+                              const TensorDesc& a, const TensorDesc& b,
+                              TensorDesc& out,
+                              uint32_t Mt, uint32_t Kt, uint32_t Nt,
+                              const std::vector<tt::foil::CoreCoord>& cores,
+                              const std::string& kernel_dir) {
+    if (cores.empty())
+        throw std::runtime_error("op_lib::make_matmul_grid: cores must be non-empty");
+    const uint32_t n_cores = static_cast<uint32_t>(cores.size());
+    if (Nt % n_cores != 0)
+        throw std::runtime_error("op_lib::make_matmul_grid: Nt must be a multiple of cores.size()");
+    if (a.num_tiles != Mt * Kt)
+        throw std::runtime_error("op_lib::make_matmul_grid: a.num_tiles != Mt*Kt");
+    if (b.num_tiles != Kt * Nt)
+        throw std::runtime_error("op_lib::make_matmul_grid: b.num_tiles != Kt*Nt");
+    if (out.num_tiles == 0)
+        out = allocate_tensor_dram(dev, Mt * Nt);
+    else if (out.num_tiles != Mt * Nt)
+        throw std::runtime_error("op_lib::make_matmul_grid: out.num_tiles != Mt*Nt");
+
+    const std::string dir = resolve_kernel_dir(kernel_dir, "matmul");
+    using R = tt::foil::RiscBinary;
+    std::array<R, 5> bins = {{
+        {R::RiscId::BRISC,  dir + "/reader.brisc.elf"},
+        {R::RiscId::NCRISC, dir + "/writer.ncrisc.elf"},
+        {R::RiscId::TRISC0, dir + "/matmul.trisc0.elf"},
+        {R::RiscId::TRISC1, dir + "/matmul.trisc1.elf"},
+        {R::RiscId::TRISC2, dir + "/matmul.trisc2.elf"},
+    }};
+
+    MatMulGridOp op;
+    op.kernels.reserve(n_cores);
+    op.l1_bufs.reserve(static_cast<std::size_t>(n_cores) * 3);
+    for (const auto& core : cores) {
+        auto l1_a   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, kTileBytes, core);
+        auto l1_b   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, kTileBytes, core);
+        auto l1_out = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, kTileBytes, core);
+        auto kernel = tt::foil::load_kernel(dev, bins, core);
+        std::array<tt::foil::CbConfig, 3> cbs = {{
+            {0,  l1_a->device_addr,   kTileBytes, 1, kTileBytes},
+            {1,  l1_b->device_addr,   kTileBytes, 1, kTileBytes},
+            {16, l1_out->device_addr, kTileBytes, 1, kTileBytes},
+        }};
+        tt::foil::register_cbs(dev, *kernel, cbs);
+        op.kernels.push_back(kernel);
+        op.l1_bufs.push_back(std::move(l1_a));
+        op.l1_bufs.push_back(std::move(l1_b));
+        op.l1_bufs.push_back(std::move(l1_out));
+    }
+    set_matmul_grid_args(dev, op, a, b, out, Mt, Kt, Nt, cores);
+    return op;
+}
+
+void set_matmul_grid_args(tt::foil::Device& dev, MatMulGridOp& op,
+                          const TensorDesc& a, const TensorDesc& b,
+                          const TensorDesc& out,
+                          uint32_t Mt, uint32_t Kt, uint32_t Nt,
+                          const std::vector<tt::foil::CoreCoord>& cores) {
+    using R = tt::foil::RiscBinary;
+    const uint32_t n_cores      = static_cast<uint32_t>(cores.size());
+    const uint32_t Nt_per_core  = Nt / n_cores;
+    const uint64_t a_dev_base   = a.buf->device_addr;
+    const uint64_t b_dev_base   = b.buf->device_addr;
+    const uint64_t out_dev_base = out.buf->device_addr;
+
+    for (uint32_t c = 0; c < n_cores; ++c) {
+        const uint64_t col_off_bytes =
+            static_cast<uint64_t>(c) * Nt_per_core * kTileBytes;
+        const uint64_t a_noc   = tt::foil::make_noc_dram_addr(dev, a_dev_base);
+        const uint64_t b_noc   = tt::foil::make_noc_dram_addr(dev, b_dev_base   + col_off_bytes);
+        const uint64_t dst_noc = tt::foil::make_noc_dram_addr(dev, out_dev_base + col_off_bytes);
+
+        std::array<uint32_t, 8> ra_brisc = {
+            (uint32_t)a_noc, (uint32_t)(a_noc >> 32),
+            (uint32_t)b_noc, (uint32_t)(b_noc >> 32),
+            Mt, Kt, Nt_per_core, /*Nt_stride=*/Nt,
+        };
+        std::array<uint32_t, 3> ra_trisc = {Mt, Kt, Nt_per_core};
+        std::array<uint32_t, 5> ra_ncrisc = {
+            (uint32_t)dst_noc, (uint32_t)(dst_noc >> 32),
+            Mt, Nt_per_core, /*Nt_stride=*/Nt,
+        };
+        auto& k = *op.kernels[c];
+        tt::foil::set_runtime_args(dev, k, R::RiscId::BRISC,  ra_brisc);
+        tt::foil::set_runtime_args(dev, k, R::RiscId::TRISC0, ra_trisc);
+        tt::foil::set_runtime_args(dev, k, R::RiscId::TRISC1, ra_trisc);
+        tt::foil::set_runtime_args(dev, k, R::RiscId::TRISC2, ra_trisc);
+        tt::foil::set_runtime_args(dev, k, R::RiscId::NCRISC, ra_ncrisc);
+    }
+}
+
+void execute(tt::foil::Device& dev, MatMulGridOp& op) {
+    std::vector<tt::foil::Kernel*> ptrs;
+    ptrs.reserve(op.kernels.size());
+    for (auto& k : op.kernels) ptrs.push_back(k.get());
+    tt::foil::dispatch_execute_multi(dev, std::span<tt::foil::Kernel* const>(ptrs.data(), ptrs.size()));
 }
 
 }  // namespace tt::foil::op_lib

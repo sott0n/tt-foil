@@ -53,6 +53,8 @@ SiluOp make_silu(tt::foil::Device& dev,
                  const TensorDesc& x, TensorDesc& out,
                  tt::foil::CoreCoord core = {},
                  const std::string& kernel_dir = "");
+void set_silu_args(tt::foil::Device& dev, SiluOp& op,
+                   const TensorDesc& x, const TensorDesc& out);
 void execute(tt::foil::Device& dev, SiluOp& op);
 
 // =====================================================================
@@ -74,7 +76,55 @@ MatMulOp make_matmul(tt::foil::Device& dev,
                      uint32_t Mt, uint32_t Kt, uint32_t Nt,
                      tt::foil::CoreCoord core = {},
                      const std::string& kernel_dir = "");
+// Update RTAs only (no kernel reload, no L1/CB alloc). Lets one op handle
+// drive matmuls of arbitrary shape so the dispatch ELF-cache hits.
+void set_matmul_args(tt::foil::Device& dev, MatMulOp& op,
+                     const TensorDesc& a, const TensorDesc& b,
+                     const TensorDesc& out,
+                     uint32_t Mt, uint32_t Kt, uint32_t Nt);
+// Column-shard variant: this kernel handles tiles
+//   B[kt, b_tile_offset + nt'] and writes C[mt, out_tile_offset + nt']
+// for nt' in [0, Nt). B reads use Nt_stride as the row stride (= the
+// global Nt), so a column-shard of B can be expressed as a per-core
+// base offset + the global stride. out_tile_offset works the same way:
+// each core writes its column slice into a single global C buffer at
+// `out_base + (mt * Nt_stride + nt') * tile_bytes`.
+void set_matmul_args(tt::foil::Device& dev, MatMulOp& op,
+                     const TensorDesc& a, const TensorDesc& b,
+                     const TensorDesc& out,
+                     uint32_t Mt, uint32_t Kt, uint32_t Nt,
+                     uint32_t Nt_stride,
+                     uint64_t a_tile_offset,
+                     uint64_t b_tile_offset,
+                     uint64_t out_tile_offset);
 void execute(tt::foil::Device& dev, MatMulOp& op);
+
+// =====================================================================
+// MatMulGrid — Nt-sharded matmul across N Tensix cores. Each per-core
+// kernel handles `Nt_per_core = Nt_global / cores.size()` consecutive
+// output columns. B reads + C writes use Nt_global as their row stride
+// so all cores read/write into one global B / one global C with no
+// copying. A is shared (full Mt × Kt) — each core reads it identically.
+// Single dispatch fires all kernels through dispatch_execute_multi.
+// =====================================================================
+struct MatMulGridOp {
+    std::vector<std::shared_ptr<tt::foil::Kernel>> kernels;
+    // Per-core L1 CBs in flattened groups of 3 (a, b, out) so we keep
+    // ownership of every allocated L1 region in one place.
+    std::vector<std::shared_ptr<tt::foil::Buffer>> l1_bufs;
+};
+MatMulGridOp make_matmul_grid(tt::foil::Device& dev,
+                              const TensorDesc& a, const TensorDesc& b,
+                              TensorDesc& out,
+                              uint32_t Mt, uint32_t Kt, uint32_t Nt,
+                              const std::vector<tt::foil::CoreCoord>& cores,
+                              const std::string& kernel_dir = "");
+void set_matmul_grid_args(tt::foil::Device& dev, MatMulGridOp& op,
+                          const TensorDesc& a, const TensorDesc& b,
+                          const TensorDesc& out,
+                          uint32_t Mt, uint32_t Kt, uint32_t Nt,
+                          const std::vector<tt::foil::CoreCoord>& cores);
+void execute(tt::foil::Device& dev, MatMulGridOp& op);
 
 // =====================================================================
 // ElementwiseMul
@@ -91,6 +141,9 @@ EltwiseMulOp make_eltwise_mul(tt::foil::Device& dev,
                               TensorDesc& out,
                               tt::foil::CoreCoord core = {},
                               const std::string& kernel_dir = "");
+void set_eltwise_mul_args(tt::foil::Device& dev, EltwiseMulOp& op,
+                          const TensorDesc& a, const TensorDesc& b,
+                          const TensorDesc& out);
 void execute(tt::foil::Device& dev, EltwiseMulOp& op);
 
 // =====================================================================
@@ -108,6 +161,9 @@ EltwiseAddOp make_eltwise_add(tt::foil::Device& dev,
                               TensorDesc& out,
                               tt::foil::CoreCoord core = {},
                               const std::string& kernel_dir = "");
+void set_eltwise_add_args(tt::foil::Device& dev, EltwiseAddOp& op,
+                          const TensorDesc& a, const TensorDesc& b,
+                          const TensorDesc& out);
 void execute(tt::foil::Device& dev, EltwiseAddOp& op);
 
 // =====================================================================
@@ -141,6 +197,14 @@ RmsNormOp make_rmsnorm(tt::foil::Device& dev,
                        float eps = 1e-5f,
                        tt::foil::CoreCoord core = {},
                        const std::string& kernel_dir = "");
+// Reusable-handle setter — keeps the L1/CB layout fixed and rewrites only
+// the DRAM source/dest addresses + NCHt/Wt. Same (NCHt, Wt) must be used
+// across calls because the CB sizes were baked in at make-time. `eps`
+// changes are honored only at make-time (dram_eps tile is fixed).
+void set_rmsnorm_args(tt::foil::Device& dev, RmsNormOp& op,
+                      const TensorDesc& x, const TensorDesc& gamma,
+                      const TensorDesc& out,
+                      uint32_t NCHt, uint32_t Wt);
 void execute(tt::foil::Device& dev, RmsNormOp& op);
 
 // =====================================================================
@@ -217,6 +281,14 @@ EmbeddingOp make_embedding(tt::foil::Device& dev,
                            TensorDesc& out,
                            tt::foil::CoreCoord core = {},
                            const std::string& kernel_dir = "");
+// Update token_ids only — table, output, N and D must match the make-time
+// values (CB blob + L1 alloc size are baked at make-time). token_ids.size()
+// must equal the original N.
+void set_embedding_args(tt::foil::Device& dev, EmbeddingOp& op,
+                        const TensorDesc& table,
+                        const std::vector<uint32_t>& token_ids,
+                        uint32_t D,
+                        const TensorDesc& out);
 void execute(tt::foil::Device& dev, EmbeddingOp& op);
 
 // =====================================================================
@@ -251,6 +323,11 @@ RopeOp make_rope(tt::foil::Device& dev,
                  uint32_t St, uint32_t num_heads, uint32_t Dt_half,
                  tt::foil::CoreCoord core = {},
                  const std::string& kernel_dir = "");
+void set_rope_args(tt::foil::Device& dev, RopeOp& op,
+                   const TensorDesc& x,
+                   const TensorDesc& cos, const TensorDesc& sin,
+                   const TensorDesc& out,
+                   uint32_t St, uint32_t num_heads, uint32_t Dt_half);
 void execute(tt::foil::Device& dev, RopeOp& op);
 
 // =====================================================================
@@ -270,6 +347,9 @@ Transpose2dOp make_transpose_2d(tt::foil::Device& dev,
                                 uint32_t Rt, uint32_t Ct,
                                 tt::foil::CoreCoord core = {},
                                 const std::string& kernel_dir = "");
+void set_transpose_2d_args(tt::foil::Device& dev, Transpose2dOp& op,
+                           const TensorDesc& in, const TensorDesc& out,
+                           uint32_t Rt, uint32_t Ct);
 void execute(tt::foil::Device& dev, Transpose2dOp& op);
 
 // =====================================================================
@@ -296,6 +376,12 @@ GqaFusedOp make_gqa_fused(tt::foil::Device& dev,
                           uint32_t num_q, uint32_t num_kv,
                           tt::foil::CoreCoord core = {},
                           const std::string& kernel_dir = "");
+void set_gqa_fused_args(tt::foil::Device& dev, GqaFusedOp& op,
+                        const TensorDesc& q, const TensorDesc& kt,
+                        const TensorDesc& v, const TensorDesc& mask,
+                        const TensorDesc& out,
+                        uint32_t St, uint32_t Dt,
+                        uint32_t num_q, uint32_t num_kv);
 void execute(tt::foil::Device& dev, GqaFusedOp& op);
 
 // =====================================================================
@@ -322,6 +408,12 @@ GqaDecodeOp make_gqa_decode(tt::foil::Device& dev,
                             uint32_t num_q, uint32_t num_kv,
                             tt::foil::CoreCoord core = {},
                             const std::string& kernel_dir = "");
+void set_gqa_decode_args(tt::foil::Device& dev, GqaDecodeOp& op,
+                         const TensorDesc& q, const TensorDesc& kt,
+                         const TensorDesc& v, const TensorDesc& mask,
+                         const TensorDesc& out,
+                         uint32_t St_q, uint32_t St_kv, uint32_t Dt,
+                         uint32_t num_q, uint32_t num_kv);
 void execute(tt::foil::Device& dev, GqaDecodeOp& op);
 
 }  // namespace tt::foil::op_lib

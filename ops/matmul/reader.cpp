@@ -8,10 +8,15 @@
 //
 // Runtime args:
 //   arg[0..1] = A stream NOC addr (lo, hi) — make_noc_dram_addr on host
-//   arg[2..3] = B stream NOC addr (lo, hi)
+//   arg[2..3] = B stream NOC addr (lo, hi) — points at this core's first
+//              column tile within the global B (column-shard offset
+//              baked in by caller)
 //   arg[4]    = Mt
 //   arg[5]    = Kt
-//   arg[6]    = Nt
+//   arg[6]    = Nt  — *per-core* output column count
+//   arg[7]    = Nt_stride — row stride between B's (kt) rows, expressed
+//              in tiles. Equals global Nt for column-sharded callers
+//              and equals per-core Nt for single-core callers.
 
 #include <cstdint>
 
@@ -31,11 +36,12 @@ static inline void read_one_tile(uint32_t cb, uint64_t src_noc_addr) {
 }
 
 void kernel_main() {
-    uint64_t a_base = join64(get_arg_val<uint32_t>(0), get_arg_val<uint32_t>(1));
-    uint64_t b_base = join64(get_arg_val<uint32_t>(2), get_arg_val<uint32_t>(3));
-    uint32_t Mt     = get_arg_val<uint32_t>(4);
-    uint32_t Kt     = get_arg_val<uint32_t>(5);
-    uint32_t Nt     = get_arg_val<uint32_t>(6);
+    uint64_t a_base   = join64(get_arg_val<uint32_t>(0), get_arg_val<uint32_t>(1));
+    uint64_t b_base   = join64(get_arg_val<uint32_t>(2), get_arg_val<uint32_t>(3));
+    uint32_t Mt        = get_arg_val<uint32_t>(4);
+    uint32_t Kt        = get_arg_val<uint32_t>(5);
+    uint32_t Nt        = get_arg_val<uint32_t>(6);
+    uint32_t Nt_stride = get_arg_val<uint32_t>(7);
 
     constexpr uint32_t kTileBytes = 32 * 32 * 2;
 
@@ -43,7 +49,7 @@ void kernel_main() {
         for (uint32_t nt = 0; nt < Nt; ++nt) {
             for (uint32_t kt = 0; kt < Kt; ++kt) {
                 read_one_tile(0, a_base + (mt * Kt + kt) * kTileBytes);
-                read_one_tile(1, b_base + (kt * Nt + nt) * kTileBytes);
+                read_one_tile(1, b_base + (kt * Nt_stride + nt) * kTileBytes);
             }
         }
     }

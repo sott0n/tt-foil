@@ -52,6 +52,15 @@ Transpose2dOp make_transpose_2d(tt::foil::Device& dev,
     }};
     tt::foil::register_cbs(dev, *op.kernel, cbs);
 
+    set_transpose_2d_args(dev, op, in, out, Rt, Ct);
+    return op;
+}
+
+void set_transpose_2d_args(tt::foil::Device& dev, Transpose2dOp& op,
+                           const TensorDesc& in, const TensorDesc& out,
+                           uint32_t Rt, uint32_t Ct) {
+    using R = tt::foil::RiscBinary;
+    const uint32_t total_tiles = Rt * Ct;
     const uint64_t in_noc  = tt::foil::make_noc_dram_addr(dev, in.buf->device_addr);
     const uint64_t out_noc = tt::foil::make_noc_dram_addr(dev, out.buf->device_addr);
 
@@ -64,8 +73,6 @@ Transpose2dOp make_transpose_2d(tt::foil::Device& dev,
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::TRISC0, ra_trisc);
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::TRISC1, ra_trisc);
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::TRISC2, ra_trisc);
-
-    return op;
 }
 
 void execute(tt::foil::Device& dev, Transpose2dOp& op) {

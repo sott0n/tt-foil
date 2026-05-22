@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // UMD xy_pair = tt::tt_metal::CoreCoord (needed as return type below)
@@ -26,6 +27,7 @@ class Hal;
 namespace tt::foil {
 
 struct CoreCoord;
+struct Kernel;
 
 // Internal per-core allocator state
 struct L1Allocator {
@@ -78,6 +80,14 @@ struct Device {
     // Per-core kernel-config region allocators (KERNEL_CONFIG = MEM_MAP_END).
     // RTA must live here so the uint16_t rta_offset fits.
     std::unordered_map<uint64_t, L1Allocator> kernel_config_allocs;
+
+    // Per-core set of Kernels whose ELF is currently resident in L1
+    // (already NOC-written and not yet displaced by an arena rewind).
+    // dispatch_stage_setup uses this to skip the ELF NOC write when a
+    // Kernel is re-dispatched. release_kernels clears the per-core set
+    // because rewinding the KERNEL_CONFIG arena lets the next load_kernel
+    // reuse those L1 addresses for new binaries.
+    std::unordered_map<uint64_t, std::unordered_set<const Kernel*>> resident_kernels;
 
     // DRAM bump allocator (channel 0)
     DramAllocator dram_alloc;

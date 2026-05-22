@@ -53,6 +53,14 @@ EltwiseMulOp make_eltwise_mul(tt::foil::Device& dev,
     }};
     tt::foil::register_cbs(dev, *op.kernel, cbs);
 
+    set_eltwise_mul_args(dev, op, a, b, out);
+    return op;
+}
+
+void set_eltwise_mul_args(tt::foil::Device& dev, EltwiseMulOp& op,
+                          const TensorDesc& a, const TensorDesc& b,
+                          const TensorDesc& out) {
+    using R = tt::foil::RiscBinary;
     const uint64_t a_noc = tt::foil::make_noc_dram_addr(dev, a.buf->device_addr);
     const uint64_t b_noc = tt::foil::make_noc_dram_addr(dev, b.buf->device_addr);
     const uint64_t d_noc = tt::foil::make_noc_dram_addr(dev, out.buf->device_addr);
@@ -68,8 +76,6 @@ EltwiseMulOp make_eltwise_mul(tt::foil::Device& dev,
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::TRISC0, ra_trisc);
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::TRISC1, ra_trisc);
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::TRISC2, ra_trisc);
-
-    return op;
 }
 
 void execute(tt::foil::Device& dev, EltwiseMulOp& op) {
