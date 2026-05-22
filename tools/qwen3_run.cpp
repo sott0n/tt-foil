@@ -159,9 +159,20 @@ std::vector<uint16_t> gamma_to_tiles(const std::vector<uint16_t>& g, uint32_t D)
     return tile2d(rm, kTileH, D);
 }
 
+// iter7: Wq, Wk, Wv are fused into a single Wqkv weight along the Nt axis.
+// Layout (kt-row major, like every other tile-format matrix in this file):
+//   for each kt in [0, kHt):
+//     Wq tiles  [kt, 0..kNqDt)
+//     Wk tiles  [kt, kNqDt..kNqDt+kNkDt)
+//     Wv tiles  [kt, kNqDt+kNkDt..kNqDt+2*kNkDt)
+// So one matmul(A=hidden, B=Wqkv, Mt=1, Kt=kHt, Nt=kNqkvDt) produces a
+// single QKV-concat tensor; downstream T_Q/T_K/T_V are zero-copy
+// offset views into it.
+constexpr uint32_t kNqkvDt = kNqDt + 2 * kNkDt;   // 64 + 32 + 32 = 128
+
 struct LayerW {
     tt::foil::op_lib::TensorDesc ln1g, ln2g, qng, kng;
-    tt::foil::op_lib::TensorDesc Wq, Wk, Wv, Wo;
+    tt::foil::op_lib::TensorDesc Wqkv, Wo;
     tt::foil::op_lib::TensorDesc Wgate, Wup, Wdown;
 };
 
@@ -169,7 +180,7 @@ struct LayerW {
 // device interaction so safe to run on worker threads in parallel.
 struct TiledLayer {
     std::vector<uint16_t> ln1g, ln2g, qng, kng;
-    std::vector<uint16_t> Wq, Wk, Wv, Wo;
+    std::vector<uint16_t> Wqkv, Wo;          // Wqkv = concat(Wq, Wk, Wv) along Nt
     std::vector<uint16_t> Wgate, Wup, Wdown;
 };
 TiledLayer prepare_layer(const std::string& d) {
@@ -193,9 +204,22 @@ TiledLayer prepare_layer(const std::string& d) {
     T.ln2g  = gamma_to_tiles(ln2g, kH);
     T.qng   = gamma_to_tiles(qng,  kHeadDim);
     T.kng   = gamma_to_tiles(kng,  kHeadDim);
-    T.Wq    = tile2d(Wq,    kH,   kNumQ  * kHeadDim);
-    T.Wk    = tile2d(Wk,    kH,   kNumKv * kHeadDim);
-    T.Wv    = tile2d(Wv,    kH,   kNumKv * kHeadDim);
+    auto Wq_t = tile2d(Wq, kH, kNumQ  * kHeadDim);
+    auto Wk_t = tile2d(Wk, kH, kNumKv * kHeadDim);
+    auto Wv_t = tile2d(Wv, kH, kNumKv * kHeadDim);
+    // Concat Wq | Wk | Wv along Nt, kt-row by kt-row. The per-row slice
+    // counts come straight from each weight's column tile count.
+    T.Wqkv.reserve(static_cast<size_t>(kHt) * kNqkvDt * kTileWords);
+    for (uint32_t kt = 0; kt < kHt; ++kt) {
+        auto append = [&](const std::vector<uint16_t>& src, uint32_t cols_per_row) {
+            const size_t row_words = static_cast<size_t>(cols_per_row) * kTileWords;
+            const size_t off = static_cast<size_t>(kt) * row_words;
+            T.Wqkv.insert(T.Wqkv.end(), src.begin() + off, src.begin() + off + row_words);
+        };
+        append(Wq_t, kNqDt);
+        append(Wk_t, kNkDt);
+        append(Wv_t, kNkDt);
+    }
     T.Wo    = tile2d(Wo,    kNumQ * kHeadDim, kH);
     T.Wgate = tile2d(Wgate, kH,   kFFN);
     T.Wup   = tile2d(Wup,   kH,   kFFN);
@@ -212,9 +236,7 @@ LayerW upload_layer(tt::foil::Device& dev, const TiledLayer& T) {
     L.ln2g  = ol::allocate_tensor_dram(dev, kHt);
     L.qng   = ol::allocate_tensor_dram(dev, kDt);
     L.kng   = ol::allocate_tensor_dram(dev, kDt);
-    L.Wq    = ol::allocate_tensor_dram(dev, kHt * kNqDt);
-    L.Wk    = ol::allocate_tensor_dram(dev, kHt * kNkDt);
-    L.Wv    = ol::allocate_tensor_dram(dev, kHt * kNkDt);
+    L.Wqkv  = ol::allocate_tensor_dram(dev, kHt * kNqkvDt);
     L.Wo    = ol::allocate_tensor_dram(dev, kNqDt * kHt);
     L.Wgate = ol::allocate_tensor_dram(dev, kHt * kFFt);
     L.Wup   = ol::allocate_tensor_dram(dev, kHt * kFFt);
@@ -226,9 +248,7 @@ LayerW upload_layer(tt::foil::Device& dev, const TiledLayer& T) {
     up(L.ln2g,  T.ln2g);
     up(L.qng,   T.qng);
     up(L.kng,   T.kng);
-    up(L.Wq,    T.Wq);
-    up(L.Wk,    T.Wk);
-    up(L.Wv,    T.Wv);
+    up(L.Wqkv,  T.Wqkv);
     up(L.Wo,    T.Wo);
     up(L.Wgate, T.Wgate);
     up(L.Wup,   T.Wup);
@@ -363,9 +383,23 @@ int main(int argc, char** argv) try {
     auto T_layer_in  = ol::allocate_tensor_dram(*dev, kSt * kHt);
     auto T_layer_out = ol::allocate_tensor_dram(*dev, kSt * kHt);
     auto T_xnorm1    = ol::allocate_tensor_dram(*dev, kSt * kHt);
-    auto T_Q  = ol::allocate_tensor_dram(*dev, kSt * kNqDt);
-    auto T_K  = ol::allocate_tensor_dram(*dev, kSt * kNkDt);
-    auto T_V  = ol::allocate_tensor_dram(*dev, kSt * kNkDt);
+    // Fused QKV output: one big buffer that the matmul writes into,
+    // plus three zero-copy offset views (T_Q, T_K, T_V) into that buffer
+    // for the downstream rmsnorm/rope/gqa to consume.
+    auto T_QKV = ol::allocate_tensor_dram(*dev, kSt * kNqkvDt);
+    auto qkv_base = T_QKV.buf->device_addr;
+    auto make_view = [&](uint32_t tile_offset, uint32_t num_tiles_view) {
+        ol::TensorDesc v;
+        v.buf = std::make_shared<tt::foil::Buffer>();
+        v.buf->location    = tt::foil::BufferLocation::DRAM;
+        v.buf->device_addr = qkv_base + static_cast<uint64_t>(tile_offset) * kTileBytes;
+        v.buf->size_bytes  = static_cast<std::size_t>(num_tiles_view) * kTileBytes;
+        v.num_tiles        = num_tiles_view;
+        return v;
+    };
+    auto T_Q = make_view(0,                 kSt * kNqDt);
+    auto T_K = make_view(kSt * kNqDt,       kSt * kNkDt);
+    auto T_V = make_view(kSt * (kNqDt + kNkDt), kSt * kNkDt);
     auto T_Qn = ol::allocate_tensor_dram(*dev, kSt * kNqDt);
     auto T_Kn = ol::allocate_tensor_dram(*dev, kSt * kNkDt);
     auto T_Qr = ol::allocate_tensor_dram(*dev, kSt * kNqDt);
@@ -530,9 +564,9 @@ int main(int argc, char** argv) try {
         std::fprintf(stderr, "  prefill layer %u …\n", li);
 
         run1("pre:rmsnorm",    [&] { return ol::make_rmsnorm(*dev, T_layer_in, w.ln1g, T_xnorm1, kSt, kHt, kEps); });
-        run_matmul_grid("pre:matmul_qkv", T_xnorm1, w.Wq, T_Q, kSt, kHt, kNqDt);
-        run_matmul_grid("pre:matmul_qkv", T_xnorm1, w.Wk, T_K, kSt, kHt, kNkDt);
-        run_matmul_grid("pre:matmul_qkv", T_xnorm1, w.Wv, T_V, kSt, kHt, kNkDt);
+        // Fused QKV matmul: A·[Wq|Wk|Wv]. Output lands in T_QKV; T_Q,
+        // T_K, T_V are pre-set offset views into the same buffer.
+        run_matmul_grid("pre:matmul_qkv", T_xnorm1, w.Wqkv, T_QKV, kSt, kHt, kNqkvDt);
         run1("pre:rmsnorm_qk", [&] { return ol::make_rmsnorm(*dev, T_Q, w.qng, T_Qn, kSt * kNumQ,  kDt, kEps); });
         run1("pre:rmsnorm_qk", [&] { return ol::make_rmsnorm(*dev, T_K, w.kng, T_Kn, kSt * kNumKv, kDt, kEps); });
         run1("pre:rope",       [&] { return ol::make_rope(*dev, T_Qn, T_cos, T_sin, T_Qr, kSt, kNumQ,  kDtHalf); });
@@ -641,9 +675,9 @@ int main(int argc, char** argv) try {
             const LayerW& w = layers[li];
 
             run1("dec:rmsnorm",    [&] { return ol::make_rmsnorm(*dev, T_layer_in, w.ln1g, T_xnorm1, kSt, kHt, kEps); });
-            run_matmul_grid("dec:matmul_qkv", T_xnorm1, w.Wq, T_Q, kSt, kHt, kNqDt);
-            run_matmul_grid("dec:matmul_qkv", T_xnorm1, w.Wk, T_K, kSt, kHt, kNkDt);
-            run_matmul_grid("dec:matmul_qkv", T_xnorm1, w.Wv, T_V, kSt, kHt, kNkDt);
+            // Fused QKV matmul (iter7) — see comments above the T_QKV
+            // allocation. One dispatch instead of three.
+            run_matmul_grid("dec:matmul_qkv", T_xnorm1, w.Wqkv, T_QKV, kSt, kHt, kNqkvDt);
             run1("dec:rmsnorm_qk", [&] { return ol::make_rmsnorm(*dev, T_Q, w.qng, T_Qn, kSt * kNumQ,  kDt, kEps); });
             run1("dec:rmsnorm_qk", [&] { return ol::make_rmsnorm(*dev, T_K, w.kng, T_Kn, kSt * kNumKv, kDt, kEps); });
             run1("dec:rope",       [&] { return ol::make_rope(*dev, T_Qn, T_dcos, T_dsin, T_Qr, kSt, kNumQ,  kDtHalf); });
