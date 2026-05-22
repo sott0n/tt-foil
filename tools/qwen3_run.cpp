@@ -327,6 +327,7 @@ int main(int argc, char** argv) try {
     auto dev = tt::foil::open_device(pcie_index, "", boot_cores);
     tt::foil::CoreCoord core{0, 0};
 
+
     ol::TensorDesc T_embed_table;
     T_embed_table.buf = tt::foil::allocate_buffer(
         *dev, tt::foil::BufferLocation::DRAM,
@@ -390,6 +391,16 @@ int main(int argc, char** argv) try {
         T_Kt_cache[li] = ol::allocate_tensor_dram(*dev, kNkDt * kStKvDec);
         T_V_cache[li]  = ol::allocate_tensor_dram(*dev, kStKvDec * kNkDt);
     }
+    // 4-byte DRAM result slot for device-side decode argmax. Padded to
+    // one tile (2048 B) so the bump allocator stays tile-aligned for any
+    // subsequent allocations. (Several op_lib readers/writers index into
+    // DRAM at `base + tile_idx * 2048` and silently miscompute when
+    // `base` isn't a multiple of 2048 — keep the bump pointer on tile
+    // boundaries whenever we allocate non-tile-format DRAM.)
+    ol::TensorDesc T_argmax;
+    T_argmax.buf = tt::foil::allocate_buffer(
+        *dev, tt::foil::BufferLocation::DRAM, /*bytes=*/2048);
+    T_argmax.num_tiles = 0;
 
     auto upload = [&](auto& t, const std::vector<uint16_t>& tiles) {
         tt::foil::write_buffer(*dev, *t.buf, tiles.data(), tiles.size() * 2);
@@ -678,16 +689,16 @@ int main(int argc, char** argv) try {
 
         run1("dec:final_rmsnorm", [&] { return ol::make_rmsnorm(*dev, T_layer_in, T_final_g, T_normed, kSt, kHt, kEps); });
         run_matmul_grid("dec:lm_head", T_normed, T_W_lm, T_logits, kSt, kHt, kVt);
-        {
-            TIMED("dec:logits_readback");
-            tt::foil::read_buffer(*dev, *T_logits.buf, logits_tiles.data(), logits_tiles.size() * 2);
-        }
-        auto dec_logits_rm = untile2d(logits_tiles, kS, kV);
+        // Device-side argmax over row 0 of T_logits (single-core BRISC
+        // scan in ops/argmax_row0). Replaces the 9.7-MB tile readback +
+        // CPU argmax with a 4-byte readback.
+        run1("dec:argmax", [&] {
+            return ol::make_argmax_row0(*dev, T_logits, kVt, T_argmax, core);
+        });
         uint32_t nxt = 0;
-        float best = -1e30f;
-        for (uint32_t v = 0; v < kV; ++v) {
-            float lv = bf16_to_f32(dec_logits_rm[v]);
-            if (lv > best) { best = lv; nxt = v; }
+        {
+            TIMED("dec:argmax_readback");
+            tt::foil::read_buffer(*dev, *T_argmax.buf, &nxt, 4);
         }
         std::printf("%u\n", nxt);
         std::fflush(stdout);

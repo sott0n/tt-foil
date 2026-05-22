@@ -292,6 +292,30 @@ void set_embedding_args(tt::foil::Device& dev, EmbeddingOp& op,
 void execute(tt::foil::Device& dev, EmbeddingOp& op);
 
 // =====================================================================
+// ArgmaxRow0 (BRISC scan + NCRISC writer, no compute)
+//   Given a [Mt=1, Vt] tile-format BF16 buffer, find the column index of
+//   the maximum value in row 0 and write a 4-byte uint32_t to the output
+//   DRAM buffer.
+//
+// Output (`out`) must be a 4-byte DRAM buffer (allocate one yourself or
+// leave the shared_ptr null and the factory will allocate it).
+// =====================================================================
+struct ArgmaxRow0Op {
+    std::shared_ptr<tt::foil::Kernel> kernel;
+    std::shared_ptr<tt::foil::Buffer> l1_out;
+};
+ArgmaxRow0Op make_argmax_row0(tt::foil::Device& dev,
+                              const TensorDesc& logits,
+                              uint32_t Vt,
+                              TensorDesc& out,
+                              tt::foil::CoreCoord core = {},
+                              const std::string& kernel_dir = "");
+void set_argmax_row0_args(tt::foil::Device& dev, ArgmaxRow0Op& op,
+                          const TensorDesc& logits, uint32_t Vt,
+                          const TensorDesc& out);
+void execute(tt::foil::Device& dev, ArgmaxRow0Op& op);
+
+// =====================================================================
 // RoPE (Rotary Position Embedding)
 //   Applies RoPE in-place to a packed multi-head Q or K buffer.
 //

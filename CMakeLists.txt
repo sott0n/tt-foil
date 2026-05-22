@@ -48,6 +48,7 @@ add_library(tt_foil STATIC
     src/op_lib/transpose_2d.cpp
     src/op_lib/gqa_fused.cpp
     src/op_lib/gqa_decode.cpp
+    src/op_lib/argmax_row0.cpp
 )
 add_library(TT::Foil ALIAS tt_foil)
 
