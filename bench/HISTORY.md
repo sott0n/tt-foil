@@ -40,6 +40,33 @@ Other movers worth noting in this profile:
   The 1.1ms drop is consistent across categories; it is not the
   matmul-grid win.
 
+## Iter 6 finding: iter3's "any extra dispatch corrupts" was a kernel bug, not a runtime bug
+
+While re-attacking device-side argmax (priority 1, 1.04 s decode bar),
+we built a minimal reproducer (`tests/test_post_matmul_dispatch.cpp`)
+that runs `matmul_grid(1×4)` → `silu(single core)` in a loop and
+checks both outputs for cross-step stability. **It passes** — no
+corruption.
+
+Then we exercised the full qwen3_run pipeline with a `TT_FOIL_PROBE_EXTRA_DISPATCH`
+flag that injects 1 or 10 extra silu dispatches between `dec:lm_head`
+and `dec:logits_readback`. Greedy tokens stay bit-identical
+(`2303, 220, 220, 16, 13`) in every case. So **the dispatch protocol is
+correct**; what iter3 hit was almost certainly a bug in the iter3
+device-side argmax kernel itself (likely in the CB-staged write or
+the host→L1 path of the result slot — the 0x35858A86 garbage observed
+was deterministic, suggesting one specific uninitialized region kept
+showing through).
+
+Implications:
+- We can write a fresh `ops/argmax_row0` kernel with confidence the
+  runtime will dispatch it correctly.
+- The `release_kernels` + `reset_l1` pattern stays valid and does not
+  introduce hidden state-leak across decode steps.
+
+`tests/test_post_matmul_dispatch.cpp` stays in tree as a regression
+guard so we catch any future dispatch-protocol regression early.
+
 ## Iter 3 abandoned: tried 8-core grid + device-side argmax
 
 **8-core grid** (1×8 instead of 1×4): tried for FFN/QKV. Decode regressed

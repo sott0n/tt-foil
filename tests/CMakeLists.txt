@@ -276,6 +276,13 @@ tt_foil_hw_test(test_gqa_decode_op test_gqa_decode_op.cpp "${OPS}/gqa_decode/pre
 _tt_default(MM_OP_MT 2)
 _tt_default(MM_OP_KT 4)
 _tt_default(MM_OP_NT 2)
+# Minimal iter3 chip-state reproducer: matmul_grid + single-core silu.
+# Needs both matmul/prebuilt and eltwise_unary/prebuilt → use TT_FOIL_OPS_DIR.
+tt_foil_hw_test(test_post_matmul_dispatch test_post_matmul_dispatch.cpp "${OPS}")
+set_tests_properties(test_post_matmul_dispatch PROPERTIES
+    ENVIRONMENT "TT_FOIL_OPS_DIR=${OPS};TT_FOIL_DEVICE=${TT_FOIL_DEVICE}")
+set_tests_properties(test_post_matmul_dispatch PROPERTIES TIMEOUT 60)
+
 tt_foil_hw_test(test_matmul_op test_matmul_op.cpp "${OPS}/matmul/prebuilt"
     "MM_OP_MT=${MM_OP_MT}" "MM_OP_KT=${MM_OP_KT}" "MM_OP_NT=${MM_OP_NT}")
 # KV cache (Phase 1-C minimum): no kernels, but needs HW for buffer R/W.
