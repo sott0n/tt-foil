@@ -38,6 +38,43 @@ Other movers worth noting in this profile:
   The 1.1ms drop is consistent across categories; it is not the
   matmul-grid win.
 
+## Iter 3 abandoned: tried 8-core grid + device-side argmax
+
+**8-core grid** (1×8 instead of 1×4): tried for FFN/QKV. Decode regressed
+from 10.07s to 11.44s. With Mt=1, per-core compute is so small that the
+extra dispatch overhead from 8 cores outweighs the parallelism gain.
+1×4 stays the sweet spot for these shapes. (No commit — finding is recorded
+here.)
+
+**Device-side argmax** (replace 9.7-MB host readback + CPU argmax with a
+4-byte device argmax + 4-byte read): hit a hard-to-debug chip-side
+state-corruption bug. Adding **any** extra kernel dispatch on **any** core
+inside the decode body — even a literal no-op `void kernel_main(){}` —
+causes subsequent decode steps to produce different tokens against the
+same inputs. Tested:
+
+- BRISC-only kernel → diverges
+- BRISC + NCRISC (mirroring embedding's RISC list) → diverges
+- No-op kernel bodies → diverges
+- Dispatch on (0,1) instead of (0,0) → diverges
+- 50 ms host-side sleep after lm_head (in case writers were still
+  draining NOC traffic) → diverges
+- Dispatch inside the layer body (after the last `add` of layer 0)
+  rather than after `lm_head` → diverges (even step 0 corrupts)
+- CB-staged structure exactly mirroring `ops/embedding/` (one staging
+  CB, one result CB drained by NCRISC) → diverges (writes 0x35858A86
+  garbage to the result slot every step — looks like the CPU L1 store
+  isn't reaching NCRISC's read of the CB, even with a `fence`)
+
+So the bug isn't argmax-specific; it's that something about the chip
+state after lm_head makes the next single-core dispatch unsafe. Not the
+existing layer-body single-core dispatches that work fine throughout
+iter 2 — those happen between matmul grid calls *inside* the layer.
+
+Filed as a known runtime gap; reverted the argmax exploration in full.
+Next iter should attack a different bar (prefill grid, weight
+pre-bake) and revisit argmax once the dispatch behavior is understood.
+
 ## Iter 1 finding: L1 budget caps persistent-op design at ~855 KB
 
 We attempted to lift all op handles out of the layer/step loops to amortize the 3.5ms per-dispatch ELF-NOC-write cost. The dispatch cache (`Device::resident_kernels`) was put in place to make that possible. But the L1 *user* arena on Blackhole is only ~855 KB per Tensix core (HAL `DEFAULT_UNRESERVED` size), and a single persistent RMSNorm handle for the hidden-dim shape (NCHt=1, Wt=64) eats ~522 KB by itself (four Wt-deep CBs × 128 KB). Add gqa_decode (~70 KB), embedding (4–128 KB), three RMSNorm shapes, matmul, two ropes, eltwise×3, and we overflow.
