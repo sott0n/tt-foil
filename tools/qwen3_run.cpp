@@ -18,15 +18,19 @@
 //   TT_FOIL_DEVICE      — PCIe chip index (optional, default 0)
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <future>
 #include <map>
+#include <semaphore>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -160,8 +164,15 @@ struct LayerW {
     tt::foil::op_lib::TensorDesc Wq, Wk, Wv, Wo;
     tt::foil::op_lib::TensorDesc Wgate, Wup, Wdown;
 };
-LayerW load_and_upload_layer(tt::foil::Device& dev, const std::string& d) {
-    namespace ol = tt::foil::op_lib;
+
+// CPU-only stage: load 11 .bin files from disk and tile-ize them. No
+// device interaction so safe to run on worker threads in parallel.
+struct TiledLayer {
+    std::vector<uint16_t> ln1g, ln2g, qng, kng;
+    std::vector<uint16_t> Wq, Wk, Wv, Wo;
+    std::vector<uint16_t> Wgate, Wup, Wdown;
+};
+TiledLayer prepare_layer(const std::string& d) {
     auto LD = [&](const char* n, std::size_t k) { return load_bin(d + "/" + n, k); };
     auto ln1g  = LD("ln1_gamma.bin", kH);
     auto ln2g  = LD("ln2_gamma.bin", kH);
@@ -177,6 +188,25 @@ LayerW load_and_upload_layer(tt::foil::Device& dev, const std::string& d) {
     const float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(kHeadDim));
     for (auto& v : qng) v = f32_to_bf16(bf16_to_f32(v) * inv_sqrt_d);
 
+    TiledLayer T;
+    T.ln1g  = gamma_to_tiles(ln1g, kH);
+    T.ln2g  = gamma_to_tiles(ln2g, kH);
+    T.qng   = gamma_to_tiles(qng,  kHeadDim);
+    T.kng   = gamma_to_tiles(kng,  kHeadDim);
+    T.Wq    = tile2d(Wq,    kH,   kNumQ  * kHeadDim);
+    T.Wk    = tile2d(Wk,    kH,   kNumKv * kHeadDim);
+    T.Wv    = tile2d(Wv,    kH,   kNumKv * kHeadDim);
+    T.Wo    = tile2d(Wo,    kNumQ * kHeadDim, kH);
+    T.Wgate = tile2d(Wgate, kH,   kFFN);
+    T.Wup   = tile2d(Wup,   kH,   kFFN);
+    T.Wdown = tile2d(Wdown, kFFN, kH);
+    return T;
+}
+
+// Device-side: allocate DRAM tensors and upload bytes. Single-threaded
+// (DRAM bump-allocator + UMD write_to_device not thread-safe).
+LayerW upload_layer(tt::foil::Device& dev, const TiledLayer& T) {
+    namespace ol = tt::foil::op_lib;
     LayerW L;
     L.ln1g  = ol::allocate_tensor_dram(dev, kHt);
     L.ln2g  = ol::allocate_tensor_dram(dev, kHt);
@@ -192,17 +222,17 @@ LayerW load_and_upload_layer(tt::foil::Device& dev, const std::string& d) {
     auto up = [&](auto& t, const std::vector<uint16_t>& d) {
         tt::foil::write_buffer(dev, *t.buf, d.data(), d.size() * 2);
     };
-    up(L.ln1g,  gamma_to_tiles(ln1g, kH));
-    up(L.ln2g,  gamma_to_tiles(ln2g, kH));
-    up(L.qng,   gamma_to_tiles(qng,  kHeadDim));
-    up(L.kng,   gamma_to_tiles(kng,  kHeadDim));
-    up(L.Wq,    tile2d(Wq,    kH,   kNumQ  * kHeadDim));
-    up(L.Wk,    tile2d(Wk,    kH,   kNumKv * kHeadDim));
-    up(L.Wv,    tile2d(Wv,    kH,   kNumKv * kHeadDim));
-    up(L.Wo,    tile2d(Wo,    kNumQ * kHeadDim, kH));
-    up(L.Wgate, tile2d(Wgate, kH,   kFFN));
-    up(L.Wup,   tile2d(Wup,   kH,   kFFN));
-    up(L.Wdown, tile2d(Wdown, kFFN, kH));
+    up(L.ln1g,  T.ln1g);
+    up(L.ln2g,  T.ln2g);
+    up(L.qng,   T.qng);
+    up(L.kng,   T.kng);
+    up(L.Wq,    T.Wq);
+    up(L.Wk,    T.Wk);
+    up(L.Wv,    T.Wv);
+    up(L.Wo,    T.Wo);
+    up(L.Wgate, T.Wgate);
+    up(L.Wup,   T.Wup);
+    up(L.Wdown, T.Wdown);
     return L;
 }
 
@@ -233,13 +263,23 @@ int main(int argc, char** argv) try {
     // Inputs
     // -----------------------------------------------------------------
     auto token_ids = load_u32(prompt_path, kS);
-    std::fprintf(stderr, "loading embed_tokens (622 MB)...\n");
-    auto embed_table = load_bin(mdir + "/embed_tokens.bin",
-                                static_cast<std::size_t>(kV) * kH);
-    auto final_g = load_bin(mdir + "/final_norm.bin", kH);
-    std::fprintf(stderr, "loading lm_head_tiled.bin (622 MB)...\n");
-    auto lmhead_tiles = load_bin(mdir + "/lm_head_tiled.bin",
-                                 static_cast<std::size_t>(kHt) * kVt * kTileWords);
+    // Kick off the three big one-shot loads (embed_tokens 622 MB,
+    // lm_head_tiled 622 MB, final_norm gamma) in background threads so
+    // they overlap with host-side RoPE table generation and the 28-layer
+    // parallel weight pipeline below.
+    std::fprintf(stderr, "loading embed_tokens (622 MB) + lm_head (622 MB) in background...\n");
+    auto fut_embed_table = std::async(std::launch::async, [&]{
+        return load_bin(mdir + "/embed_tokens.bin",
+                        static_cast<std::size_t>(kV) * kH);
+    });
+    auto fut_lmhead_tiles = std::async(std::launch::async, [&]{
+        return load_bin(mdir + "/lm_head_tiled.bin",
+                        static_cast<std::size_t>(kHt) * kVt * kTileWords);
+    });
+    auto fut_final_g_tiles = std::async(std::launch::async, [&]{
+        auto g = load_bin(mdir + "/final_norm.bin", kH);
+        return gamma_to_tiles(g, kH);
+    });
 
     // RoPE host-side: build cos/sin row for any position.
     const uint32_t kHalf = kHeadDim / 2;
@@ -272,7 +312,7 @@ int main(int argc, char** argv) try {
     auto cos_tiles = tile2d(cos_rm, kS, kHalf);
     auto sin_tiles = tile2d(sin_rm, kS, kHalf);
     auto mask_tiles = tile2d(mask_rm, kS, kS);
-    auto final_g_tiles = gamma_to_tiles(final_g, kH);
+    auto final_g_tiles = fut_final_g_tiles.get();
 
     // -----------------------------------------------------------------
     // Open device, upload static tensors.
@@ -292,12 +332,18 @@ int main(int argc, char** argv) try {
         *dev, tt::foil::BufferLocation::DRAM,
         static_cast<std::size_t>(kV) * kH * 2);
     T_embed_table.num_tiles = 0;
-    tt::foil::write_buffer(*dev, *T_embed_table.buf, embed_table.data(),
-                           static_cast<std::size_t>(kV) * kH * 2);
+    {
+        auto embed_table = fut_embed_table.get();
+        tt::foil::write_buffer(*dev, *T_embed_table.buf, embed_table.data(),
+                               static_cast<std::size_t>(kV) * kH * 2);
+    }
 
     auto T_W_lm = ol::allocate_tensor_dram(*dev, kHt * kVt);
-    tt::foil::write_buffer(*dev, *T_W_lm.buf, lmhead_tiles.data(),
-                           lmhead_tiles.size() * 2);
+    {
+        auto lmhead_tiles = fut_lmhead_tiles.get();
+        tt::foil::write_buffer(*dev, *T_W_lm.buf, lmhead_tiles.data(),
+                               lmhead_tiles.size() * 2);
+    }
 
     auto T_cos     = ol::allocate_tensor_dram(*dev, kSt * kDtHalf);
     auto T_sin     = ol::allocate_tensor_dram(*dev, kSt * kDtHalf);
@@ -408,13 +454,47 @@ int main(int argc, char** argv) try {
     // Layer weights — load all 28 layers before building ops so that
     // make_* can use real layer-0 tensors for the initial CB sizing.
     // -----------------------------------------------------------------
-    std::fprintf(stderr, "loading %u layers...\n", kNumLayers);
-    std::vector<LayerW> layers;
-    layers.reserve(kNumLayers);
+    std::fprintf(stderr, "loading %u layers (parallel pipeline)...\n", kNumLayers);
+    std::vector<LayerW> layers(kNumLayers);
     {
         TIMED("weights:load+upload(28L)");
-        for (uint32_t i = 0; i < kNumLayers; ++i)
-            layers.push_back(load_and_upload_layer(*dev, root + "/layer" + std::to_string(i)));
+        // Bounded producer/consumer pipeline:
+        //   W worker threads call prepare_layer (disk read + tile2d, CPU
+        //     bound, ~80 MB output per layer)
+        //   main thread consumes futures in order and calls upload_layer
+        //     (DRAM allocate + write_buffer, single-threaded on UMD)
+        //   counting_semaphore caps RAM by limiting in-flight prepared
+        //     layers to kInFlight (≈ kInFlight × 80 MB).
+        constexpr uint32_t kWorkers  = 4;
+        constexpr uint32_t kInFlight = 6;  // worker slots + a little queue
+        std::counting_semaphore<kInFlight> slots{kInFlight};
+        std::vector<std::promise<TiledLayer>> proms(kNumLayers);
+        std::vector<std::future<TiledLayer>>  futs(kNumLayers);
+        for (uint32_t i = 0; i < kNumLayers; ++i) futs[i] = proms[i].get_future();
+
+        std::atomic<uint32_t> next{0};
+        std::vector<std::thread> workers;
+        workers.reserve(kWorkers);
+        for (uint32_t w = 0; w < kWorkers; ++w) {
+            workers.emplace_back([&]{
+                for (;;) {
+                    uint32_t i = next.fetch_add(1, std::memory_order_relaxed);
+                    if (i >= kNumLayers) return;
+                    slots.acquire();  // wait for free RAM slot
+                    try {
+                        proms[i].set_value(prepare_layer(root + "/layer" + std::to_string(i)));
+                    } catch (...) {
+                        proms[i].set_exception(std::current_exception());
+                    }
+                }
+            });
+        }
+        for (uint32_t i = 0; i < kNumLayers; ++i) {
+            auto tl = futs[i].get();
+            slots.release();  // free RAM slot now that we own the bytes
+            layers[i] = upload_layer(*dev, tl);
+        }
+        for (auto& t : workers) t.join();
     }
 
     // -----------------------------------------------------------------
