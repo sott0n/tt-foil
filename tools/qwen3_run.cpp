@@ -428,10 +428,9 @@ int main(int argc, char** argv) try {
     upload(T_layer_in, tile2d(hidden_rm, kS, kH));
 
     // -----------------------------------------------------------------
-    // Prefill — one-shot per op (release_kernels+reset_l1 between),
-    // because layer-rmsnorm + gqa_fused together overrun the L1
-    // user arena if held persistent. Persistent ops are built AFTER
-    // prefill, dedicated to the decode shape mix.
+    // Prefill — same one-shot dispatch pattern as decode. Matmul calls
+    // (QKV, O, FFN gate/up/down, lm_head) use run_matmul_grid (1×4);
+    // every other op stays on (0,0) via run1.
     // -----------------------------------------------------------------
     {
     TIMED("prefill:total");
@@ -440,9 +439,9 @@ int main(int argc, char** argv) try {
         std::fprintf(stderr, "  prefill layer %u …\n", li);
 
         run1("pre:rmsnorm",    [&] { return ol::make_rmsnorm(*dev, T_layer_in, w.ln1g, T_xnorm1, kSt, kHt, kEps); });
-        run1("pre:matmul_qkv", [&] { return ol::make_matmul(*dev, T_xnorm1, w.Wq, T_Q, kSt, kHt, kNqDt); });
-        run1("pre:matmul_qkv", [&] { return ol::make_matmul(*dev, T_xnorm1, w.Wk, T_K, kSt, kHt, kNkDt); });
-        run1("pre:matmul_qkv", [&] { return ol::make_matmul(*dev, T_xnorm1, w.Wv, T_V, kSt, kHt, kNkDt); });
+        run_matmul_grid("pre:matmul_qkv", T_xnorm1, w.Wq, T_Q, kSt, kHt, kNqDt);
+        run_matmul_grid("pre:matmul_qkv", T_xnorm1, w.Wk, T_K, kSt, kHt, kNkDt);
+        run_matmul_grid("pre:matmul_qkv", T_xnorm1, w.Wv, T_V, kSt, kHt, kNkDt);
         run1("pre:rmsnorm_qk", [&] { return ol::make_rmsnorm(*dev, T_Q, w.qng, T_Qn, kSt * kNumQ,  kDt, kEps); });
         run1("pre:rmsnorm_qk", [&] { return ol::make_rmsnorm(*dev, T_K, w.kng, T_Kn, kSt * kNumKv, kDt, kEps); });
         run1("pre:rope",       [&] { return ol::make_rope(*dev, T_Qn, T_cos, T_sin, T_Qr, kSt, kNumQ,  kDtHalf); });
@@ -478,14 +477,14 @@ int main(int argc, char** argv) try {
             return ol::make_gqa_fused(*dev, T_Qr, T_Kt, T_V, T_mask, T_attn,
                                       kSt, kDt, kNumQ, kNumKv);
         });
-        run1("pre:matmul_o",   [&] { return ol::make_matmul(*dev, T_attn, w.Wo, T_proj, kSt, kNqDt, kHt); });
+        run_matmul_grid("pre:matmul_o", T_attn, w.Wo, T_proj, kSt, kNqDt, kHt);
         run1("pre:add",        [&] { return ol::make_eltwise_add(*dev, T_layer_in, T_proj, T_xmid); });
         run1("pre:rmsnorm",    [&] { return ol::make_rmsnorm(*dev, T_xmid, w.ln2g, T_ynorm, kSt, kHt, kEps); });
-        run1("pre:matmul_ffn", [&] { return ol::make_matmul(*dev, T_ynorm, w.Wgate, T_gate, kSt, kHt, kFFt); });
-        run1("pre:matmul_ffn", [&] { return ol::make_matmul(*dev, T_ynorm, w.Wup,   T_up,   kSt, kHt, kFFt); });
+        run_matmul_grid("pre:matmul_ffn", T_ynorm, w.Wgate, T_gate, kSt, kHt, kFFt);
+        run_matmul_grid("pre:matmul_ffn", T_ynorm, w.Wup,   T_up,   kSt, kHt, kFFt);
         run1("pre:silu",       [&] { return ol::make_silu(*dev, T_gate, T_silu); });
         run1("pre:mul",        [&] { return ol::make_eltwise_mul(*dev, T_silu, T_up, T_fused); });
-        run1("pre:matmul_ffn", [&] { return ol::make_matmul(*dev, T_fused, w.Wdown, T_down, kSt, kFFt, kHt); });
+        run_matmul_grid("pre:matmul_ffn", T_fused, w.Wdown, T_down, kSt, kFFt, kHt);
         run1("pre:add",        [&] { return ol::make_eltwise_add(*dev, T_xmid, T_down, T_layer_out); });
         std::swap(T_layer_in, T_layer_out);
     }
@@ -494,7 +493,7 @@ int main(int argc, char** argv) try {
     // Prefill final norm + lm_head → argmax(row S-1) is the first decode input.
     std::fprintf(stderr, "  prefill final norm + lm_head ...\n");
     run1("pre:final_rmsnorm", [&] { return ol::make_rmsnorm(*dev, T_layer_in, T_final_g, T_normed, kSt, kHt, kEps); });
-    run1("pre:lm_head",       [&] { return ol::make_matmul(*dev, T_normed, T_W_lm, T_logits, kSt, kHt, kVt); });
+    run_matmul_grid("pre:lm_head", T_normed, T_W_lm, T_logits, kSt, kHt, kVt);
     std::vector<uint16_t> logits_tiles(static_cast<size_t>(kSt) * kVt * kTileWords);
     {
         TIMED("pre:logits_readback");
