@@ -316,6 +316,30 @@ void set_argmax_row0_args(tt::foil::Device& dev, ArgmaxRow0Op& op,
 void execute(tt::foil::Device& dev, ArgmaxRow0Op& op);
 
 // =====================================================================
+// KvAppend — device-side decode KV-cache append (BRISC only).
+//   Reads the post-RoPE K row and the V row from T_Kr / T_V, writes
+//   them into the per-layer K^T cache (slot1, col slot1_r) and V cache
+//   (slot1, row slot1_r). Replaces qwen3_run's host-side
+//   `dec:kv_slot1_rebuild` step.
+// =====================================================================
+struct KvAppendOp {
+    std::shared_ptr<tt::foil::Kernel> kernel;
+    std::shared_ptr<tt::foil::Buffer> l1_scratch;
+};
+KvAppendOp make_kv_append(tt::foil::Device& dev,
+                          const TensorDesc& kr, const TensorDesc& v,
+                          const TensorDesc& kt_cache,
+                          const TensorDesc& v_cache,
+                          uint32_t slot1_r, uint32_t Nk, uint32_t StKv,
+                          tt::foil::CoreCoord core = {},
+                          const std::string& kernel_dir = "");
+void set_kv_append_args(tt::foil::Device& dev, KvAppendOp& op,
+                        const TensorDesc& kr, const TensorDesc& v,
+                        const TensorDesc& kt_cache, const TensorDesc& v_cache,
+                        uint32_t slot1_r, uint32_t Nk, uint32_t StKv);
+void execute(tt::foil::Device& dev, KvAppendOp& op);
+
+// =====================================================================
 // RoPE (Rotary Position Embedding)
 //   Applies RoPE in-place to a packed multi-head Q or K buffer.
 //

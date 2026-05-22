@@ -707,24 +707,12 @@ int main(int argc, char** argv) try {
             run1("dec:rope",       [&] { return ol::make_rope(*dev, T_Kn, T_dcos, T_dsin, T_Kr, kSt, kNumKv, kDtHalf); });
 
             {
-                TIMED("dec:kv_slot1_rebuild(host)");
                 const uint32_t slot1_r = pos - kS;
-                std::vector<uint16_t> Kr_tiles(static_cast<size_t>(kSt) * kNkDt * kTileWords);
-                std::vector<uint16_t> V_tiles (static_cast<size_t>(kSt) * kNkDt * kTileWords);
-                tt::foil::read_buffer(*dev, *T_Kr.buf, Kr_tiles.data(), Kr_tiles.size() * 2);
-                tt::foil::read_buffer(*dev, *T_V.buf,  V_tiles.data(),  V_tiles.size()  * 2);
-                auto Kr_rm = untile2d(Kr_tiles, kTileH, kTotalNk);
-                auto V_rm  = untile2d(V_tiles,  kTileH, kTotalNk);
-                for (uint32_t c = 0; c < kTotalNk; ++c) {
-                    cache_K_slot1_rm[li][slot1_r * kTotalNk + c] = Kr_rm[c];
-                    cache_V_slot1_rm[li][slot1_r * kTotalNk + c] = V_rm [c];
-                }
-                auto KT_slot1 = build_slot1_KT_tiles(cache_K_slot1_rm[li]);
-                auto V_slot1  = build_slot1_V_tiles (cache_V_slot1_rm[li]);
-                tt::foil::write_buffer(*dev, *T_Kt_cache[li].buf, kSlot0Bytes,
-                                       KT_slot1.data(), KT_slot1.size() * 2);
-                tt::foil::write_buffer(*dev, *T_V_cache[li].buf, kSlot0Bytes,
-                                       V_slot1.data(),  V_slot1.size()  * 2);
+                run1("dec:kv_append", [&] {
+                    return ol::make_kv_append(*dev, T_Kr, T_V,
+                                              T_Kt_cache[li], T_V_cache[li],
+                                              slot1_r, kNkDt, kStKvDec, core);
+                });
             }
 
             run1("dec:gqa_decode", [&] {
