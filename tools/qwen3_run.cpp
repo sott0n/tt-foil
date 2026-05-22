@@ -168,12 +168,15 @@ std::vector<uint16_t> gamma_to_tiles(const std::vector<uint16_t>& g, uint32_t D)
 // So one matmul(A=hidden, B=Wqkv, Mt=1, Kt=kHt, Nt=kNqkvDt) produces a
 // single QKV-concat tensor; downstream T_Q/T_K/T_V are zero-copy
 // offset views into it.
-constexpr uint32_t kNqkvDt = kNqDt + 2 * kNkDt;   // 64 + 32 + 32 = 128
+constexpr uint32_t kNqkvDt   = kNqDt + 2 * kNkDt;  // 64 + 32 + 32 = 128
+constexpr uint32_t kFFtFused = 2 * kFFt;           // gate + up
 
 struct LayerW {
     tt::foil::op_lib::TensorDesc ln1g, ln2g, qng, kng;
     tt::foil::op_lib::TensorDesc Wqkv, Wo;
-    tt::foil::op_lib::TensorDesc Wgate, Wup, Wdown;
+    // iter8: Wgate + Wup are fused along Nt into Wgateup. Wdown is
+    // separate because it operates on the post-silu * up product.
+    tt::foil::op_lib::TensorDesc Wgateup, Wdown;
 };
 
 // CPU-only stage: load 11 .bin files from disk and tile-ize them. No
@@ -181,7 +184,7 @@ struct LayerW {
 struct TiledLayer {
     std::vector<uint16_t> ln1g, ln2g, qng, kng;
     std::vector<uint16_t> Wqkv, Wo;          // Wqkv = concat(Wq, Wk, Wv) along Nt
-    std::vector<uint16_t> Wgate, Wup, Wdown;
+    std::vector<uint16_t> Wgateup, Wdown;    // Wgateup = concat(Wgate, Wup) along Nt
 };
 TiledLayer prepare_layer(const std::string& d) {
     auto LD = [&](const char* n, std::size_t k) { return load_bin(d + "/" + n, k); };
@@ -221,8 +224,16 @@ TiledLayer prepare_layer(const std::string& d) {
         append(Wv_t, kNkDt);
     }
     T.Wo    = tile2d(Wo,    kNumQ * kHeadDim, kH);
-    T.Wgate = tile2d(Wgate, kH,   kFFN);
-    T.Wup   = tile2d(Wup,   kH,   kFFN);
+    // Concat Wgate | Wup along Nt, kt-row by kt-row. Same pattern as Wqkv.
+    auto Wgate_t = tile2d(Wgate, kH, kFFN);
+    auto Wup_t   = tile2d(Wup,   kH, kFFN);
+    T.Wgateup.reserve(static_cast<size_t>(kHt) * kFFtFused * kTileWords);
+    for (uint32_t kt = 0; kt < kHt; ++kt) {
+        const size_t row_words_ff = static_cast<size_t>(kFFt) * kTileWords;
+        const size_t off = static_cast<size_t>(kt) * row_words_ff;
+        T.Wgateup.insert(T.Wgateup.end(), Wgate_t.begin() + off, Wgate_t.begin() + off + row_words_ff);
+        T.Wgateup.insert(T.Wgateup.end(), Wup_t.begin()   + off, Wup_t.begin()   + off + row_words_ff);
+    }
     T.Wdown = tile2d(Wdown, kFFN, kH);
     return T;
 }
@@ -238,9 +249,8 @@ LayerW upload_layer(tt::foil::Device& dev, const TiledLayer& T) {
     L.kng   = ol::allocate_tensor_dram(dev, kDt);
     L.Wqkv  = ol::allocate_tensor_dram(dev, kHt * kNqkvDt);
     L.Wo    = ol::allocate_tensor_dram(dev, kNqDt * kHt);
-    L.Wgate = ol::allocate_tensor_dram(dev, kHt * kFFt);
-    L.Wup   = ol::allocate_tensor_dram(dev, kHt * kFFt);
-    L.Wdown = ol::allocate_tensor_dram(dev, kFFt * kHt);
+    L.Wgateup = ol::allocate_tensor_dram(dev, kHt * kFFtFused);
+    L.Wdown   = ol::allocate_tensor_dram(dev, kFFt * kHt);
     auto up = [&](auto& t, const std::vector<uint16_t>& d) {
         tt::foil::write_buffer(dev, *t.buf, d.data(), d.size() * 2);
     };
@@ -249,10 +259,9 @@ LayerW upload_layer(tt::foil::Device& dev, const TiledLayer& T) {
     up(L.qng,   T.qng);
     up(L.kng,   T.kng);
     up(L.Wqkv,  T.Wqkv);
-    up(L.Wo,    T.Wo);
-    up(L.Wgate, T.Wgate);
-    up(L.Wup,   T.Wup);
-    up(L.Wdown, T.Wdown);
+    up(L.Wo,      T.Wo);
+    up(L.Wgateup, T.Wgateup);
+    up(L.Wdown,   T.Wdown);
     return L;
 }
 
@@ -409,8 +418,21 @@ int main(int argc, char** argv) try {
     auto T_proj  = ol::allocate_tensor_dram(*dev, kSt * kHt);
     auto T_xmid  = ol::allocate_tensor_dram(*dev, kSt * kHt);
     auto T_ynorm = ol::allocate_tensor_dram(*dev, kSt * kHt);
-    auto T_gate  = ol::allocate_tensor_dram(*dev, kSt * kFFt);
-    auto T_up    = ol::allocate_tensor_dram(*dev, kSt * kFFt);
+    // Fused gate+up matmul output buffer; T_gate and T_up are zero-copy
+    // offset views into it (same trick as T_QKV).
+    auto T_gateup = ol::allocate_tensor_dram(*dev, kSt * kFFtFused);
+    auto gateup_base = T_gateup.buf->device_addr;
+    auto make_ff_view = [&](uint32_t tile_offset, uint32_t num_tiles_view) {
+        ol::TensorDesc v;
+        v.buf = std::make_shared<tt::foil::Buffer>();
+        v.buf->location    = tt::foil::BufferLocation::DRAM;
+        v.buf->device_addr = gateup_base + static_cast<uint64_t>(tile_offset) * kTileBytes;
+        v.buf->size_bytes  = static_cast<std::size_t>(num_tiles_view) * kTileBytes;
+        v.num_tiles        = num_tiles_view;
+        return v;
+    };
+    auto T_gate  = make_ff_view(0,                 kSt * kFFt);
+    auto T_up    = make_ff_view(kSt * kFFt,        kSt * kFFt);
     auto T_silu  = ol::allocate_tensor_dram(*dev, kSt * kFFt);
     auto T_fused = ol::allocate_tensor_dram(*dev, kSt * kFFt);
     auto T_down  = ol::allocate_tensor_dram(*dev, kSt * kHt);
@@ -605,8 +627,9 @@ int main(int argc, char** argv) try {
         run_matmul_grid("pre:matmul_o", T_attn, w.Wo, T_proj, kSt, kNqDt, kHt);
         run1("pre:add",        [&] { return ol::make_eltwise_add(*dev, T_layer_in, T_proj, T_xmid); });
         run1("pre:rmsnorm",    [&] { return ol::make_rmsnorm(*dev, T_xmid, w.ln2g, T_ynorm, kSt, kHt, kEps); });
-        run_matmul_grid("pre:matmul_ffn", T_ynorm, w.Wgate, T_gate, kSt, kHt, kFFt);
-        run_matmul_grid("pre:matmul_ffn", T_ynorm, w.Wup,   T_up,   kSt, kHt, kFFt);
+        // Fused gate+up matmul (iter8). One dispatch instead of two; T_gate
+        // and T_up are pre-set offset views into T_gateup.
+        run_matmul_grid("pre:matmul_ffn", T_ynorm, w.Wgateup, T_gateup, kSt, kHt, kFFtFused);
         run1("pre:silu",       [&] { return ol::make_silu(*dev, T_gate, T_silu); });
         run1("pre:mul",        [&] { return ol::make_eltwise_mul(*dev, T_silu, T_up, T_fused); });
         run_matmul_grid("pre:matmul_ffn", T_fused, w.Wdown, T_down, kSt, kFFt, kHt);
@@ -712,8 +735,8 @@ int main(int argc, char** argv) try {
             run_matmul_grid("dec:matmul_o", T_attn, w.Wo, T_proj, kSt, kNqDt, kHt);
             run1("dec:add",        [&] { return ol::make_eltwise_add(*dev, T_layer_in, T_proj, T_xmid); });
             run1("dec:rmsnorm",    [&] { return ol::make_rmsnorm(*dev, T_xmid, w.ln2g, T_ynorm, kSt, kHt, kEps); });
-            run_matmul_grid("dec:matmul_ffn", T_ynorm, w.Wgate, T_gate, kSt, kHt, kFFt);
-            run_matmul_grid("dec:matmul_ffn", T_ynorm, w.Wup,   T_up,   kSt, kHt, kFFt);
+            // Fused gate+up matmul (iter8). One dispatch instead of two.
+            run_matmul_grid("dec:matmul_ffn", T_ynorm, w.Wgateup, T_gateup, kSt, kHt, kFFtFused);
             run1("dec:silu",       [&] { return ol::make_silu(*dev, T_gate, T_silu); });
             run1("dec:mul",        [&] { return ol::make_eltwise_mul(*dev, T_silu, T_up, T_fused); });
             run_matmul_grid("dec:matmul_ffn", T_fused, w.Wdown, T_down, kSt, kFFt, kHt);
