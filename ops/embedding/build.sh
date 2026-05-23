@@ -32,7 +32,7 @@ if [[ -z "${TT_METAL_PRECOMPILED:-}" ]]; then
     fi
 fi
 if [[ -z "${TT_METAL_PRECOMPILED:-}" ]]; then
-    TT_METAL_PRECOMPILED=$(ls -1dt "$HOME"/.cache/tt-metal-cache/*/firmware 2>/dev/null | head -n1)
+    TT_METAL_PRECOMPILED=$(set +o pipefail; ls -1dt "$HOME"/.cache/tt-metal-cache/*/firmware 2>/dev/null | head -n1)
 fi
 [[ -d "$TT_METAL_PRECOMPILED" ]] || { echo "TT_METAL_PRECOMPILED not found"; exit 1; }
 echo "build: using firmware from $TT_METAL_PRECOMPILED"

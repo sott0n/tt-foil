@@ -48,7 +48,7 @@ if [[ -z "${TT_METAL_PRECOMPILED:-}" ]]; then
     fi
 fi
 if [[ -z "${TT_METAL_PRECOMPILED:-}" ]]; then
-    TT_METAL_PRECOMPILED=$(ls -1dt "$HOME"/.cache/tt-metal-cache/*/firmware 2>/dev/null | head -n1)
+    TT_METAL_PRECOMPILED=$(set +o pipefail; ls -1dt "$HOME"/.cache/tt-metal-cache/*/firmware 2>/dev/null | head -n1)
 fi
 if [[ -z "${TT_METAL_PRECOMPILED:-}" ]]; then
     TT_METAL_PRECOMPILED=$(find "$TT/tt_metal/pre-compiled" -maxdepth 1 -mindepth 1 -type d | head -n1)

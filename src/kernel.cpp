@@ -132,18 +132,12 @@ void release_kernels(Device& device, CoreCoord logical_core) {
 }
 
 void reset_l1(Device& device, CoreCoord logical_core) {
-    // Bump-allocator: simply rewind `current` to `base` for this core's
-    // user L1 arena. Any L1 Buffer the caller still references becomes
-    // stale (see runtime.hpp contract).
-    uint64_t key = Device::core_key(logical_core.x, logical_core.y);
-    auto it = device.l1_allocs.find(key);
-    if (it != device.l1_allocs.end()) it->second.reset();
-}
-
-void reset_l1(Device& device, CoreCoord logical_core) {
-    // Bump-allocator: simply rewind `current` to `base` for this core's
-    // user L1 arena. Any L1 Buffer the caller still references becomes
-    // stale (see runtime.hpp contract).
+    // iter21: L1Allocator::reset() now rewinds `current` to
+    // max(watermark, base). If pin_persistent set the watermark on
+    // this core, that op's L1 CB-backing buffers stay valid across
+    // this call; otherwise the behaviour matches the original
+    // (rewind to base). Any L1 Buffer the caller still references
+    // ABOVE the watermark becomes stale (see runtime.hpp contract).
     uint64_t key = Device::core_key(logical_core.x, logical_core.y);
     auto it = device.l1_allocs.find(key);
     if (it != device.l1_allocs.end()) it->second.reset();
