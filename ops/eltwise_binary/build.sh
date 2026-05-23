@@ -92,11 +92,20 @@ build_dataflow() {
 }
 
 build_compute() {
-    local src="$1" out_name="$2"
+    local src="$1" out_name="$2" cb24="${3:-}"
     echo "#include \"$src\"" > "$BUILD/kernel_includes.hpp"
 
-    # chlkc_list.h stub: CB 0, 1 (inputs), CB 16 (output) = bf16
-    cat > "$BUILD/chlkc_list.h" <<'EOF'
+    # chlkc_list.h stub: CB 0, 1 (inputs), CB 16 (output) = bf16.
+    # When cb24=cb24, also mark CB 24 (intermediate) as bf16 — silu_mul
+    # uses CB 24 to stage SiLU(A) before the mul step.
+    if [[ "$cb24" == "cb24" ]]; then
+        local R1="5,5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,"
+        local R2="5,255,255,255,255,255,255,255,5,255,255,255,255,255,255,255,"
+    else
+        local R1="5,5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,"
+        local R2="5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,"
+    fi
+    cat > "$BUILD/chlkc_list.h" <<EOF
 #pragma once
 #include <cstdint>
 constexpr bool DST_ACCUM_MODE = false;
@@ -106,22 +115,22 @@ constexpr bool APPROX = true;
 #include "llk_defs.h"
 constexpr ckernel::MathFidelity MATH_FIDELITY = static_cast<ckernel::MathFidelity>(4);  // HiFi4
 #endif
-// Float16_b (=5) for CB 0, 1, 16; 255 for others
+// Float16_b (=5) for CB 0, 1, 16 (and optionally 24); 255 for others
 constexpr unsigned char pack_src_format[32] = {
-    5,5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
-    5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+    ${R1}
+    ${R2}
 };
 constexpr unsigned char pack_dst_format[32] = {
-    5,5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
-    5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+    ${R1}
+    ${R2}
 };
 constexpr std::int32_t unpack_src_format[32] = {
-    5,5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
-    5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+    ${R1}
+    ${R2}
 };
 constexpr std::int32_t unpack_dst_format[32] = {
-    5,5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
-    5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+    ${R1}
+    ${R2}
 };
 constexpr std::uint8_t  pack_tile_num_faces[32]    = { 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4 };
 constexpr std::uint8_t  pack_partial_face[32]      = { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 };
@@ -173,3 +182,4 @@ build_dataflow brisc  0 "$HERE/reader.cpp" reader.brisc
 build_dataflow ncrisc 1 "$HERE/writer.cpp" writer.ncrisc
 build_compute "$HERE/compute_mul.cpp" mul
 build_compute "$HERE/compute_add.cpp" add
+build_compute "$HERE/compute_silu_mul.cpp" silu_mul cb24

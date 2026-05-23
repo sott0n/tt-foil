@@ -661,8 +661,7 @@ int main(int argc, char** argv) try {
         // Fused gate+up matmul (iter8). One dispatch instead of two; T_gate
         // and T_up are pre-set offset views into T_gateup.
         run_matmul_grid("pre:matmul_ffn", T_ynorm, w.Wgateup, T_gateup, kSt, kHt, kFFtFused);
-        run1("pre:silu",       [&] { return ol::make_silu(*dev, T_gate, T_silu); });
-        run1("pre:mul",        [&] { return ol::make_eltwise_mul(*dev, T_silu, T_up, T_fused); });
+        run1("pre:silu_mul",   [&] { return ol::make_silu_mul(*dev, T_gate, T_up, T_fused); });
         run_matmul_grid("pre:matmul_ffn", T_fused, w.Wdown, T_down, kSt, kFFt, kHt);
         run1("pre:add",        [&] { return ol::make_eltwise_add(*dev, T_xmid, T_down, T_layer_out); });
         std::swap(T_layer_in, T_layer_out);
@@ -756,8 +755,7 @@ int main(int argc, char** argv) try {
             run1("dec:rmsnorm",    [&] { return ol::make_rmsnorm(*dev, T_xmid, w.ln2g, T_ynorm, kSt, kHt, kEps); });
             // Fused gate+up matmul (iter8). One dispatch instead of two.
             run_matmul_grid("dec:matmul_ffn", T_ynorm, w.Wgateup, T_gateup, kSt, kHt, kFFtFused);
-            run1("dec:silu",       [&] { return ol::make_silu(*dev, T_gate, T_silu); });
-            run1("dec:mul",        [&] { return ol::make_eltwise_mul(*dev, T_silu, T_up, T_fused); });
+            run1("dec:silu_mul",   [&] { return ol::make_silu_mul(*dev, T_gate, T_up, T_fused); });
             run_matmul_grid("dec:matmul_ffn", T_fused, w.Wdown, T_down, kSt, kFFt, kHt);
             run1("dec:add",        [&] { return ol::make_eltwise_add(*dev, T_xmid, T_down, T_layer_out); });
             std::swap(T_layer_in, T_layer_out);

@@ -147,6 +147,27 @@ void set_eltwise_mul_args(tt::foil::Device& dev, EltwiseMulOp& op,
 void execute(tt::foil::Device& dev, EltwiseMulOp& op);
 
 // =====================================================================
+// SiluMul  (fused SwiGLU): out[i] = SiLU(a[i]) * b[i] per tile.
+// Replaces the silu→mul two-op chain that pays a 2× dispatch floor.
+// =====================================================================
+struct SiluMulOp {
+    std::shared_ptr<tt::foil::Kernel> kernel;
+    std::shared_ptr<tt::foil::Buffer> l1_a;
+    std::shared_ptr<tt::foil::Buffer> l1_b;
+    std::shared_ptr<tt::foil::Buffer> l1_s;   // intermediate SiLU(a)
+    std::shared_ptr<tt::foil::Buffer> l1_out;
+};
+SiluMulOp make_silu_mul(tt::foil::Device& dev,
+                        const TensorDesc& a, const TensorDesc& b,
+                        TensorDesc& out,
+                        tt::foil::CoreCoord core = {},
+                        const std::string& kernel_dir = "");
+void set_silu_mul_args(tt::foil::Device& dev, SiluMulOp& op,
+                       const TensorDesc& a, const TensorDesc& b,
+                       const TensorDesc& out);
+void execute(tt::foil::Device& dev, SiluMulOp& op);
+
+// =====================================================================
 // ElementwiseAdd
 //   y = a + b   (elementwise, per-tile) — Transformer residual connection
 // =====================================================================
