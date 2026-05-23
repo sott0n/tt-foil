@@ -40,14 +40,20 @@ MatMulOp make_matmul(tt::foil::Device& dev,
     const std::string dir = resolve_kernel_dir(kernel_dir, "matmul");
 
     MatMulOp op;
-    // iter12 + iter13: cb_a caches all Kt A tiles for one mt row;
-    // cb_b batches all Kt B tiles for one nt with a single
-    // noc_async_read_barrier. cb_out stays single-tile. Per-core L1:
-    // 2*Kt*kTileBytes + kTileBytes. Worst-case Qwen3 Kt=192 (FFN-down)
-    // → 770 KB, within the ~855 KB user L1 arena.
+    // iter12/13/14: cb_a caches all Kt A tiles for one mt row; cb_b
+    // batches Kt B tiles per nt. When L1 allows (6*Kt+2 ≤ ~855 KB,
+    // i.e. Kt ≤ 142), cb_b is double-deep (2*Kt) so the reader can
+    // prefetch the next nt-batch while the consumer is matmuling the
+    // current one — overlapping NOC reads with compute.
+    //
+    // Per-core L1 ceilings (D_b = cb_b tile depth):
+    //   D_b = 2*Kt: 6*Kt + 2 KB ≤ 855  →  Kt ≤ 142 (qkv/o/ffn-gateup/lm_head, all Kt=64)
+    //   D_b =   Kt: 4*Kt + 2 KB ≤ 855  →  Kt ≤ 213 (FFN-down Kt=192 stays here)
     const uint32_t cb_a_bytes = Kt * kTileBytes;
+    const uint32_t cb_b_tiles = ((6 * Kt + 2) <= 855) ? (2 * Kt) : Kt;
+    const uint32_t cb_b_bytes = cb_b_tiles * kTileBytes;
     op.l1_a   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, cb_a_bytes, core);
-    op.l1_b   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, cb_a_bytes, core);
+    op.l1_b   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, cb_b_bytes, core);
     op.l1_out = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, kTileBytes, core);
 
     using R = tt::foil::RiscBinary;
@@ -61,9 +67,9 @@ MatMulOp make_matmul(tt::foil::Device& dev,
     op.kernel = tt::foil::load_kernel(dev, bins, core);
 
     std::array<tt::foil::CbConfig, 3> cbs = {{
-        {0,  op.l1_a->device_addr,   cb_a_bytes, Kt, kTileBytes},
-        {1,  op.l1_b->device_addr,   cb_a_bytes, Kt, kTileBytes},
-        {16, op.l1_out->device_addr, kTileBytes, 1, kTileBytes},
+        {0,  op.l1_a->device_addr,   cb_a_bytes, Kt,         kTileBytes},
+        {1,  op.l1_b->device_addr,   cb_b_bytes, cb_b_tiles, kTileBytes},
+        {16, op.l1_out->device_addr, kTileBytes, 1,          kTileBytes},
     }};
     tt::foil::register_cbs(dev, *op.kernel, cbs);
 
@@ -162,18 +168,19 @@ MatMulGridOp make_matmul_grid(tt::foil::Device& dev,
     MatMulGridOp op;
     op.kernels.reserve(n_cores);
     op.l1_bufs.reserve(static_cast<std::size_t>(n_cores) * 3);
-    // iter12: cb_a caches all Kt A tiles per mt row (see make_matmul for
-    // L1 budget analysis).
+    // iter12/13/14: see make_matmul for L1 budget rationale.
     const uint32_t cb_a_bytes = Kt * kTileBytes;
+    const uint32_t cb_b_tiles = ((6 * Kt + 2) <= 855) ? (2 * Kt) : Kt;
+    const uint32_t cb_b_bytes = cb_b_tiles * kTileBytes;
     for (const auto& core : cores) {
         auto l1_a   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, cb_a_bytes, core);
-        auto l1_b   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, cb_a_bytes, core);
+        auto l1_b   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, cb_b_bytes, core);
         auto l1_out = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, kTileBytes, core);
         auto kernel = tt::foil::load_kernel(dev, bins, core);
         std::array<tt::foil::CbConfig, 3> cbs = {{
-            {0,  l1_a->device_addr,   cb_a_bytes, Kt, kTileBytes},
-            {1,  l1_b->device_addr,   cb_a_bytes, Kt, kTileBytes},
-            {16, l1_out->device_addr, kTileBytes, 1, kTileBytes},
+            {0,  l1_a->device_addr,   cb_a_bytes, Kt,         kTileBytes},
+            {1,  l1_b->device_addr,   cb_b_bytes, cb_b_tiles, kTileBytes},
+            {16, l1_out->device_addr, kTileBytes, 1,          kTileBytes},
         }};
         tt::foil::register_cbs(dev, *kernel, cbs);
         op.kernels.push_back(kernel);
