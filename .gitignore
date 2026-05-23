@@ -3,6 +3,10 @@ build/
 generated/
 .cpmcache/
 
+# tt-metal build output inside the submodule (the source is tracked by
+# the submodule pointer; its build tree is a local artifact).
+third_party/tt-metal/build_*/
+
 # tools/export_*.py download cache (CIFAR-10 tarball, pretrained checkpoints…)
 .cache/
 

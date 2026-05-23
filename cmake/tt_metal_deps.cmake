@@ -57,17 +57,20 @@ else()
     endif()
 endif()
 
+# ---- fmt (vendored by tt-metal's build) ----
+# Find fmt *before* umd: umdConfig.cmake's exported targets reference
+# fmt::fmt-header-only as a link dependency, so the target must exist
+# at find_package(umd) time. The HAL/llrt source we compile in also
+# references fmt::v11 internals via header expansion; without an
+# explicit link, downstream binaries see undefined references to
+# fmt::v11::detail::assert_fail and similar.
+find_package(fmt REQUIRED
+    PATHS "${TT_METAL_BUILD_DIR}/lib/cmake/fmt"
+    NO_DEFAULT_PATH)
+
 # ---- UMD (from tt-metal cmake package) ----
 find_package(umd REQUIRED
     PATHS "${TT_METAL_BUILD_DIR}/lib/cmake/umd"
-    NO_DEFAULT_PATH)
-
-# ---- fmt (vendored by tt-metal's build) ----
-# The HAL/llrt source we compile in references fmt::v11 internals via
-# header expansion; without an explicit link, downstream binaries see
-# undefined references to fmt::v11::detail::assert_fail and similar.
-find_package(fmt REQUIRED
-    PATHS "${TT_METAL_BUILD_DIR}/lib/cmake/fmt"
     NO_DEFAULT_PATH)
 
 # ---- tt_foil_llrt: includes-only interface ----
