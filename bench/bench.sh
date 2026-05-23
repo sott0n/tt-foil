@@ -53,4 +53,7 @@ cat "$OUT.tokens"
 echo
 echo "profile saved to: $OUT"
 echo
-grep -E '^(\s+\w|=== profile|  TOTAL)' "$OUT" | head -40
+grep -E '^(\s+\w|=== profile|  TOTAL|=== real_wall|  wall_ms)' "$OUT" | head -40
+echo
+echo "=== real wall (from binary, single source of truth) ==="
+grep '^  wall_ms' "$OUT" || echo "  (not found — old binary?)"
