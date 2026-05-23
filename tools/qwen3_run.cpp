@@ -346,13 +346,29 @@ int main(int argc, char** argv) try {
     // -----------------------------------------------------------------
     // Open device, upload static tensors.
     // -----------------------------------------------------------------
-    // Boot a 1×4 grid so decode matmul can shard across 4 cores via
-    // make_matmul_grid. Other ops (rmsnorm, rope, gqa_decode, …) keep
-    // running on (0,0) — the extra cores are idle for those.
+    // Boot a 1×8 grid. Most matmul shapes in qwen3 are Mt=1 with modest
+    // Kt/Nt, where per-core dispatch overhead (sequential ELF NOC writes
+    // in dispatch_stage_setup) dominates over per-core compute. Adding
+    // cores beyond 4 strictly regresses those (see iter11 lesson in
+    // bench/HISTORY.md). lm_head is the exception — Nt=4748 with kVt
+    // tiles of compute amortizes the dispatch cost, so it benefits from
+    // 8-way sharding (113 → 64 ms/call on decode).
+    //
+    // kMatmulGrid (4 cores) used for qkv/o/ffn matmuls and other ops.
+    // kLmHeadGrid (8 cores) used only for lm_head (Vt=4748 ragged shards).
+    //   matmul_qkv  Nt=128  →  32 tile/core  (clean, 4-way)
+    //   matmul_o    Nt=64   →  16 tile/core  (clean, 4-way)
+    //   ffn_gateup  Nt=384  →  96 tile/core  (clean, 4-way)
+    //   ffn_down    Nt=64   →  16 tile/core  (clean, 4-way)
+    //   lm_head     Nt=4748 → 4×594 + 4×593  (ragged 8-way)
     const std::vector<tt::foil::CoreCoord> kMatmulGrid = {
         {0, 0}, {0, 1}, {0, 2}, {0, 3},
     };
-    std::vector<tt::foil::CoreCoord> boot_cores = kMatmulGrid;
+    const std::vector<tt::foil::CoreCoord> kLmHeadGrid = {
+        {0, 0}, {0, 1}, {0, 2}, {0, 3},
+        {0, 4}, {0, 5}, {0, 6}, {0, 7},
+    };
+    std::vector<tt::foil::CoreCoord> boot_cores = kLmHeadGrid;
     auto dev = tt::foil::open_device(pcie_index, "", boot_cores);
     tt::foil::CoreCoord core{0, 0};
 
@@ -473,19 +489,34 @@ int main(int argc, char** argv) try {
     // dispatch_execute_multi, then releases per-core kernel-config +
     // L1 across the whole grid so the next caller starts from clean
     // L1 on every core.
+    auto run_matmul_on = [&](const char* tag,
+                             const std::vector<tt::foil::CoreCoord>& grid,
+                             const ol::TensorDesc& a,
+                             const ol::TensorDesc& b,
+                             ol::TensorDesc& out,
+                             uint32_t Mt, uint32_t Kt, uint32_t Nt) {
+        auto t0 = Clock::now();
+        auto op = ol::make_matmul_grid(*dev, a, b, out, Mt, Kt, Nt, grid);
+        ol::execute(*dev, op);
+        for (const auto& c : grid) {
+            tt::foil::release_kernels(*dev, c);
+            tt::foil::reset_l1(*dev, c);
+        }
+        g_prof.add(tag, std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+    };
     auto run_matmul_grid = [&](const char* tag,
                                const ol::TensorDesc& a,
                                const ol::TensorDesc& b,
                                ol::TensorDesc& out,
                                uint32_t Mt, uint32_t Kt, uint32_t Nt) {
-        auto t0 = Clock::now();
-        auto op = ol::make_matmul_grid(*dev, a, b, out, Mt, Kt, Nt, kMatmulGrid);
-        ol::execute(*dev, op);
-        for (const auto& c : kMatmulGrid) {
-            tt::foil::release_kernels(*dev, c);
-            tt::foil::reset_l1(*dev, c);
-        }
-        g_prof.add(tag, std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+        run_matmul_on(tag, kMatmulGrid, a, b, out, Mt, Kt, Nt);
+    };
+    auto run_matmul_lmhead = [&](const char* tag,
+                                 const ol::TensorDesc& a,
+                                 const ol::TensorDesc& b,
+                                 ol::TensorDesc& out,
+                                 uint32_t Mt, uint32_t Kt, uint32_t Nt) {
+        run_matmul_on(tag, kLmHeadGrid, a, b, out, Mt, Kt, Nt);
     };
 
     const uint32_t kTotalNk    = kNkDt * kTileW;
@@ -641,7 +672,7 @@ int main(int argc, char** argv) try {
     // Prefill final norm + lm_head → argmax(row S-1) is the first decode input.
     std::fprintf(stderr, "  prefill final norm + lm_head ...\n");
     run1("pre:final_rmsnorm", [&] { return ol::make_rmsnorm(*dev, T_layer_in, T_final_g, T_normed, kSt, kHt, kEps); });
-    run_matmul_grid("pre:lm_head", T_normed, T_W_lm, T_logits, kSt, kHt, kVt);
+    run_matmul_lmhead("pre:lm_head", T_normed, T_W_lm, T_logits, kSt, kHt, kVt);
     std::vector<uint16_t> logits_tiles(static_cast<size_t>(kSt) * kVt * kTileWords);
     {
         TIMED("pre:logits_readback");
@@ -733,7 +764,7 @@ int main(int argc, char** argv) try {
         }
 
         run1("dec:final_rmsnorm", [&] { return ol::make_rmsnorm(*dev, T_layer_in, T_final_g, T_normed, kSt, kHt, kEps); });
-        run_matmul_grid("dec:lm_head", T_normed, T_W_lm, T_logits, kSt, kHt, kVt);
+        run_matmul_lmhead("dec:lm_head", T_normed, T_W_lm, T_logits, kSt, kHt, kVt);
         // Device-side argmax over row 0 of T_logits (single-core BRISC
         // scan in ops/argmax_row0). Replaces the 9.7-MB tile readback +
         // CPU argmax with a 4-byte readback.

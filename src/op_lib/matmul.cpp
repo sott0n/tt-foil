@@ -129,8 +129,12 @@ MatMulGridOp make_matmul_grid(tt::foil::Device& dev,
     if (cores.empty())
         throw std::runtime_error("op_lib::make_matmul_grid: cores must be non-empty");
     const uint32_t n_cores = static_cast<uint32_t>(cores.size());
-    if (Nt % n_cores != 0)
-        throw std::runtime_error("op_lib::make_matmul_grid: Nt must be a multiple of cores.size()");
+    // Ragged shards allowed: when Nt % n_cores != 0 (e.g. lm_head Vt=4748
+    // on 8 cores), the first `rem` cores get one extra column tile and
+    // the rest get base = Nt / n_cores. Per-core RTAs carry their own
+    // Nt_per_core + column offset; the kernel doesn't know n_cores.
+    if (Nt < n_cores)
+        throw std::runtime_error("op_lib::make_matmul_grid: Nt must be >= cores.size()");
     if (a.num_tiles != Mt * Kt)
         throw std::runtime_error("op_lib::make_matmul_grid: a.num_tiles != Mt*Kt");
     if (b.num_tiles != Kt * Nt)
@@ -180,14 +184,17 @@ void set_matmul_grid_args(tt::foil::Device& dev, MatMulGridOp& op,
                           const std::vector<tt::foil::CoreCoord>& cores) {
     using R = tt::foil::RiscBinary;
     const uint32_t n_cores      = static_cast<uint32_t>(cores.size());
-    const uint32_t Nt_per_core  = Nt / n_cores;
+    const uint32_t base         = Nt / n_cores;
+    const uint32_t rem          = Nt % n_cores;
     const uint64_t a_dev_base   = a.buf->device_addr;
     const uint64_t b_dev_base   = b.buf->device_addr;
     const uint64_t out_dev_base = out.buf->device_addr;
 
+    uint32_t col_off_tiles = 0;
     for (uint32_t c = 0; c < n_cores; ++c) {
+        const uint32_t Nt_per_core = base + (c < rem ? 1u : 0u);
         const uint64_t col_off_bytes =
-            static_cast<uint64_t>(c) * Nt_per_core * kTileBytes;
+            static_cast<uint64_t>(col_off_tiles) * kTileBytes;
         const uint64_t a_noc   = tt::foil::make_noc_dram_addr(dev, a_dev_base);
         const uint64_t b_noc   = tt::foil::make_noc_dram_addr(dev, b_dev_base   + col_off_bytes);
         const uint64_t dst_noc = tt::foil::make_noc_dram_addr(dev, out_dev_base + col_off_bytes);
@@ -202,6 +209,7 @@ void set_matmul_grid_args(tt::foil::Device& dev, MatMulGridOp& op,
             (uint32_t)dst_noc, (uint32_t)(dst_noc >> 32),
             Mt, Nt_per_core, /*Nt_stride=*/Nt,
         };
+        col_off_tiles += Nt_per_core;
         auto& k = *op.kernels[c];
         tt::foil::set_runtime_args(dev, k, R::RiscId::BRISC,  ra_brisc);
         tt::foil::set_runtime_args(dev, k, R::RiscId::TRISC0, ra_trisc);
