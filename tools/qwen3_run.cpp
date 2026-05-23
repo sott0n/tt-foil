@@ -612,11 +612,14 @@ int main(int argc, char** argv) try {
     // -----------------------------------------------------------------
     {
     TIMED("prefill:total");
+    // iter18: lift first layer's ln1g rmsnorm out of the loop. Inside the
+    // loop, the post-FFN residual add is fused with the NEXT layer's ln1g
+    // (T_xnorm1 carries the result forward), so this single pre-loop
+    // dispatch primes the chain.
+    run1("pre:rmsnorm", [&] { return ol::make_rmsnorm(*dev, T_layer_in, layers[0].ln1g, T_xnorm1, kSt, kHt, kEps); });
     for (uint32_t li = 0; li < kNumLayers; ++li) {
         const LayerW& w = layers[li];
         std::fprintf(stderr, "  prefill layer %u …\n", li);
-
-        run1("pre:rmsnorm",    [&] { return ol::make_rmsnorm(*dev, T_layer_in, w.ln1g, T_xnorm1, kSt, kHt, kEps); });
         // Fused QKV matmul: A·[Wq|Wk|Wv]. Output lands in T_QKV; T_Q,
         // T_K, T_V are pre-set offset views into the same buffer.
         run_matmul_grid("pre:matmul_qkv", T_xnorm1, w.Wqkv, T_QKV, kSt, kHt, kNqkvDt);
@@ -662,7 +665,21 @@ int main(int argc, char** argv) try {
         run_matmul_grid("pre:matmul_ffn", T_ynorm, w.Wgateup, T_gateup, kSt, kHt, kFFtFused);
         run1("pre:silu_mul",   [&] { return ol::make_silu_mul(*dev, T_gate, T_up, T_fused); });
         run_matmul_grid("pre:matmul_ffn", T_fused, w.Wdown, T_down, kSt, kFFt, kHt);
-        run1("pre:add",        [&] { return ol::make_eltwise_add(*dev, T_xmid, T_down, T_layer_out); });
+        if (li + 1 < kNumLayers) {
+            // Fuse this layer's residual add with the NEXT layer's ln1g
+            // rmsnorm. T_layer_out carries the residual; T_xnorm1 (already
+            // declared at function scope) is overwritten with the normed
+            // value the next iter's matmul_qkv consumes.
+            const LayerW& w_next = layers[li + 1];
+            run1("pre:add_rmsnorm", [&] {
+                return ol::make_add_rmsnorm(*dev, T_xmid, T_down, w_next.ln1g,
+                                            T_layer_out, T_xnorm1, kSt, kHt, kEps);
+            });
+        } else {
+            // Last layer: no next-layer ln1g; final_rmsnorm has its own
+            // gamma. Fall back to plain add.
+            run1("pre:add", [&] { return ol::make_eltwise_add(*dev, T_xmid, T_down, T_layer_out); });
+        }
         std::swap(T_layer_in, T_layer_out);
     }
     }
@@ -723,10 +740,11 @@ int main(int argc, char** argv) try {
         upload(T_dsin,  rope_tile(sin_row));
         upload(T_dmask, build_mask_tile(valid_kv));
 
+        // iter18: prime T_xnorm1 with layer-0 ln1g rmsnorm; the layer-loop's
+        // tail does the post-FFN add fused with the next layer's ln1g.
+        run1("dec:rmsnorm", [&] { return ol::make_rmsnorm(*dev, T_layer_in, layers[0].ln1g, T_xnorm1, kSt, kHt, kEps); });
         for (uint32_t li = 0; li < kNumLayers; ++li) {
             const LayerW& w = layers[li];
-
-            run1("dec:rmsnorm",    [&] { return ol::make_rmsnorm(*dev, T_layer_in, w.ln1g, T_xnorm1, kSt, kHt, kEps); });
             // Fused QKV matmul (iter7) — see comments above the T_QKV
             // allocation. One dispatch instead of three.
             run_matmul_grid("dec:matmul_qkv", T_xnorm1, w.Wqkv, T_QKV, kSt, kHt, kNqkvDt);
@@ -755,7 +773,15 @@ int main(int argc, char** argv) try {
             run_matmul_grid("dec:matmul_ffn", T_ynorm, w.Wgateup, T_gateup, kSt, kHt, kFFtFused);
             run1("dec:silu_mul",   [&] { return ol::make_silu_mul(*dev, T_gate, T_up, T_fused); });
             run_matmul_grid("dec:matmul_ffn", T_fused, w.Wdown, T_down, kSt, kFFt, kHt);
-            run1("dec:add",        [&] { return ol::make_eltwise_add(*dev, T_xmid, T_down, T_layer_out); });
+            if (li + 1 < kNumLayers) {
+                const LayerW& w_next = layers[li + 1];
+                run1("dec:add_rmsnorm", [&] {
+                    return ol::make_add_rmsnorm(*dev, T_xmid, T_down, w_next.ln1g,
+                                                T_layer_out, T_xnorm1, kSt, kHt, kEps);
+                });
+            } else {
+                run1("dec:add", [&] { return ol::make_eltwise_add(*dev, T_xmid, T_down, T_layer_out); });
+            }
             std::swap(T_layer_in, T_layer_out);
         }
 
