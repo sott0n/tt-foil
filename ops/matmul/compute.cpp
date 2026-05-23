@@ -39,15 +39,14 @@ void kernel_main() {
         cb_wait_front(cb_a, Kt);
 
         for (uint32_t nt = 0; nt < Nt; ++nt) {
+            // iter13: B is staged in a single Kt-batch per nt; index by kt.
+            cb_wait_front(cb_b, Kt);
             tile_regs_acquire();
             for (uint32_t kt = 0; kt < Kt; ++kt) {
-                cb_wait_front(cb_b, 1);
-                // a_idx = kt picks the cached A tile; b_idx = 0 is the
-                // single buffered B tile.
-                matmul_tiles(cb_a, cb_b, /*a_idx*/ kt, /*b_idx*/ 0, /*dst_idx*/ 0);
-                cb_pop_front(cb_b, 1);
+                matmul_tiles(cb_a, cb_b, /*a_idx*/ kt, /*b_idx*/ kt, /*dst_idx*/ 0);
             }
             tile_regs_commit();
+            cb_pop_front(cb_b, Kt);
 
             tile_regs_wait();
             cb_reserve_back(cb_out, 1);

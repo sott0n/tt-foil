@@ -49,18 +49,18 @@ void kernel_main() {
         noc_async_read_barrier();
         cb_push_back(cb_a, Kt);
 
-        // Stage B: per (nt), feed Kt B tiles one-at-a-time so cb_b can
-        // stay at depth 1. Compute will pop each B tile after its
-        // matmul_tiles call.
+        // Stage B: per (nt), batch all Kt B tiles into cb_b (depth Kt) with
+        // a single noc_async_read_barrier. NOC HW pipelines the Kt
+        // outstanding reads; we save (Kt-1) per-tile barriers.
         for (uint32_t nt = 0; nt < Nt; ++nt) {
+            cb_reserve_back(cb_b, Kt);
+            uint32_t b_wp_base = get_write_ptr(cb_b);
             for (uint32_t kt = 0; kt < Kt; ++kt) {
-                cb_reserve_back(cb_b, 1);
-                uint32_t b_wp = get_write_ptr(cb_b);
                 uint64_t b_src = b_base + (kt * Nt_stride + nt) * kTileBytes;
-                noc_async_read(b_src, b_wp, kTileBytes);
-                noc_async_read_barrier();
-                cb_push_back(cb_b, 1);
+                noc_async_read(b_src, b_wp_base + kt * kTileBytes, kTileBytes);
             }
+            noc_async_read_barrier();
+            cb_push_back(cb_b, Kt);
         }
         // Compute pops cb_a (Kt tiles) at end of this mt row; reader's
         // next cb_reserve_back(cb_a, Kt) will block until that happens.

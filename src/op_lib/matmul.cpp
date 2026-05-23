@@ -40,14 +40,14 @@ MatMulOp make_matmul(tt::foil::Device& dev,
     const std::string dir = resolve_kernel_dir(kernel_dir, "matmul");
 
     MatMulOp op;
-    // iter12: cb_a caches all Kt A tiles for one mt row (so the kernel
-    // only NOC-reads A once per row, not Nt times). cb_b / cb_out stay
-    // single-tile. Per-core L1 needed: Kt*kTileBytes + 2*kTileBytes.
-    // Worst-case Qwen3 Kt=192 (FFN-down) → 388 KB, well under the
-    // ~855 KB user L1 arena.
+    // iter12 + iter13: cb_a caches all Kt A tiles for one mt row;
+    // cb_b batches all Kt B tiles for one nt with a single
+    // noc_async_read_barrier. cb_out stays single-tile. Per-core L1:
+    // 2*Kt*kTileBytes + kTileBytes. Worst-case Qwen3 Kt=192 (FFN-down)
+    // → 770 KB, within the ~855 KB user L1 arena.
     const uint32_t cb_a_bytes = Kt * kTileBytes;
     op.l1_a   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, cb_a_bytes, core);
-    op.l1_b   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, kTileBytes, core);
+    op.l1_b   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, cb_a_bytes, core);
     op.l1_out = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, kTileBytes, core);
 
     using R = tt::foil::RiscBinary;
@@ -62,7 +62,7 @@ MatMulOp make_matmul(tt::foil::Device& dev,
 
     std::array<tt::foil::CbConfig, 3> cbs = {{
         {0,  op.l1_a->device_addr,   cb_a_bytes, Kt, kTileBytes},
-        {1,  op.l1_b->device_addr,   kTileBytes, 1, kTileBytes},
+        {1,  op.l1_b->device_addr,   cb_a_bytes, Kt, kTileBytes},
         {16, op.l1_out->device_addr, kTileBytes, 1, kTileBytes},
     }};
     tt::foil::register_cbs(dev, *op.kernel, cbs);
@@ -167,12 +167,12 @@ MatMulGridOp make_matmul_grid(tt::foil::Device& dev,
     const uint32_t cb_a_bytes = Kt * kTileBytes;
     for (const auto& core : cores) {
         auto l1_a   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, cb_a_bytes, core);
-        auto l1_b   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, kTileBytes, core);
+        auto l1_b   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, cb_a_bytes, core);
         auto l1_out = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, kTileBytes, core);
         auto kernel = tt::foil::load_kernel(dev, bins, core);
         std::array<tt::foil::CbConfig, 3> cbs = {{
             {0,  l1_a->device_addr,   cb_a_bytes, Kt, kTileBytes},
-            {1,  l1_b->device_addr,   kTileBytes, 1, kTileBytes},
+            {1,  l1_b->device_addr,   cb_a_bytes, Kt, kTileBytes},
             {16, l1_out->device_addr, kTileBytes, 1, kTileBytes},
         }};
         tt::foil::register_cbs(dev, *kernel, cbs);
