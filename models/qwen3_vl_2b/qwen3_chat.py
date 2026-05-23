@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 Prompt → Qwen3-VL-2B (Blackhole) → text. Wraps the device-only
-inference binary `build/tools/qwen3_run`:
+inference binary `build/models/qwen3_vl_2b/qwen3_run`:
 
   1. Tokenise the prompt (right-pad to 32 with endoftext = 151643)
   2. Spawn qwen3_run on it
@@ -11,7 +11,7 @@ inference binary `build/tools/qwen3_run`:
   4. Detokenise and print the prompt + completion
 
 Usage:
-  $HOME/tt-venv/bin/python tools/qwen3_chat.py \\
+  $HOME/tt-venv/bin/python models/qwen3_vl_2b/qwen3_chat.py \\
       --prompt "The capital of Japan is" --num-decode 8
 
 Requires:
@@ -80,7 +80,7 @@ def main() -> int:
                     help="Number of tokens to generate (≤ 32)")
     ap.add_argument("--tokenizer", type=Path, default=Path(DEFAULT_TOKENIZER))
     ap.add_argument("--binary", type=Path,
-                    default=Path("build/tools/qwen3_run"),
+                    default=Path("build/models/qwen3_vl_2b/qwen3_run"),
                     help="Path to the compiled qwen3_run executable")
     args = ap.parse_args()
 

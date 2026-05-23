@@ -32,7 +32,7 @@ cos/sin are written as bf16 row-major tile-friendly layouts:
   sin_table.bin: [seq, head_dim/2] bf16 row-major
 
 Usage:
-  python3 tools/qwen3_attn_golden.py \
+  python3 models/qwen3_vl_2b/golden/qwen3_attn_golden.py \
       --layer-dir data/qwen3_vl_2b/layer0 \
       --num-q 16 --num-kv 8 --head-dim 128 \
       --rope-theta 5000000.0 --seq 32

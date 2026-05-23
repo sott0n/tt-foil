@@ -3,7 +3,7 @@
 //
 // CIFAR-10 ResNet-20 inference end-to-end on a single Tensix core.
 // Loads the pretrained akamaster weights + sample image + golden logits
-// produced by tools/export_cifar10_resnet20.py and runs the full
+// produced by models/cifar10_resnet20/export.py and runs the full
 // forward pass on device. Every multiply/add/ReLU lives on device;
 // layout (im2col, tile/untile, option-A zero-padded skip) stays on
 // host.

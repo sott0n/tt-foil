@@ -15,7 +15,7 @@ result straight to disk. The output `lm_head_tiled.bin` lays out tiles in
 the same [Kt, Nt] row-major layout the tt-foil matmul kernel expects.
 
 Usage:
-  python3 tools/qwen3_lm_head_golden.py \
+  python3 models/qwen3_vl_2b/golden/qwen3_lm_head_golden.py \
       --data-dir data/qwen3_vl_2b \
       --hidden 2048 --vocab 151936 --seq 32
 """

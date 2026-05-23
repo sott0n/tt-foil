@@ -23,7 +23,7 @@ Reference forward (matches what tests/test_qwen3_layer.cpp drives):
     y_out = x_mid + mlp                                   (residual #2)
 
 Usage:
-  python3 tools/qwen3_layer_golden.py \
+  python3 models/qwen3_vl_2b/golden/qwen3_layer_golden.py \
       --layer-dir data/qwen3_vl_2b/layer0 \
       --num-q 16 --num-kv 8 --head-dim 128 \
       --rope-theta 5000000.0 --seq 32

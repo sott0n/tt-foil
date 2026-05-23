@@ -5,7 +5,7 @@
 # One-shot Qwen3-VL-2B weight exporter. Pulls every layer + the model-
 # level tensors out of the HuggingFace cache, writes bf16 .bin under
 # data/qwen3_vl_2b/{layer*,model}/, and pre-tiles lm_head into
-# data/qwen3_vl_2b/model/lm_head_tiled.bin so tools/qwen3_run can read
+# data/qwen3_vl_2b/model/lm_head_tiled.bin so models/qwen3_vl_2b/qwen3_run can read
 # it directly.
 #
 # Usage:
@@ -14,7 +14,7 @@
 #
 # Requires: torch + transformers + safetensors in the active venv, and
 # Qwen/Qwen3-VL-2B-Instruct already downloaded into the HF cache (the
-# HF hub snapshot path is auto-detected by tools/export_qwen3_layer.py).
+# HF hub snapshot path is auto-detected by models/qwen3_vl_2b/export_qwen3_layer.py).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,14 +25,14 @@ DATA_DIR="${1:-$REPO/data/qwen3_vl_2b}"
 mkdir -p "$DATA_DIR"
 
 echo "[1/2] exporting per-layer + model tensors → $DATA_DIR"
-"$PY" "$REPO/tools/export_qwen3_layer.py" \
+"$PY" "$REPO/models/qwen3_vl_2b/export_qwen3_layer.py" \
     --model Qwen/Qwen3-VL-2B-Instruct \
     --layer all \
     --model-tensors \
     --out-dir "$DATA_DIR"
 
 echo "[2/2] tiling lm_head → $DATA_DIR/model/lm_head_tiled.bin"
-"$PY" "$REPO/tools/qwen3_lm_head_golden.py" \
+"$PY" "$REPO/models/qwen3_vl_2b/golden/qwen3_lm_head_golden.py" \
     --data-dir "$DATA_DIR" \
     --hidden 2048 --vocab 151936
 

@@ -20,7 +20,7 @@ comparison tolerance only has to absorb the kernel's bf16-vs-fp32 drift,
 not host-side rounding choices.
 
 Usage:
-  python3 tools/qwen3_mlp_golden.py --layer-dir data/qwen3_06b/layer0 [--seq 32]
+  python3 models/qwen3_vl_2b/golden/qwen3_mlp_golden.py --layer-dir data/qwen3_06b/layer0 [--seq 32]
 """
 from __future__ import annotations
 

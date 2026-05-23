@@ -30,7 +30,7 @@ The C++ test reads manifest.json to find each layer's offset/shape in
 weights.bin; the binary layout itself stays opaque to C++.
 
 Usage:
-  python3 tools/export_cifar10_resnet20.py
+  python3 models/cifar10_resnet20/export.py
 
   --image-index N   pick CIFAR-10 test image N (default 0)
   --cache-dir DIR   where to keep downloads (default .cache/)

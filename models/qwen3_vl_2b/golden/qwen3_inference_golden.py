@@ -17,7 +17,7 @@ are deterministic (no tokenizer dependency — the model treats any id in
 [0, V) as input).
 
 Usage:
-  python3 tools/qwen3_inference_golden.py \
+  python3 models/qwen3_vl_2b/golden/qwen3_inference_golden.py \
       --data-dir data/qwen3_vl_2b --num-layers 3 \
       --num-q 16 --num-kv 8 --head-dim 128 \
       --rope-theta 5000000.0 --seq 32
