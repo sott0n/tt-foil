@@ -168,6 +168,48 @@ void set_silu_mul_args(tt::foil::Device& dev, SiluMulOp& op,
 void execute(tt::foil::Device& dev, SiluMulOp& op);
 
 // =====================================================================
+// AddRmsNorm (fused): S = A + B; Y = RMSNorm(S, gamma).
+// Replaces the add → rmsnorm two-op chain that pays 2× dispatch floor.
+// Writes both S (residual sum, for the next residual add) and Y (normed)
+// to separate DRAM destinations.
+// =====================================================================
+struct AddRmsNormOp {
+    std::shared_ptr<tt::foil::Kernel> kernel;
+    // L1 staging
+    std::shared_ptr<tt::foil::Buffer> l1_a;
+    std::shared_ptr<tt::foil::Buffer> l1_b;
+    std::shared_ptr<tt::foil::Buffer> l1_reduce;
+    std::shared_ptr<tt::foil::Buffer> l1_gamma;
+    std::shared_ptr<tt::foil::Buffer> l1_eps;
+    std::shared_ptr<tt::foil::Buffer> l1_x2;
+    std::shared_ptr<tt::foil::Buffer> l1_var;
+    std::shared_ptr<tt::foil::Buffer> l1_recip_sqrt;
+    std::shared_ptr<tt::foil::Buffer> l1_x_normed;
+    std::shared_ptr<tt::foil::Buffer> l1_sum;
+    std::shared_ptr<tt::foil::Buffer> l1_s_out;
+    std::shared_ptr<tt::foil::Buffer> l1_out;
+    // DRAM constants
+    std::shared_ptr<tt::foil::Buffer> dram_scaler;
+    std::shared_ptr<tt::foil::Buffer> dram_eps;
+};
+// a, b in; sum_out and normed_out are written. Sum/normed are
+// allocated by the caller (typical pattern in qwen3_run).
+AddRmsNormOp make_add_rmsnorm(tt::foil::Device& dev,
+                              const TensorDesc& a, const TensorDesc& b,
+                              const TensorDesc& gamma,
+                              TensorDesc& sum_out, TensorDesc& normed_out,
+                              uint32_t NCHt, uint32_t Wt,
+                              float eps,
+                              tt::foil::CoreCoord core = {},
+                              const std::string& kernel_dir = "");
+void set_add_rmsnorm_args(tt::foil::Device& dev, AddRmsNormOp& op,
+                          const TensorDesc& a, const TensorDesc& b,
+                          const TensorDesc& gamma,
+                          const TensorDesc& sum_out, const TensorDesc& normed_out,
+                          uint32_t NCHt, uint32_t Wt);
+void execute(tt::foil::Device& dev, AddRmsNormOp& op);
+
+// =====================================================================
 // ElementwiseAdd
 //   y = a + b   (elementwise, per-tile) — Transformer residual connection
 // =====================================================================

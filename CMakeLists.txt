@@ -38,6 +38,7 @@ add_library(tt_foil STATIC
     src/op_lib/silu.cpp
     src/op_lib/eltwise_mul.cpp
     src/op_lib/silu_mul.cpp
+    src/op_lib/add_rmsnorm.cpp
     src/op_lib/eltwise_add.cpp
     src/op_lib/softmax.cpp
     src/op_lib/embedding.cpp
