@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Build eltwise_binary op kernel ELFs: mul (and optionally add).
+# Build RMSNorm op kernel ELFs.
 #
 # Produces (in $PREBUILT_DIR):
 #   reader.brisc.elf
 #   writer.ncrisc.elf
-#   mul.trisc0.elf  mul.trisc1.elf  mul.trisc2.elf
+#   rmsnorm.trisc0.elf  rmsnorm.trisc1.elf  rmsnorm.trisc2.elf
 
 set -euo pipefail
 
@@ -41,11 +41,12 @@ fi
 [[ -d "$TT_METAL_PRECOMPILED" ]] || { echo "TT_METAL_PRECOMPILED not found"; exit 1; }
 echo "build: using firmware from $TT_METAL_PRECOMPILED"
 
-BUILD="${BUILD:-/tmp/tt_foil_build_eltwise_binary}"
+BUILD="${BUILD:-/tmp/tt_foil_build_add_rmsnorm}"
 PREBUILT="${PREBUILT_DIR:-$HERE/prebuilt}"
 mkdir -p "$BUILD" "$PREBUILT"
 
 COMMON_CFLAGS=(
+    ${DIAG:+-DDIAG=$DIAG}
     -std=c++17 -fno-exceptions -fno-use-cxa-atexit
     -Os -mcpu=tt-bh -fno-tree-loop-distribute-patterns
     -DARCH_BLACKHOLE -DTENSIX_FIRMWARE -DLOCAL_MEM_EN=0
@@ -72,6 +73,7 @@ COMMON_CFLAGS=(
     -I"$TT/tt_metal/hw/firmware/src/tt-1xx"
     -I"$TT/tt_metal/hostdevcommon/api"
     -I"$TT/tt_metal/api"
+    -I"$TT/tt_metal/api/tt-metalium"
 )
 
 build_dataflow() {
@@ -92,20 +94,12 @@ build_dataflow() {
 }
 
 build_compute() {
-    local src="$1" out_name="$2" cb24="${3:-}"
+    local src="$1" out_name="$2"
     echo "#include \"$src\"" > "$BUILD/kernel_includes.hpp"
 
-    # chlkc_list.h stub: CB 0, 1 (inputs), CB 16 (output) = bf16.
-    # When cb24=cb24, also mark CB 24 (intermediate) as bf16 — silu_mul
-    # uses CB 24 to stage SiLU(A) before the mul step.
-    if [[ "$cb24" == "cb24" ]]; then
-        local R1="5,5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,"
-        local R2="5,255,255,255,255,255,255,255,5,255,255,255,255,255,255,255,"
-    else
-        local R1="5,5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,"
-        local R2="5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,"
-    fi
-    cat > "$BUILD/chlkc_list.h" <<EOF
+    # chlkc_list.h stub: CBs 0-7 (inputs/intermediates) and CB 16 (output) all BF16 (=5)
+    # Binary + reduce + bcast ops require ckernel::MathFidelity enum.
+    cat > "$BUILD/chlkc_list.h" <<'EOF'
 #pragma once
 #include <cstdint>
 constexpr bool DST_ACCUM_MODE = false;
@@ -115,22 +109,22 @@ constexpr bool APPROX = true;
 #include "llk_defs.h"
 constexpr ckernel::MathFidelity MATH_FIDELITY = static_cast<ckernel::MathFidelity>(4);  // HiFi4
 #endif
-// Float16_b (=5) for CB 0, 1, 16 (and optionally 24); 255 for others
+// Float16_b (=5) for CBs 0-10, 16; 255 for others
 constexpr unsigned char pack_src_format[32] = {
-    ${R1}
-    ${R2}
+    5,5,5,5,5,5,5,5,5,5,5,255,255,255,255,255,
+    5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
 };
 constexpr unsigned char pack_dst_format[32] = {
-    ${R1}
-    ${R2}
+    5,5,5,5,5,5,5,5,5,5,5,255,255,255,255,255,
+    5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
 };
 constexpr std::int32_t unpack_src_format[32] = {
-    ${R1}
-    ${R2}
+    5,5,5,5,5,5,5,5,5,5,5,255,255,255,255,255,
+    5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
 };
 constexpr std::int32_t unpack_dst_format[32] = {
-    ${R1}
-    ${R2}
+    5,5,5,5,5,5,5,5,5,5,5,255,255,255,255,255,
+    5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
 };
 constexpr std::uint8_t  pack_tile_num_faces[32]    = { 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4 };
 constexpr std::uint8_t  pack_partial_face[32]      = { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 };
@@ -180,6 +174,4 @@ EOF
 
 build_dataflow brisc  0 "$HERE/reader.cpp" reader.brisc
 build_dataflow ncrisc 1 "$HERE/writer.cpp" writer.ncrisc
-build_compute "$HERE/compute_mul.cpp" mul
-build_compute "$HERE/compute_add.cpp" add
-build_compute "$HERE/compute_silu_mul.cpp" silu_mul cb24
+build_compute "$HERE/compute.cpp" add_rmsnorm

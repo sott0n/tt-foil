@@ -37,6 +37,9 @@ add_library(tt_foil STATIC
     # op_lib: host-side primitive op wrappers (see include/tt_foil/ops.hpp)
     src/op_lib/silu.cpp
     src/op_lib/eltwise_mul.cpp
+    src/op_lib/silu_mul.cpp
+    src/op_lib/add_rmsnorm.cpp
+    src/op_lib/rmsnorm_rope.cpp
     src/op_lib/eltwise_add.cpp
     src/op_lib/softmax.cpp
     src/op_lib/embedding.cpp
@@ -48,6 +51,8 @@ add_library(tt_foil STATIC
     src/op_lib/transpose_2d.cpp
     src/op_lib/gqa_fused.cpp
     src/op_lib/gqa_decode.cpp
+    src/op_lib/argmax_row0.cpp
+    src/op_lib/kv_append.cpp
 )
 add_library(TT::Foil ALIAS tt_foil)
 

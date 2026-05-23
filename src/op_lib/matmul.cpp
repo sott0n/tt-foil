@@ -40,9 +40,20 @@ MatMulOp make_matmul(tt::foil::Device& dev,
     const std::string dir = resolve_kernel_dir(kernel_dir, "matmul");
 
     MatMulOp op;
-    // Single-tile L1 staging for A, B, OUT (reader pushes one tile at a time).
-    op.l1_a   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, kTileBytes, core);
-    op.l1_b   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, kTileBytes, core);
+    // iter12/13/14: cb_a caches all Kt A tiles for one mt row; cb_b
+    // batches Kt B tiles per nt. When L1 allows (6*Kt+2 ≤ ~855 KB,
+    // i.e. Kt ≤ 142), cb_b is double-deep (2*Kt) so the reader can
+    // prefetch the next nt-batch while the consumer is matmuling the
+    // current one — overlapping NOC reads with compute.
+    //
+    // Per-core L1 ceilings (D_b = cb_b tile depth):
+    //   D_b = 2*Kt: 6*Kt + 2 KB ≤ 855  →  Kt ≤ 142 (qkv/o/ffn-gateup/lm_head, all Kt=64)
+    //   D_b =   Kt: 4*Kt + 2 KB ≤ 855  →  Kt ≤ 213 (FFN-down Kt=192 stays here)
+    const uint32_t cb_a_bytes = Kt * kTileBytes;
+    const uint32_t cb_b_tiles = ((6 * Kt + 2) <= 855) ? (2 * Kt) : Kt;
+    const uint32_t cb_b_bytes = cb_b_tiles * kTileBytes;
+    op.l1_a   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, cb_a_bytes, core);
+    op.l1_b   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, cb_b_bytes, core);
     op.l1_out = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, kTileBytes, core);
 
     using R = tt::foil::RiscBinary;
@@ -56,9 +67,9 @@ MatMulOp make_matmul(tt::foil::Device& dev,
     op.kernel = tt::foil::load_kernel(dev, bins, core);
 
     std::array<tt::foil::CbConfig, 3> cbs = {{
-        {0,  op.l1_a->device_addr,   kTileBytes, 1, kTileBytes},
-        {1,  op.l1_b->device_addr,   kTileBytes, 1, kTileBytes},
-        {16, op.l1_out->device_addr, kTileBytes, 1, kTileBytes},
+        {0,  op.l1_a->device_addr,   cb_a_bytes, Kt,         kTileBytes},
+        {1,  op.l1_b->device_addr,   cb_b_bytes, cb_b_tiles, kTileBytes},
+        {16, op.l1_out->device_addr, kTileBytes, 1,          kTileBytes},
     }};
     tt::foil::register_cbs(dev, *op.kernel, cbs);
 
@@ -129,8 +140,12 @@ MatMulGridOp make_matmul_grid(tt::foil::Device& dev,
     if (cores.empty())
         throw std::runtime_error("op_lib::make_matmul_grid: cores must be non-empty");
     const uint32_t n_cores = static_cast<uint32_t>(cores.size());
-    if (Nt % n_cores != 0)
-        throw std::runtime_error("op_lib::make_matmul_grid: Nt must be a multiple of cores.size()");
+    // Ragged shards allowed: when Nt % n_cores != 0 (e.g. lm_head Vt=4748
+    // on 8 cores), the first `rem` cores get one extra column tile and
+    // the rest get base = Nt / n_cores. Per-core RTAs carry their own
+    // Nt_per_core + column offset; the kernel doesn't know n_cores.
+    if (Nt < n_cores)
+        throw std::runtime_error("op_lib::make_matmul_grid: Nt must be >= cores.size()");
     if (a.num_tiles != Mt * Kt)
         throw std::runtime_error("op_lib::make_matmul_grid: a.num_tiles != Mt*Kt");
     if (b.num_tiles != Kt * Nt)
@@ -153,15 +168,19 @@ MatMulGridOp make_matmul_grid(tt::foil::Device& dev,
     MatMulGridOp op;
     op.kernels.reserve(n_cores);
     op.l1_bufs.reserve(static_cast<std::size_t>(n_cores) * 3);
+    // iter12/13/14: see make_matmul for L1 budget rationale.
+    const uint32_t cb_a_bytes = Kt * kTileBytes;
+    const uint32_t cb_b_tiles = ((6 * Kt + 2) <= 855) ? (2 * Kt) : Kt;
+    const uint32_t cb_b_bytes = cb_b_tiles * kTileBytes;
     for (const auto& core : cores) {
-        auto l1_a   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, kTileBytes, core);
-        auto l1_b   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, kTileBytes, core);
+        auto l1_a   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, cb_a_bytes, core);
+        auto l1_b   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, cb_b_bytes, core);
         auto l1_out = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, kTileBytes, core);
         auto kernel = tt::foil::load_kernel(dev, bins, core);
         std::array<tt::foil::CbConfig, 3> cbs = {{
-            {0,  l1_a->device_addr,   kTileBytes, 1, kTileBytes},
-            {1,  l1_b->device_addr,   kTileBytes, 1, kTileBytes},
-            {16, l1_out->device_addr, kTileBytes, 1, kTileBytes},
+            {0,  l1_a->device_addr,   cb_a_bytes, Kt,         kTileBytes},
+            {1,  l1_b->device_addr,   cb_b_bytes, cb_b_tiles, kTileBytes},
+            {16, l1_out->device_addr, kTileBytes, 1,          kTileBytes},
         }};
         tt::foil::register_cbs(dev, *kernel, cbs);
         op.kernels.push_back(kernel);
@@ -180,14 +199,17 @@ void set_matmul_grid_args(tt::foil::Device& dev, MatMulGridOp& op,
                           const std::vector<tt::foil::CoreCoord>& cores) {
     using R = tt::foil::RiscBinary;
     const uint32_t n_cores      = static_cast<uint32_t>(cores.size());
-    const uint32_t Nt_per_core  = Nt / n_cores;
+    const uint32_t base         = Nt / n_cores;
+    const uint32_t rem          = Nt % n_cores;
     const uint64_t a_dev_base   = a.buf->device_addr;
     const uint64_t b_dev_base   = b.buf->device_addr;
     const uint64_t out_dev_base = out.buf->device_addr;
 
+    uint32_t col_off_tiles = 0;
     for (uint32_t c = 0; c < n_cores; ++c) {
+        const uint32_t Nt_per_core = base + (c < rem ? 1u : 0u);
         const uint64_t col_off_bytes =
-            static_cast<uint64_t>(c) * Nt_per_core * kTileBytes;
+            static_cast<uint64_t>(col_off_tiles) * kTileBytes;
         const uint64_t a_noc   = tt::foil::make_noc_dram_addr(dev, a_dev_base);
         const uint64_t b_noc   = tt::foil::make_noc_dram_addr(dev, b_dev_base   + col_off_bytes);
         const uint64_t dst_noc = tt::foil::make_noc_dram_addr(dev, out_dev_base + col_off_bytes);
@@ -202,6 +224,7 @@ void set_matmul_grid_args(tt::foil::Device& dev, MatMulGridOp& op,
             (uint32_t)dst_noc, (uint32_t)(dst_noc >> 32),
             Mt, Nt_per_core, /*Nt_stride=*/Nt,
         };
+        col_off_tiles += Nt_per_core;
         auto& k = *op.kernels[c];
         tt::foil::set_runtime_args(dev, k, R::RiscId::BRISC,  ra_brisc);
         tt::foil::set_runtime_args(dev, k, R::RiscId::TRISC0, ra_trisc);

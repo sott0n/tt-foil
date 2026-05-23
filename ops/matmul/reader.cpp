@@ -1,22 +1,20 @@
 // SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
 // SPDX-License-Identifier: Apache-2.0
 //
-// BRISC reader for matmul_dram (v5-4): same outer-product schedule as
-// matmul_mnk, but the A and B tile streams live in DRAM. Each tile is
-// pulled into its CB via noc_async_read from the DRAM bank's NOC
-// endpoint instead of word-copy from local L1.
+// BRISC reader for matmul_dram (iter12): A-tile caching.
+// Mt rows × Nt cols × Kt inner. Previously A was re-read from DRAM
+// Nt times per (mt) row — for Mt=1 matmul this dominated NOC traffic.
+// Now A's Kt tiles are read once per mt and held in cb_a (depth Kt);
+// the compute kernel indexes them by kt for every nt iteration. B is
+// still read per (kt, nt) at cb_b depth 1.
 //
 // Runtime args:
-//   arg[0..1] = A stream NOC addr (lo, hi) — make_noc_dram_addr on host
-//   arg[2..3] = B stream NOC addr (lo, hi) — points at this core's first
-//              column tile within the global B (column-shard offset
-//              baked in by caller)
+//   arg[0..1] = A stream NOC addr (lo, hi)
+//   arg[2..3] = B stream NOC addr (lo, hi)
 //   arg[4]    = Mt
 //   arg[5]    = Kt
 //   arg[6]    = Nt  — *per-core* output column count
-//   arg[7]    = Nt_stride — row stride between B's (kt) rows, expressed
-//              in tiles. Equals global Nt for column-sharded callers
-//              and equals per-core Nt for single-core callers.
+//   arg[7]    = Nt_stride — row stride between B's (kt) rows, in tiles.
 
 #include <cstdint>
 
@@ -24,15 +22,6 @@
 
 static inline uint64_t join64(uint32_t lo, uint32_t hi) {
     return (static_cast<uint64_t>(hi) << 32) | static_cast<uint64_t>(lo);
-}
-
-static inline void read_one_tile(uint32_t cb, uint64_t src_noc_addr) {
-    constexpr uint32_t kTileBytes = 32 * 32 * 2;
-    cb_reserve_back(cb, 1);
-    uint32_t write_ptr = get_write_ptr(cb);
-    noc_async_read(src_noc_addr, write_ptr, kTileBytes);
-    noc_async_read_barrier();
-    cb_push_back(cb, 1);
 }
 
 void kernel_main() {
@@ -43,14 +32,37 @@ void kernel_main() {
     uint32_t Nt        = get_arg_val<uint32_t>(6);
     uint32_t Nt_stride = get_arg_val<uint32_t>(7);
 
+    constexpr uint32_t cb_a = 0;
+    constexpr uint32_t cb_b = 1;
     constexpr uint32_t kTileBytes = 32 * 32 * 2;
 
     for (uint32_t mt = 0; mt < Mt; ++mt) {
-        for (uint32_t nt = 0; nt < Nt; ++nt) {
-            for (uint32_t kt = 0; kt < Kt; ++kt) {
-                read_one_tile(0, a_base + (mt * Kt + kt) * kTileBytes);
-                read_one_tile(1, b_base + (kt * Nt_stride + nt) * kTileBytes);
-            }
+        // Stage A: read Kt A tiles once into cb_a (depth Kt). Issue all
+        // reads back-to-back, then single barrier — lets NOC pipeline
+        // the requests instead of round-tripping per tile.
+        cb_reserve_back(cb_a, Kt);
+        uint32_t a_wp_base = get_write_ptr(cb_a);
+        for (uint32_t kt = 0; kt < Kt; ++kt) {
+            uint64_t a_src = a_base + (mt * Kt + kt) * kTileBytes;
+            noc_async_read(a_src, a_wp_base + kt * kTileBytes, kTileBytes);
         }
+        noc_async_read_barrier();
+        cb_push_back(cb_a, Kt);
+
+        // Stage B: per (nt), batch all Kt B tiles into cb_b (depth Kt) with
+        // a single noc_async_read_barrier. NOC HW pipelines the Kt
+        // outstanding reads; we save (Kt-1) per-tile barriers.
+        for (uint32_t nt = 0; nt < Nt; ++nt) {
+            cb_reserve_back(cb_b, Kt);
+            uint32_t b_wp_base = get_write_ptr(cb_b);
+            for (uint32_t kt = 0; kt < Kt; ++kt) {
+                uint64_t b_src = b_base + (kt * Nt_stride + nt) * kTileBytes;
+                noc_async_read(b_src, b_wp_base + kt * kTileBytes, kTileBytes);
+            }
+            noc_async_read_barrier();
+            cb_push_back(cb_b, Kt);
+        }
+        // Compute pops cb_a (Kt tiles) at end of this mt row; reader's
+        // next cb_reserve_back(cb_a, Kt) will block until that happens.
     }
 }

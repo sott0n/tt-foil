@@ -261,13 +261,43 @@ All in `tests/`. CMake gates HW tests behind `-DTT_FOIL_HW_TESTS=ON`.
 | `test_cb_config`              | Yes | CB descriptor blob round-trip via L1 (v4)       |
 | `test_tile_copy`              | Yes | End-to-end 5-RISC tile_copy pipeline (v4)       |
 
-Run tests via ctest (preferred — `TT_FOIL_KERNEL_DIR` is wired per
+### tt-metal dependency: use the in-tree submodule
+
+`third_party/tt-metal` is a git submodule pinned to the tt-metal commit
+this branch was tested against. **Always build from there**, not from a
+sibling clone like `~/tt-metal` — the kernel/firmware build scripts and
+the runtime all assume header + `*_weakened.elf` compatibility with
+whatever tt-metal cmake we're linking. Mixing a local tt-metal that's
+newer than the submodule SHA breaks the firmware-build script
+(`noc_get_cfg_reg` etc. get renamed), the ops/kernels build (function
+renames in `c_tensix_core.h`), and silently mismatches loaded firmware
+vs `*_weakened.elf` so `cb_reserve_back` hangs at runtime.
+
+First-time setup (or after a rebase that bumps the submodule):
+
+```bash
+# 1. Fetch the submodule + its transitive submodules
+git submodule update --init --recursive --depth 1 third_party/tt-metal
+
+# 2. Build tt-metal (~30 min). build_metal.sh handles gcc-12, deps, etc.
+( cd third_party/tt-metal && ./build_metal.sh --release )
+
+# 3. Point tt-foil cmake at it. Either set TT_METAL_BUILD_DIR in the
+#    environment or pass it as a -D flag; the cmake configure caches it.
+TT_METAL_BUILD_DIR=$PWD/third_party/tt-metal/build_Release \
+    cmake -B build -DTT_FOIL_HW_TESTS=ON -DTT_FOIL_DEVICE=0
+cmake --build build -j$(nproc)               # libtt_foil.a + binaries + firmware
+
+# 4. (Re)build the prebuilt op kernels against the same tt-metal source.
+#    TT_METAL_ROOT defaults to /home/kyamaguchi/tt-metal — override it.
+TT_METAL_ROOT=$PWD/third_party/tt-metal bash scripts/build_ops.sh
+```
+
+Then run tests via ctest (preferred — `TT_FOIL_KERNEL_DIR` is wired per
 test by the CMake test-helper functions, no manual env juggling):
 
 ```bash
-cmake -B build -DTT_FOIL_HW_TESTS=ON -DTT_FOIL_DEVICE=3
-cmake --build build -j$(nproc)
-tt-smi -r 3                        # one-shot, ensures clean chip state
+tt-smi -r 0                        # one-shot, ensures clean chip state
 ctest --test-dir build             # all tests, serialised on chip
 ctest --test-dir build -L unit     # only host-side unit tests
 ctest --test-dir build -L hw       # only Blackhole integration tests

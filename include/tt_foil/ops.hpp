@@ -147,6 +147,109 @@ void set_eltwise_mul_args(tt::foil::Device& dev, EltwiseMulOp& op,
 void execute(tt::foil::Device& dev, EltwiseMulOp& op);
 
 // =====================================================================
+// SiluMul  (fused SwiGLU): out[i] = SiLU(a[i]) * b[i] per tile.
+// Replaces the silu→mul two-op chain that pays a 2× dispatch floor.
+// =====================================================================
+struct SiluMulOp {
+    std::shared_ptr<tt::foil::Kernel> kernel;
+    std::shared_ptr<tt::foil::Buffer> l1_a;
+    std::shared_ptr<tt::foil::Buffer> l1_b;
+    std::shared_ptr<tt::foil::Buffer> l1_s;   // intermediate SiLU(a)
+    std::shared_ptr<tt::foil::Buffer> l1_out;
+};
+SiluMulOp make_silu_mul(tt::foil::Device& dev,
+                        const TensorDesc& a, const TensorDesc& b,
+                        TensorDesc& out,
+                        tt::foil::CoreCoord core = {},
+                        const std::string& kernel_dir = "");
+void set_silu_mul_args(tt::foil::Device& dev, SiluMulOp& op,
+                       const TensorDesc& a, const TensorDesc& b,
+                       const TensorDesc& out);
+void execute(tt::foil::Device& dev, SiluMulOp& op);
+
+// =====================================================================
+// AddRmsNorm (fused): S = A + B; Y = RMSNorm(S, gamma).
+// Replaces the add → rmsnorm two-op chain that pays 2× dispatch floor.
+// Writes both S (residual sum, for the next residual add) and Y (normed)
+// to separate DRAM destinations.
+// =====================================================================
+struct AddRmsNormOp {
+    std::shared_ptr<tt::foil::Kernel> kernel;
+    // L1 staging
+    std::shared_ptr<tt::foil::Buffer> l1_a;
+    std::shared_ptr<tt::foil::Buffer> l1_b;
+    std::shared_ptr<tt::foil::Buffer> l1_reduce;
+    std::shared_ptr<tt::foil::Buffer> l1_gamma;
+    std::shared_ptr<tt::foil::Buffer> l1_eps;
+    std::shared_ptr<tt::foil::Buffer> l1_x2;
+    std::shared_ptr<tt::foil::Buffer> l1_var;
+    std::shared_ptr<tt::foil::Buffer> l1_recip_sqrt;
+    std::shared_ptr<tt::foil::Buffer> l1_x_normed;
+    std::shared_ptr<tt::foil::Buffer> l1_sum;
+    std::shared_ptr<tt::foil::Buffer> l1_s_out;
+    std::shared_ptr<tt::foil::Buffer> l1_out;
+    // DRAM constants
+    std::shared_ptr<tt::foil::Buffer> dram_scaler;
+    std::shared_ptr<tt::foil::Buffer> dram_eps;
+};
+// a, b in; sum_out and normed_out are written. Sum/normed are
+// allocated by the caller (typical pattern in qwen3_run).
+AddRmsNormOp make_add_rmsnorm(tt::foil::Device& dev,
+                              const TensorDesc& a, const TensorDesc& b,
+                              const TensorDesc& gamma,
+                              TensorDesc& sum_out, TensorDesc& normed_out,
+                              uint32_t NCHt, uint32_t Wt,
+                              float eps,
+                              tt::foil::CoreCoord core = {},
+                              const std::string& kernel_dir = "");
+void set_add_rmsnorm_args(tt::foil::Device& dev, AddRmsNormOp& op,
+                          const TensorDesc& a, const TensorDesc& b,
+                          const TensorDesc& gamma,
+                          const TensorDesc& sum_out, const TensorDesc& normed_out,
+                          uint32_t NCHt, uint32_t Wt);
+void execute(tt::foil::Device& dev, AddRmsNormOp& op);
+
+// =====================================================================
+// RmsNormRope (fused): Y = RoPE( RMSNorm(x, gamma), cos, sin ).
+// Used for Q and K projections — replaces the rmsnorm_qk → rope chain.
+// =====================================================================
+struct RmsNormRopeOp {
+    std::shared_ptr<tt::foil::Kernel> kernel;
+    std::shared_ptr<tt::foil::Buffer> l1_x;
+    std::shared_ptr<tt::foil::Buffer> l1_reduce;
+    std::shared_ptr<tt::foil::Buffer> l1_gamma;
+    std::shared_ptr<tt::foil::Buffer> l1_eps;
+    std::shared_ptr<tt::foil::Buffer> l1_x2;
+    std::shared_ptr<tt::foil::Buffer> l1_var;
+    std::shared_ptr<tt::foil::Buffer> l1_recip_sqrt;
+    std::shared_ptr<tt::foil::Buffer> l1_x_normed;
+    std::shared_ptr<tt::foil::Buffer> l1_cos;
+    std::shared_ptr<tt::foil::Buffer> l1_sin;
+    std::shared_ptr<tt::foil::Buffer> l1_normed;
+    std::shared_ptr<tt::foil::Buffer> l1_tmp0;
+    std::shared_ptr<tt::foil::Buffer> l1_tmp1;
+    std::shared_ptr<tt::foil::Buffer> l1_out;
+    std::shared_ptr<tt::foil::Buffer> dram_scaler;
+    std::shared_ptr<tt::foil::Buffer> dram_eps;
+};
+// x: [St*num_heads, Dt] tiles; gamma: [Dt]; cos/sin: [St, Dt_half].
+// out: [St, num_heads*Dt] (packed multi-head RoPE-rotated).
+RmsNormRopeOp make_rmsnorm_rope(tt::foil::Device& dev,
+                                const TensorDesc& x, const TensorDesc& gamma,
+                                const TensorDesc& cos, const TensorDesc& sin,
+                                TensorDesc& out,
+                                uint32_t St, uint32_t num_heads, uint32_t Dt_half,
+                                float eps,
+                                tt::foil::CoreCoord core = {},
+                                const std::string& kernel_dir = "");
+void set_rmsnorm_rope_args(tt::foil::Device& dev, RmsNormRopeOp& op,
+                           const TensorDesc& x, const TensorDesc& gamma,
+                           const TensorDesc& cos, const TensorDesc& sin,
+                           const TensorDesc& out,
+                           uint32_t St, uint32_t num_heads, uint32_t Dt_half);
+void execute(tt::foil::Device& dev, RmsNormRopeOp& op);
+
+// =====================================================================
 // ElementwiseAdd
 //   y = a + b   (elementwise, per-tile) — Transformer residual connection
 // =====================================================================
@@ -290,6 +393,54 @@ void set_embedding_args(tt::foil::Device& dev, EmbeddingOp& op,
                         uint32_t D,
                         const TensorDesc& out);
 void execute(tt::foil::Device& dev, EmbeddingOp& op);
+
+// =====================================================================
+// ArgmaxRow0 (BRISC scan + NCRISC writer, no compute)
+//   Given a [Mt=1, Vt] tile-format BF16 buffer, find the column index of
+//   the maximum value in row 0 and write a 4-byte uint32_t to the output
+//   DRAM buffer.
+//
+// Output (`out`) must be a 4-byte DRAM buffer (allocate one yourself or
+// leave the shared_ptr null and the factory will allocate it).
+// =====================================================================
+struct ArgmaxRow0Op {
+    std::shared_ptr<tt::foil::Kernel> kernel;
+    std::shared_ptr<tt::foil::Buffer> l1_out;
+};
+ArgmaxRow0Op make_argmax_row0(tt::foil::Device& dev,
+                              const TensorDesc& logits,
+                              uint32_t Vt,
+                              TensorDesc& out,
+                              tt::foil::CoreCoord core = {},
+                              const std::string& kernel_dir = "");
+void set_argmax_row0_args(tt::foil::Device& dev, ArgmaxRow0Op& op,
+                          const TensorDesc& logits, uint32_t Vt,
+                          const TensorDesc& out);
+void execute(tt::foil::Device& dev, ArgmaxRow0Op& op);
+
+// =====================================================================
+// KvAppend — device-side decode KV-cache append (BRISC only).
+//   Reads the post-RoPE K row and the V row from T_Kr / T_V, writes
+//   them into the per-layer K^T cache (slot1, col slot1_r) and V cache
+//   (slot1, row slot1_r). Replaces qwen3_run's host-side
+//   `dec:kv_slot1_rebuild` step.
+// =====================================================================
+struct KvAppendOp {
+    std::shared_ptr<tt::foil::Kernel> kernel;
+    std::shared_ptr<tt::foil::Buffer> l1_scratch;
+};
+KvAppendOp make_kv_append(tt::foil::Device& dev,
+                          const TensorDesc& kr, const TensorDesc& v,
+                          const TensorDesc& kt_cache,
+                          const TensorDesc& v_cache,
+                          uint32_t slot1_r, uint32_t Nk, uint32_t StKv,
+                          tt::foil::CoreCoord core = {},
+                          const std::string& kernel_dir = "");
+void set_kv_append_args(tt::foil::Device& dev, KvAppendOp& op,
+                        const TensorDesc& kr, const TensorDesc& v,
+                        const TensorDesc& kt_cache, const TensorDesc& v_cache,
+                        uint32_t slot1_r, uint32_t Nk, uint32_t StKv);
+void execute(tt::foil::Device& dev, KvAppendOp& op);
 
 // =====================================================================
 // RoPE (Rotary Position Embedding)

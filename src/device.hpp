@@ -34,9 +34,15 @@ struct L1Allocator {
     uint64_t base{0};
     uint64_t current{0};
     uint64_t end{0};
+    // iter21: watermark for persistent allocations. reset() rewinds
+    // `current` back to `watermark` (≥ base). Caller can call
+    // set_watermark() after staging persistent buffers to keep them
+    // alive across reset_l1() / release_kernels() cycles.
+    uint64_t watermark{0};
 
     uint64_t alloc(std::size_t bytes, uint32_t alignment = 16);
     void reset();
+    void set_watermark() { watermark = current; }
 };
 
 // Whole-device DRAM allocator (channel 0)
@@ -88,6 +94,12 @@ struct Device {
     // because rewinding the KERNEL_CONFIG arena lets the next load_kernel
     // reuse those L1 addresses for new binaries.
     std::unordered_map<uint64_t, std::unordered_set<const Kernel*>> resident_kernels;
+
+    // iter21: per-core set of Kernels that are NOT evicted by
+    // release_kernels(). Used together with the L1/kernel_config
+    // watermark so a persistent op can outlive surrounding
+    // reset_l1/release_kernels cycles.
+    std::unordered_map<uint64_t, std::unordered_set<const Kernel*>> pinned_kernels;
 
     // DRAM bump allocator (channel 0)
     DramAllocator dram_alloc;
