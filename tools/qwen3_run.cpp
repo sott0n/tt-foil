@@ -563,8 +563,12 @@ int main(int argc, char** argv) try {
         //     (DRAM allocate + write_buffer, single-threaded on UMD)
         //   counting_semaphore caps RAM by limiting in-flight prepared
         //     layers to kInFlight (≈ kInFlight × 80 MB).
-        constexpr uint32_t kWorkers  = 4;
-        constexpr uint32_t kInFlight = 6;  // worker slots + a little queue
+        // iter19: profiling showed prepare (disk read + tile2d, CPU-bound)
+        // is the bottleneck at ~500 ms/layer while upload is only ~19 ms.
+        // More workers cut the critical path (28-layer prepare ≈ 4s with
+        // 4 workers, ≈ 2s with 8). Memory bounded by kInFlight × ~96 MB.
+        constexpr uint32_t kWorkers  = 16;
+        constexpr uint32_t kInFlight = 18;
         std::counting_semaphore<kInFlight> slots{kInFlight};
         std::vector<std::promise<TiledLayer>> proms(kNumLayers);
         std::vector<std::future<TiledLayer>>  futs(kNumLayers);
