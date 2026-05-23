@@ -82,6 +82,22 @@ void kernel_set_runtime_args(
     throw std::runtime_error("tt-foil: set_runtime_args called for a RISC not in this kernel");
 }
 
+void pin_persistent(Device& device, const Kernel& kernel, CoreCoord logical_core) {
+    uint64_t key = Device::core_key(logical_core.x, logical_core.y);
+    // Freeze current high-water marks so reset/release rewinds only
+    // back to here, not all the way to base.
+    auto kc_it = device.kernel_config_allocs.find(key);
+    if (kc_it != device.kernel_config_allocs.end()) kc_it->second.set_watermark();
+    auto l1_it = device.l1_allocs.find(key);
+    if (l1_it != device.l1_allocs.end()) l1_it->second.set_watermark();
+    // Mark the kernel as pinned so release_kernels won't evict it
+    // from resident_kernels once its ELF has actually been NOC-written
+    // (which happens on the first dispatch — pin_persistent itself
+    // is too early; make_*() only *allocates* kernel_text_addr without
+    // writing to L1).
+    device.pinned_kernels[key].insert(&kernel);
+}
+
 void release_kernels(Device& device, CoreCoord logical_core) {
     // The kernel_config_for_core() entry is lazily created on first use.
     // Erase it; the next load_kernel() will lazily reconstruct it with
@@ -90,11 +106,29 @@ void release_kernels(Device& device, CoreCoord logical_core) {
     // caller now has stale pointers into the (about-to-be-overwritten)
     // region — see runtime.hpp for the contract.
     uint64_t key = Device::core_key(logical_core.x, logical_core.y);
-    device.kernel_config_allocs.erase(key);
-    // Rewinding the KERNEL_CONFIG arena lets the next load_kernel reuse
-    // those L1 addresses for new binaries, so any Kernel previously
-    // dispatched on this core is considered evicted.
-    device.resident_kernels.erase(key);
+    // iter21: rewind to watermark instead of dropping the allocator —
+    // anything below the watermark (a pinned persistent op's text +
+    // RTAs) stays addressable. If no pin was ever set, watermark==0
+    // and L1Allocator::reset() falls back to base, matching the
+    // pre-iter21 behaviour.
+    auto kc_it = device.kernel_config_allocs.find(key);
+    if (kc_it != device.kernel_config_allocs.end()) {
+        kc_it->second.reset();
+    }
+    // Evict resident kernels except those explicitly pinned. Pinned
+    // kernels live below the kernel_config watermark; their text is
+    // intact across this reset.
+    auto& resident = device.resident_kernels[key];
+    auto pinned_it = device.pinned_kernels.find(key);
+    if (pinned_it == device.pinned_kernels.end() || pinned_it->second.empty()) {
+        resident.clear();
+    } else {
+        const auto& pinned = pinned_it->second;
+        for (auto it = resident.begin(); it != resident.end();) {
+            if (pinned.contains(*it)) ++it;
+            else it = resident.erase(it);
+        }
+    }
 }
 
 void reset_l1(Device& device, CoreCoord logical_core) {

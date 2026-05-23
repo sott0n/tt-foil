@@ -140,6 +140,22 @@ std::shared_ptr<Kernel> load_kernel(
 //   • The launch_msg slot the firmware polls is untouched.
 void release_kernels(Device& device, CoreCoord logical_core);
 
+// Pin a kernel so it survives release_kernels() / reset_l1() cycles.
+//
+// After building a persistent op (its L1 CBs allocated, kernel ELF
+// loaded), call pin_persistent(dev, kernel, core) to:
+//   • freeze the current L1 watermark — subsequent reset_l1() rewinds
+//     to this point, not to base, so the op's CB-backing L1 stays valid;
+//   • freeze the kernel_config watermark — subsequent release_kernels()
+//     rewinds to this point, so the op's kernel text + RTA slots stay;
+//   • add the kernel to the per-core pinned set — release_kernels()
+//     skips it when clearing resident_kernels, so dispatch's ELF NOC
+//     skip keeps hitting on the next dispatch.
+//
+// Caller must keep the std::shared_ptr<Kernel> alive and use the op's
+// set_*_args() per call to update DRAM addresses + shape RTAs.
+void pin_persistent(Device& device, const Kernel& kernel, CoreCoord logical_core);
+
 // Reset the per-core L1 bump allocator: subsequent allocate_buffer(L1, …)
 // calls reclaim the whole user L1 region from the base.
 //

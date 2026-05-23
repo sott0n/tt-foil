@@ -3,6 +3,7 @@
 
 #include "device.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 #include "llrt/hal.hpp"
@@ -49,7 +50,10 @@ uint64_t L1Allocator::alloc(std::size_t bytes, uint32_t alignment) {
     return aligned;
 }
 
-void L1Allocator::reset() { current = base; }
+void L1Allocator::reset() {
+    // iter21: rewind to watermark (defaults to base when never pinned).
+    current = std::max(watermark, base);
+}
 
 uint64_t DramAllocator::alloc(std::size_t bytes, uint32_t alignment) {
     uint64_t aligned = (current + alignment - 1) & ~static_cast<uint64_t>(alignment - 1);

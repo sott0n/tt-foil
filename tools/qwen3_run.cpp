@@ -625,6 +625,26 @@ int main(int argc, char** argv) try {
     tt::foil::read_buffer(*dev, *T_embed_rm.buf, hidden_rm.data(), kS * kH * 2);
     upload(T_layer_in, tile2d(hidden_rm, kS, kH));
 
+    // iter21: persistent rmsnorm_rope.
+    auto rr_op = ol::make_rmsnorm_rope(*dev, T_Q, layers[0].qng,
+                                       T_cos, T_sin, T_Qr,
+                                       kSt, kNumQ, kDtHalf, kEps);
+    tt::foil::pin_persistent(*dev, *rr_op.kernel, core);
+    auto run_rr = [&](const char* tag,
+                      const ol::TensorDesc& x, const ol::TensorDesc& gamma,
+                      const ol::TensorDesc& cos, const ol::TensorDesc& sin,
+                      const ol::TensorDesc& out,
+                      uint32_t num_heads) {
+        auto t0 = Clock::now();
+        ol::set_rmsnorm_rope_args(*dev, rr_op, x, gamma, cos, sin, out,
+                                  kSt, num_heads, kDtHalf);
+        ol::execute(*dev, rr_op);
+        // NO release_kernels / reset_l1 — the watermark + pinned_kernels
+        // set up by pin_persistent keeps the kernel's text, RTAs and L1
+        // CB-backing buffers alive across surrounding transient ops.
+        g_prof.add(tag, std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+    };
+
     // -----------------------------------------------------------------
     // Prefill — same one-shot dispatch pattern as decode. Matmul calls
     // (QKV, O, FFN gate/up/down, lm_head) use run_matmul_grid (1×4);
@@ -643,8 +663,8 @@ int main(int argc, char** argv) try {
         // Fused QKV matmul: A·[Wq|Wk|Wv]. Output lands in T_QKV; T_Q,
         // T_K, T_V are pre-set offset views into the same buffer.
         run_matmul_grid("pre:matmul_qkv", T_xnorm1, w.Wqkv, T_QKV, kSt, kHt, kNqkvDt);
-        run1("pre:rmsnorm_rope", [&] { return ol::make_rmsnorm_rope(*dev, T_Q, w.qng, T_cos, T_sin, T_Qr, kSt, kNumQ,  kDtHalf, kEps); });
-        run1("pre:rmsnorm_rope", [&] { return ol::make_rmsnorm_rope(*dev, T_K, w.kng, T_cos, T_sin, T_Kr, kSt, kNumKv, kDtHalf, kEps); });
+        run_rr("pre:rmsnorm_rope", T_Q, w.qng, T_cos, T_sin, T_Qr, kNumQ);
+        run_rr("pre:rmsnorm_rope", T_K, w.kng, T_cos, T_sin, T_Kr, kNumKv);
         run1("pre:transpose",  [&] { return ol::make_transpose_2d(*dev, T_Kr, T_Kt, kSt, kNkDt); });
 
         {
@@ -766,8 +786,8 @@ int main(int argc, char** argv) try {
             // Fused QKV matmul (iter7) — see comments above the T_QKV
             // allocation. One dispatch instead of three.
             run_matmul_grid("dec:matmul_qkv", T_xnorm1, w.Wqkv, T_QKV, kSt, kHt, kNqkvDt);
-            run1("dec:rmsnorm_rope", [&] { return ol::make_rmsnorm_rope(*dev, T_Q, w.qng, T_dcos, T_dsin, T_Qr, kSt, kNumQ,  kDtHalf, kEps); });
-            run1("dec:rmsnorm_rope", [&] { return ol::make_rmsnorm_rope(*dev, T_K, w.kng, T_dcos, T_dsin, T_Kr, kSt, kNumKv, kDtHalf, kEps); });
+            run_rr("dec:rmsnorm_rope", T_Q, w.qng, T_dcos, T_dsin, T_Qr, kNumQ);
+            run_rr("dec:rmsnorm_rope", T_K, w.kng, T_dcos, T_dsin, T_Kr, kNumKv);
 
             {
                 const uint32_t slot1_r = pos - kS;
