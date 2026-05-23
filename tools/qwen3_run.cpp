@@ -284,6 +284,7 @@ LayerW upload_layer(tt::foil::Device& dev, const TiledLayer& T) {
 }  // namespace
 
 int main(int argc, char** argv) try {
+    const auto wall_t0 = Clock::now();
     if (argc < 3) {
         std::fprintf(stderr,
             "usage: qwen3_run <prompt_ids.bin (uint32[32])> <num_decode>\n"
@@ -842,6 +843,16 @@ int main(int argc, char** argv) try {
 
     g_prof.report();
     tt::foil::close_device(std::move(dev));
+    // Print real end-to-end wall (main entry → here, inclusive of UMD
+    // open/close, weights load, prefill, decode, lm_head, argmax). The
+    // profile TOTAL above is a sum of ScopedTimer entries that
+    // double-counts nested ranges; this line is the single source of
+    // truth for "how long did the run actually take". bench/bench.sh
+    // greps this line into HISTORY.md.
+    const double wall_ms = std::chrono::duration<double, std::milli>(
+        Clock::now() - wall_t0).count();
+    std::fprintf(stderr, "\n=== real_wall ===\n  wall_ms %.1f  (= %.2f s)\n",
+                 wall_ms, wall_ms / 1000.0);
     return 0;
 } catch (const std::exception& e) {
     std::fprintf(stderr, "qwen3_run: FAIL — %s\n", e.what());
