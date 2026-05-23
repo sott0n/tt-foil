@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <immintrin.h>
 #include <future>
 #include <map>
 #include <semaphore>
@@ -123,18 +124,33 @@ std::vector<uint32_t> load_u32(const std::string& p, std::size_t n) {
     return v;
 }
 
+// iter20: AVX2-vectorized tile2d. Each 16×16 face-row is exactly one
+// 256-bit vector (16 × uint16_t), so the inner copy is one load + one
+// store. Eliminates the staging `block` and the nested scalar copies
+// in the original implementation.
+__attribute__((target("avx2")))
 std::vector<uint16_t> tile2d(const std::vector<uint16_t>& rm, uint32_t Rows, uint32_t Cols) {
     const uint32_t Rt = Rows / kTileH, Ct = Cols / kTileW;
-    std::vector<uint16_t> out;
-    out.reserve(static_cast<size_t>(Rt) * Ct * kTileWords);
-    std::vector<uint16_t> block(kTileH * kTileW);
-    for (uint32_t rt = 0; rt < Rt; ++rt)
+    std::vector<uint16_t> out(static_cast<size_t>(Rt) * Ct * kTileWords);
+    uint16_t* dst = out.data();
+    const uint16_t* src = rm.data();
+    for (uint32_t rt = 0; rt < Rt; ++rt) {
         for (uint32_t ct = 0; ct < Ct; ++ct) {
-            for (uint32_t r = 0; r < kTileH; ++r)
-                for (uint32_t c = 0; c < kTileW; ++c)
-                    block[r * kTileW + c] = rm[(rt * kTileH + r) * Cols + ct * kTileW + c];
-            tt::foil::test::row_major_to_tile(block.data(), out);
+            // 4 faces, each 16 × 16. Memory order in `out`: face0, face1, face2, face3.
+            for (uint32_t fr = 0; fr < 2; ++fr) {
+                for (uint32_t fc = 0; fc < 2; ++fc) {
+                    for (uint32_t r = 0; r < 16; ++r) {
+                        const uint16_t* s = src
+                            + (static_cast<size_t>(rt * kTileH + fr * 16 + r)) * Cols
+                            + ct * kTileW + fc * 16;
+                        __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(s));
+                        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst), v);
+                        dst += 16;
+                    }
+                }
+            }
         }
+    }
     return out;
 }
 std::vector<uint16_t> untile2d(const std::vector<uint16_t>& tiles, uint32_t Rows, uint32_t Cols) {
