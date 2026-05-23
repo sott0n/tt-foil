@@ -623,10 +623,8 @@ int main(int argc, char** argv) try {
         // Fused QKV matmul: A·[Wq|Wk|Wv]. Output lands in T_QKV; T_Q,
         // T_K, T_V are pre-set offset views into the same buffer.
         run_matmul_grid("pre:matmul_qkv", T_xnorm1, w.Wqkv, T_QKV, kSt, kHt, kNqkvDt);
-        run1("pre:rmsnorm_qk", [&] { return ol::make_rmsnorm(*dev, T_Q, w.qng, T_Qn, kSt * kNumQ,  kDt, kEps); });
-        run1("pre:rmsnorm_qk", [&] { return ol::make_rmsnorm(*dev, T_K, w.kng, T_Kn, kSt * kNumKv, kDt, kEps); });
-        run1("pre:rope",       [&] { return ol::make_rope(*dev, T_Qn, T_cos, T_sin, T_Qr, kSt, kNumQ,  kDtHalf); });
-        run1("pre:rope",       [&] { return ol::make_rope(*dev, T_Kn, T_cos, T_sin, T_Kr, kSt, kNumKv, kDtHalf); });
+        run1("pre:rmsnorm_rope", [&] { return ol::make_rmsnorm_rope(*dev, T_Q, w.qng, T_cos, T_sin, T_Qr, kSt, kNumQ,  kDtHalf, kEps); });
+        run1("pre:rmsnorm_rope", [&] { return ol::make_rmsnorm_rope(*dev, T_K, w.kng, T_cos, T_sin, T_Kr, kSt, kNumKv, kDtHalf, kEps); });
         run1("pre:transpose",  [&] { return ol::make_transpose_2d(*dev, T_Kr, T_Kt, kSt, kNkDt); });
 
         {
@@ -748,10 +746,8 @@ int main(int argc, char** argv) try {
             // Fused QKV matmul (iter7) — see comments above the T_QKV
             // allocation. One dispatch instead of three.
             run_matmul_grid("dec:matmul_qkv", T_xnorm1, w.Wqkv, T_QKV, kSt, kHt, kNqkvDt);
-            run1("dec:rmsnorm_qk", [&] { return ol::make_rmsnorm(*dev, T_Q, w.qng, T_Qn, kSt * kNumQ,  kDt, kEps); });
-            run1("dec:rmsnorm_qk", [&] { return ol::make_rmsnorm(*dev, T_K, w.kng, T_Kn, kSt * kNumKv, kDt, kEps); });
-            run1("dec:rope",       [&] { return ol::make_rope(*dev, T_Qn, T_dcos, T_dsin, T_Qr, kSt, kNumQ,  kDtHalf); });
-            run1("dec:rope",       [&] { return ol::make_rope(*dev, T_Kn, T_dcos, T_dsin, T_Kr, kSt, kNumKv, kDtHalf); });
+            run1("dec:rmsnorm_rope", [&] { return ol::make_rmsnorm_rope(*dev, T_Q, w.qng, T_dcos, T_dsin, T_Qr, kSt, kNumQ,  kDtHalf, kEps); });
+            run1("dec:rmsnorm_rope", [&] { return ol::make_rmsnorm_rope(*dev, T_K, w.kng, T_dcos, T_dsin, T_Kr, kSt, kNumKv, kDtHalf, kEps); });
 
             {
                 const uint32_t slot1_r = pos - kS;

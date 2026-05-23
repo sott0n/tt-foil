@@ -210,6 +210,46 @@ void set_add_rmsnorm_args(tt::foil::Device& dev, AddRmsNormOp& op,
 void execute(tt::foil::Device& dev, AddRmsNormOp& op);
 
 // =====================================================================
+// RmsNormRope (fused): Y = RoPE( RMSNorm(x, gamma), cos, sin ).
+// Used for Q and K projections — replaces the rmsnorm_qk → rope chain.
+// =====================================================================
+struct RmsNormRopeOp {
+    std::shared_ptr<tt::foil::Kernel> kernel;
+    std::shared_ptr<tt::foil::Buffer> l1_x;
+    std::shared_ptr<tt::foil::Buffer> l1_reduce;
+    std::shared_ptr<tt::foil::Buffer> l1_gamma;
+    std::shared_ptr<tt::foil::Buffer> l1_eps;
+    std::shared_ptr<tt::foil::Buffer> l1_x2;
+    std::shared_ptr<tt::foil::Buffer> l1_var;
+    std::shared_ptr<tt::foil::Buffer> l1_recip_sqrt;
+    std::shared_ptr<tt::foil::Buffer> l1_x_normed;
+    std::shared_ptr<tt::foil::Buffer> l1_cos;
+    std::shared_ptr<tt::foil::Buffer> l1_sin;
+    std::shared_ptr<tt::foil::Buffer> l1_normed;
+    std::shared_ptr<tt::foil::Buffer> l1_tmp0;
+    std::shared_ptr<tt::foil::Buffer> l1_tmp1;
+    std::shared_ptr<tt::foil::Buffer> l1_out;
+    std::shared_ptr<tt::foil::Buffer> dram_scaler;
+    std::shared_ptr<tt::foil::Buffer> dram_eps;
+};
+// x: [St*num_heads, Dt] tiles; gamma: [Dt]; cos/sin: [St, Dt_half].
+// out: [St, num_heads*Dt] (packed multi-head RoPE-rotated).
+RmsNormRopeOp make_rmsnorm_rope(tt::foil::Device& dev,
+                                const TensorDesc& x, const TensorDesc& gamma,
+                                const TensorDesc& cos, const TensorDesc& sin,
+                                TensorDesc& out,
+                                uint32_t St, uint32_t num_heads, uint32_t Dt_half,
+                                float eps,
+                                tt::foil::CoreCoord core = {},
+                                const std::string& kernel_dir = "");
+void set_rmsnorm_rope_args(tt::foil::Device& dev, RmsNormRopeOp& op,
+                           const TensorDesc& x, const TensorDesc& gamma,
+                           const TensorDesc& cos, const TensorDesc& sin,
+                           const TensorDesc& out,
+                           uint32_t St, uint32_t num_heads, uint32_t Dt_half);
+void execute(tt::foil::Device& dev, RmsNormRopeOp& op);
+
+// =====================================================================
 // ElementwiseAdd
 //   y = a + b   (elementwise, per-tile) — Transformer residual connection
 // =====================================================================
