@@ -7,7 +7,7 @@
 //   lm_head_W = embed_tokens.T       [H=2048, V=151936]
 //
 // Pre-transposed and pre-tiled weight buffer (622 MB on disk) is produced
-// by tools/qwen3_lm_head_golden.py — that script also generates the
+// by models/qwen3_vl_2b/golden/qwen3_lm_head_golden.py — that script also generates the
 // hidden-state input and the golden logits, and dumps top-1 argmax per row.
 //
 // Verifies:
@@ -17,9 +17,9 @@
 //   • top-1 argmax per sequence row exactly matches the host golden
 //
 // Regenerate inputs:
-//   python3 tools/export_qwen3_layer.py --layer none --model-tensors \
+//   python3 models/qwen3_vl_2b/export_qwen3_layer.py --layer none --model-tensors \
 //       --out-dir data/qwen3_vl_2b
-//   python3 tools/qwen3_lm_head_golden.py --data-dir data/qwen3_vl_2b \
+//   python3 models/qwen3_vl_2b/golden/qwen3_lm_head_golden.py --data-dir data/qwen3_vl_2b \
 //       --hidden 2048 --vocab 151936 --seq 32
 
 #include <algorithm>

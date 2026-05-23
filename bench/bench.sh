@@ -44,7 +44,7 @@ echo "# commit=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo none)
 echo "# date=$STAMP" >>"$OUT"
 
 TT_FOIL_QWEN3_DATA="$DATA" TT_FOIL_OPS_DIR="$OPS" TT_FOIL_DEVICE="$DEV" \
-    "$REPO/build/tools/qwen3_run" "$PROMPT" "$NDEC" \
+    "$REPO/build/models/qwen3_vl_2b/qwen3_run" "$PROMPT" "$NDEC" \
     > "$OUT.tokens" 2>>"$OUT" || { echo "RUN FAILED — see $OUT" >&2; exit 1; }
 
 echo

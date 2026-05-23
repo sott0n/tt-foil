@@ -10,7 +10,7 @@ times sequentially. cos/sin tables are shared across all layers (and
 written to the parent --data-dir, not per-layer).
 
 Usage:
-  python3 tools/qwen3_multilayer_golden.py \
+  python3 models/qwen3_vl_2b/golden/qwen3_multilayer_golden.py \
       --data-dir data/qwen3_vl_2b \
       --num-layers 3 \
       --num-q 16 --num-kv 8 --head-dim 128 \

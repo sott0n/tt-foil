@@ -8,7 +8,7 @@
 // Data:
 //   data/qwen3_vl_2b/model/embed_tokens.bin   [151936, 2048] bf16
 // Produced by:
-//   python3 tools/export_qwen3_layer.py --model Qwen/Qwen3-VL-2B-Instruct \
+//   python3 models/qwen3_vl_2b/export_qwen3_layer.py --model Qwen/Qwen3-VL-2B-Instruct \
 //       --layer none --model-tensors --out-dir data/qwen3_vl_2b
 
 #include <cstdint>

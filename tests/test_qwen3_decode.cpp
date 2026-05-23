@@ -3,7 +3,7 @@
 //
 // HW test: Qwen3-VL-2B end-to-end prefill + 1-step decode with a KV cache.
 //
-// Pipeline (mirrors tools/qwen3_inference_golden.py decode path):
+// Pipeline (mirrors models/qwen3_vl_2b/golden/qwen3_inference_golden.py decode path):
 //
 //   ┌── prefill (identical to test_qwen3_inference) ──┐
 //   │  embed → N × Transformer → final_norm → lm_head │
@@ -26,7 +26,7 @@
 //   └────────── compare to decode_top1 golden ────────┘
 //
 // Required golden (regenerate after weight export):
-//   python3 tools/qwen3_inference_golden.py \
+//   python3 models/qwen3_vl_2b/golden/qwen3_inference_golden.py \
 //       --data-dir data/qwen3_vl_2b --num-layers <N> \
 //       --num-q 16 --num-kv 8 --head-dim 128 \
 //       --rope-theta 5000000.0 --seq 32 \

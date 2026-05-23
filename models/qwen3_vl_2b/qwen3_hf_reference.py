@@ -3,13 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 Reference forward pass via HuggingFace transformers for sanity-checking
-tt-foil's numpy golden (tools/qwen3_inference_golden.py).
+tt-foil's numpy golden (models/qwen3_vl_2b/golden/qwen3_inference_golden.py).
 
 Runs the *full* Qwen3-VL-2B text model on the same token ids the golden
 uses, captures hidden states after every layer, and prints per-layer
 mean/max so we can compare against the numpy golden's output:
 
-  python3 tools/qwen3_hf_reference.py \
+  python3 models/qwen3_vl_2b/qwen3_hf_reference.py \
       --data-dir data/qwen3_vl_2b --num-layers 3 --seq 32
 
 Use --prompt "..." to match the golden's prompt mode.

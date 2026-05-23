@@ -6,11 +6,11 @@
 // given prompt token-IDs (a binary file of uint32[seq]) and N greedy
 // decode steps, and prints the generated token-IDs to stdout (one per
 // line). No numpy / golden / tokenizer dependency — pair with
-// tools/qwen3_chat.py for prompt → tokens → text round-tripping.
+// models/qwen3_vl_2b/qwen3_chat.py for prompt → tokens → text round-tripping.
 //
 // Usage:
 //   TT_FOIL_QWEN3_DATA=data/qwen3_vl_2b TT_FOIL_OPS_DIR=ops \
-//   TT_FOIL_DEVICE=0 ./build/tools/qwen3_run <prompt_ids.bin> <num_decode>
+//   TT_FOIL_DEVICE=0 ./build/models/qwen3_vl_2b/qwen3_run <prompt_ids.bin> <num_decode>
 //
 // Required env:
 //   TT_FOIL_QWEN3_DATA  — root of exported weights

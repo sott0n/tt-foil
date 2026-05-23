@@ -11,15 +11,15 @@
 //     → argmax                         [S]
 //
 // PASS criterion: top-1 predicted token per sequence row matches the
-// numpy reference in tools/qwen3_inference_golden.py.
+// numpy reference in models/qwen3_vl_2b/golden/qwen3_inference_golden.py.
 //
 // Required inputs (regenerate after weight export):
-//   python3 tools/qwen3_inference_golden.py \
+//   python3 models/qwen3_vl_2b/golden/qwen3_inference_golden.py \
 //       --data-dir data/qwen3_vl_2b --num-layers 3 \
 //       --num-q 16 --num-kv 8 --head-dim 128 \
 //       --rope-theta 5000000.0 --seq 32
 //
-//   tools/qwen3_lm_head_golden.py must have been run too — this test
+//   models/qwen3_vl_2b/golden/qwen3_lm_head_golden.py must have been run too — this test
 //   reuses model/lm_head_tiled.bin for the lm_head projection.
 
 #include <algorithm>

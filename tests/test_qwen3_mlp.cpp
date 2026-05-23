@@ -12,9 +12,9 @@
 // Data files are gitignored (~31 MB of bf16 weights); regenerate them with:
 //
 //   pip install huggingface_hub safetensors torch
-//   python3 tools/export_qwen3_layer.py --model Qwen/Qwen3-0.6B --layer 0 \
+//   python3 models/qwen3_vl_2b/export_qwen3_layer.py --model Qwen/Qwen3-0.6B --layer 0 \
 //       --out-dir data/qwen3_06b
-//   python3 tools/qwen3_mlp_golden.py --layer-dir data/qwen3_06b/layer0 --seq 32
+//   python3 models/qwen3_vl_2b/golden/qwen3_mlp_golden.py --layer-dir data/qwen3_06b/layer0 --seq 32
 //
 // Produces:
 //   data/qwen3_06b/layer0/{ln2_gamma,W_gate,W_up,W_down}.bin

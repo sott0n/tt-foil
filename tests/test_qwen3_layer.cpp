@@ -25,9 +25,9 @@
 // host, q_norm/k_norm reuse RMSNorm with NCHt=St*num_heads, Wt=Dt).
 //
 // Regenerate inputs:
-//   python3 tools/export_qwen3_layer.py --model Qwen/Qwen3-VL-2B-Instruct \
+//   python3 models/qwen3_vl_2b/export_qwen3_layer.py --model Qwen/Qwen3-VL-2B-Instruct \
 //       --layer 0 --out-dir data/qwen3_vl_2b
-//   python3 tools/qwen3_layer_golden.py --layer-dir data/qwen3_vl_2b/layer0 \
+//   python3 models/qwen3_vl_2b/golden/qwen3_layer_golden.py --layer-dir data/qwen3_vl_2b/layer0 \
 //       --num-q 16 --num-kv 8 --head-dim 128 --rope-theta 5000000.0 --seq 32
 
 #include <cmath>

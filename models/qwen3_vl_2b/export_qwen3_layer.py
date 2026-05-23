@@ -16,7 +16,7 @@ A `manifest.json` records every binary's shape and dtype so the C++ test
 doesn't have to guess.
 
 Usage:
-  python3 tools/export_qwen3_layer.py \
+  python3 models/qwen3_vl_2b/export_qwen3_layer.py \
       --model Qwen/Qwen3-VL-2B-Instruct \
       --layer 0 \
       --out-dir data/qwen3_vl_2b
