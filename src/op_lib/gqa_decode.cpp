@@ -15,6 +15,7 @@
 #include <stdexcept>
 
 #include "cb_config.hpp"
+#include "op_cache.hpp"
 #include "op_lib_internal.hpp"
 
 namespace tt::foil::op_lib {
@@ -23,7 +24,7 @@ using detail::kTileBytes;
 using detail::resolve_kernel_dir;
 using detail::make_const_tile;
 
-GqaDecodeOp make_gqa_decode(tt::foil::Device& dev,
+static GqaDecodeOp make_gqa_decode_impl(tt::foil::Device& dev,
                             const TensorDesc& q, const TensorDesc& kt,
                             const TensorDesc& v, const TensorDesc& mask,
                             TensorDesc& out,
@@ -113,6 +114,30 @@ GqaDecodeOp make_gqa_decode(tt::foil::Device& dev,
     }};
     tt::foil::register_cbs(dev, *op.kernel, cbs);
 
+    set_gqa_decode_args(dev, op, q, kt, v, mask, out, St_q, St_kv, Dt, num_q, num_kv);
+    return op;
+}
+
+GqaDecodeOp make_gqa_decode(tt::foil::Device& dev,
+                            const TensorDesc& q, const TensorDesc& kt,
+                            const TensorDesc& v, const TensorDesc& mask,
+                            TensorDesc& out,
+                            uint32_t St_q, uint32_t St_kv, uint32_t Dt,
+                            uint32_t num_q, uint32_t num_kv,
+                            tt::foil::CoreCoord core,
+                            const std::string& kernel_dir) {
+    if (out.num_tiles == 0)
+        out = allocate_tensor_dram(dev, St_q * num_q * Dt);
+
+    static thread_local OpCache<GqaDecodeOp> g_cache;
+    ShapeKey key{
+        .op_name  = "gqa_decode",
+        .params   = {St_q, St_kv, Dt, num_q, num_kv, 0, 0, 0},
+        .core_key = core_key_of(core),
+    };
+    GqaDecodeOp& op = g_cache.get_or_create(dev, core, key, [&] {
+        return make_gqa_decode_impl(dev, q, kt, v, mask, out, St_q, St_kv, Dt, num_q, num_kv, core, kernel_dir);
+    });
     set_gqa_decode_args(dev, op, q, kt, v, mask, out, St_q, St_kv, Dt, num_q, num_kv);
     return op;
 }

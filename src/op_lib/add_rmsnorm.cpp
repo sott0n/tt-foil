@@ -10,7 +10,10 @@
 #include <cstdint>
 #include <stdexcept>
 
+#include <bit>
+
 #include "cb_config.hpp"
+#include "op_cache.hpp"
 #include "op_lib_internal.hpp"
 
 namespace tt::foil::op_lib {
@@ -20,7 +23,7 @@ using detail::kTileW;
 using detail::resolve_kernel_dir;
 using detail::make_const_tile;
 
-AddRmsNormOp make_add_rmsnorm(tt::foil::Device& dev,
+static AddRmsNormOp make_add_rmsnorm_impl(tt::foil::Device& dev,
                               const TensorDesc& a, const TensorDesc& b,
                               const TensorDesc& gamma,
                               TensorDesc& sum_out, TensorDesc& normed_out,
@@ -96,6 +99,32 @@ AddRmsNormOp make_add_rmsnorm(tt::foil::Device& dev,
     }};
     tt::foil::register_cbs(dev, *op.kernel, cbs);
 
+    set_add_rmsnorm_args(dev, op, a, b, gamma, sum_out, normed_out, NCHt, Wt);
+    return op;
+}
+
+AddRmsNormOp make_add_rmsnorm(tt::foil::Device& dev,
+                              const TensorDesc& a, const TensorDesc& b,
+                              const TensorDesc& gamma,
+                              TensorDesc& sum_out, TensorDesc& normed_out,
+                              uint32_t NCHt, uint32_t Wt,
+                              float eps,
+                              tt::foil::CoreCoord core,
+                              const std::string& kernel_dir) {
+    if (sum_out.num_tiles == 0)
+        sum_out = allocate_tensor_dram(dev, NCHt * Wt);
+    if (normed_out.num_tiles == 0)
+        normed_out = allocate_tensor_dram(dev, NCHt * Wt);
+
+    static thread_local OpCache<AddRmsNormOp> g_cache;
+    ShapeKey key{
+        .op_name  = "add_rmsnorm",
+        .params   = {NCHt, Wt, std::bit_cast<uint32_t>(eps), 0, 0, 0, 0, 0},
+        .core_key = core_key_of(core),
+    };
+    AddRmsNormOp& op = g_cache.get_or_create(dev, core, key, [&] {
+        return make_add_rmsnorm_impl(dev, a, b, gamma, sum_out, normed_out, NCHt, Wt, eps, core, kernel_dir);
+    });
     set_add_rmsnorm_args(dev, op, a, b, gamma, sum_out, normed_out, NCHt, Wt);
     return op;
 }

@@ -13,6 +13,7 @@
 #include <stdexcept>
 
 #include "cb_config.hpp"
+#include "op_cache.hpp"
 #include "op_lib_internal.hpp"
 
 namespace tt::foil::op_lib {
@@ -20,7 +21,7 @@ namespace tt::foil::op_lib {
 using detail::kTileBytes;
 using detail::resolve_kernel_dir;
 
-SiluMulOp make_silu_mul(tt::foil::Device& dev,
+static SiluMulOp make_silu_mul_impl(tt::foil::Device& dev,
                         const TensorDesc& a, const TensorDesc& b,
                         TensorDesc& out,
                         tt::foil::CoreCoord core,
@@ -60,6 +61,27 @@ SiluMulOp make_silu_mul(tt::foil::Device& dev,
     }};
     tt::foil::register_cbs(dev, *op.kernel, cbs);
 
+    set_silu_mul_args(dev, op, a, b, out);
+    return op;
+}
+
+SiluMulOp make_silu_mul(tt::foil::Device& dev,
+                        const TensorDesc& a, const TensorDesc& b,
+                        TensorDesc& out,
+                        tt::foil::CoreCoord core,
+                        const std::string& kernel_dir) {
+    if (out.num_tiles == 0)
+        out = allocate_tensor_dram(dev, a.num_tiles);
+
+    static thread_local OpCache<SiluMulOp> g_cache;
+    ShapeKey key{
+        .op_name  = "silu_mul",
+        .params   = {a.num_tiles, 0, 0, 0, 0, 0, 0, 0},
+        .core_key = core_key_of(core),
+    };
+    SiluMulOp& op = g_cache.get_or_create(dev, core, key, [&] {
+        return make_silu_mul_impl(dev, a, b, out, core, kernel_dir);
+    });
     set_silu_mul_args(dev, op, a, b, out);
     return op;
 }

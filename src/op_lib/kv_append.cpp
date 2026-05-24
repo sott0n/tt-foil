@@ -12,13 +12,14 @@
 #include <stdexcept>
 
 #include "cb_config.hpp"
+#include "op_cache.hpp"
 #include "op_lib_internal.hpp"
 
 namespace tt::foil::op_lib {
 
 using detail::resolve_kernel_dir;
 
-KvAppendOp make_kv_append(tt::foil::Device& dev,
+static KvAppendOp make_kv_append_impl(tt::foil::Device& dev,
                           const TensorDesc& kr, const TensorDesc& v,
                           const TensorDesc& kt_cache,
                           const TensorDesc& v_cache,
@@ -53,6 +54,26 @@ KvAppendOp make_kv_append(tt::foil::Device& dev,
     }};
     tt::foil::register_cbs(dev, *op.kernel, cbs);
 
+    set_kv_append_args(dev, op, kr, v, kt_cache, v_cache, slot1_r, Nk, StKv);
+    return op;
+}
+
+KvAppendOp make_kv_append(tt::foil::Device& dev,
+                          const TensorDesc& kr, const TensorDesc& v,
+                          const TensorDesc& kt_cache,
+                          const TensorDesc& v_cache,
+                          uint32_t slot1_r, uint32_t Nk, uint32_t StKv,
+                          tt::foil::CoreCoord core,
+                          const std::string& kernel_dir) {
+    static thread_local OpCache<KvAppendOp> g_cache;
+    ShapeKey key{
+        .op_name  = "kv_append",
+        .params   = {Nk, StKv, 0, 0, 0, 0, 0, 0},
+        .core_key = core_key_of(core),
+    };
+    KvAppendOp& op = g_cache.get_or_create(dev, core, key, [&] {
+        return make_kv_append_impl(dev, kr, v, kt_cache, v_cache, slot1_r, Nk, StKv, core, kernel_dir);
+    });
     set_kv_append_args(dev, op, kr, v, kt_cache, v_cache, slot1_r, Nk, StKv);
     return op;
 }
