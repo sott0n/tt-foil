@@ -51,7 +51,6 @@ scripts/qwen3_export_weights.sh                       # → data/qwen3_vl_2b/{mo
 Chat wrapper (recommended — tokenises, decodes):
 
 ```bash
-tt-smi -r 0                                            # clean chip state
 TT_FOIL_DEVICE=0 \
 TT_FOIL_QWEN3_DATA=$PWD/data/qwen3_vl_2b \
 TT_FOIL_OPS_DIR=$PWD/ops \
