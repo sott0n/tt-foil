@@ -31,4 +31,15 @@ void dispatch_execute_multi(
     std::span<Kernel* const> kernels,
     int timeout_ms = 5000);
 
+// Fire-and-forget launch: do send_reset + setup + fire_go but DO NOT wait
+// for RUN_MSG_DONE. Caller is responsible for the kernel's lifecycle from
+// here on (typically a persistent worker like the FD dispatcher that runs
+// in an infinite loop until externally signaled to exit).
+//
+// After this returns, the kernel is executing on the chip. The host's view
+// of the kernel state stays at "in-flight" — subsequent dispatch_execute
+// calls on the SAME core would conflict, so callers must reserve the core
+// for the async kernel.
+void dispatch_launch_async(Device& dev, Kernel& kernel);
+
 }  // namespace tt::foil

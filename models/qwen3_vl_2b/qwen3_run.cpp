@@ -37,6 +37,8 @@
 
 #include "tt_foil/runtime.hpp"
 #include "tt_foil/ops.hpp"
+#include "fast_dispatch.hpp"
+#include "device.hpp"
 #include "tile_utils.hpp"
 
 namespace {
@@ -386,8 +388,25 @@ int main(int argc, char** argv) try {
         {0, 4}, {0, 5}, {0, 6}, {0, 7},
     };
     std::vector<tt::foil::CoreCoord> boot_cores = kLmHeadGrid;
+    const bool use_fd = std::getenv("TT_FOIL_FAST_DISPATCH") != nullptr;
+    const tt::foil::CoreCoord fd_dispatcher_core{1, 0};
+    if (use_fd) {
+        boot_cores.push_back(fd_dispatcher_core);
+    }
     auto dev = tt::foil::open_device(pcie_index, "", boot_cores);
     tt::foil::CoreCoord core{0, 0};
+
+    // R5 G2a: enable on-chip fast-dispatch for single-kernel ops. Multi-core
+    // matmul stays on slow-dispatch (G2b will extend FD to multi-worker).
+    std::unique_ptr<tt::foil::FastDispatch> fd_owner;
+    if (use_fd) {
+        fd_owner = std::make_unique<tt::foil::FastDispatch>(*dev, fd_dispatcher_core);
+        fd_owner->start();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        dev->fast_dispatch = fd_owner.get();
+        std::fprintf(stderr, "qwen3_run: fast-dispatch enabled on (%u,%u)\n",
+                     fd_dispatcher_core.x, fd_dispatcher_core.y);
+    }
 
 
     ol::TensorDesc T_embed_table;
@@ -842,6 +861,11 @@ int main(int argc, char** argv) try {
     }
 
     g_prof.report();
+    if (fd_owner) {
+        fd_owner->push_terminate();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        dev->fast_dispatch = nullptr;
+    }
     tt::foil::close_device(std::move(dev));
     // Print real end-to-end wall (main entry → here, inclusive of UMD
     // open/close, weights load, prefill, decode, lm_head, argmax). The

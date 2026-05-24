@@ -4,6 +4,7 @@
 #include "dispatch.hpp"
 #include "device.hpp"
 #include "kernel.hpp"
+#include "fast_dispatch.hpp"
 // kMaxRtaWords defined in kernel.hpp
 
 #include <chrono>
@@ -231,6 +232,28 @@ void dispatch_execute(Device& dev, Kernel& kernel, int timeout_ms) {
     dispatch_execute_multi(dev, std::span<Kernel* const>(&one, 1), timeout_ms);
 }
 
+// ---------------------------------------------------------------------------
+// dispatch_launch_async — fire-and-forget, R5 G1
+// ---------------------------------------------------------------------------
+void dispatch_launch_async(Device& dev, Kernel& kernel) {
+    const tt::tt_metal::Hal& hal = *dev.hal;
+    tt::umd::Cluster& driver     = *dev.umd_driver;
+    const uint32_t chip          = dev.chip_id;
+
+    dispatch_stage_send_reset(kernel, hal, driver, chip);
+    driver.l1_membar(chip);
+
+    dispatch_stage_setup(dev, kernel, hal, driver, chip);
+
+    tt_driver_atomics::sfence();
+    driver.l1_membar(chip);
+
+    dispatch_stage_fire_go(kernel, hal, driver, chip);
+
+    driver.l1_membar(chip);
+    // No wait_done — caller manages the kernel's lifecycle.
+}
+
 void dispatch_execute_multi(
     Device& dev,
     std::span<Kernel* const> kernels,
@@ -262,17 +285,41 @@ void dispatch_execute_multi(
     tt_driver_atomics::sfence();
     driver.l1_membar(chip);
 
-    // Stage 2: fire RUN_MSG_GO on every kernel. Issuing all GOs before any
-    // DONE check is what makes producer/consumer kernels actually meet on
-    // the device.
+    // R5 G2a: if a FastDispatch is attached AND we have a single-kernel
+    // launch, route the fire+wait through the on-chip dispatcher.
+    if (dev.fast_dispatch != nullptr &&
+        kernels.size() <= fast_dispatch_layout::kMaxBatchWorkers) {
+        // R5 G2a/G2b: route fire+wait through the on-chip dispatcher.
+        // Host has already done send_reset + setup via PCIe above, so we
+        // just need to fire all GO_MSGs and wait for all DONE. The batch
+        // cmd fires all GOs first (NOC-parallel) then polls all DONEs, so
+        // multi-core matmul preserves parallelism across workers.
+        const uint32_t go_msg_addr_l1 = static_cast<uint32_t>(hal.get_dev_noc_addr(
+            tt_metal::HalProgrammableCoreType::TENSIX,
+            tt_metal::HalL1MemAddrType::GO_MSG));
+        if (kernels.size() == 1) {
+            const uint32_t launch_addr_l1 = static_cast<uint32_t>(hal.get_dev_noc_addr(
+                tt_metal::HalProgrammableCoreType::TENSIX,
+                tt_metal::HalL1MemAddrType::LAUNCH));
+            dev.fast_dispatch->push_launch(
+                kernels[0]->core, launch_addr_l1, go_msg_addr_l1, nullptr, 0);
+        } else {
+            std::vector<CoreCoord> worker_cores;
+            worker_cores.reserve(kernels.size());
+            for (Kernel* k : kernels) worker_cores.push_back(k->core);
+            dev.fast_dispatch->push_launch_batch(worker_cores, go_msg_addr_l1);
+        }
+        dev.fast_dispatch->push_notify();
+        dev.fast_dispatch->wait_for_completion(
+            dev.fast_dispatch->expected_completion, timeout_ms);
+        return;
+    }
+
+    // Slow-dispatch path: stage 2 fire all GOs, then stage 3 poll all DONE.
     for (Kernel* k : kernels) dispatch_stage_fire_go(*k, hal, driver, chip);
 
     driver.l1_membar(chip);
 
-    // Stage 3: poll each kernel's GO_MSG. We poll sequentially; the
-    // hardware runs them concurrently, so total wall time is
-    // max(per-kernel run time), not the sum. Shrink the per-call timeout
-    // budget as we go so the overall ceiling matches the caller's value.
     auto overall_start = std::chrono::steady_clock::now();
     for (Kernel* k : kernels) {
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(

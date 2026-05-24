@@ -109,6 +109,12 @@ struct Device {
     // open_device() — preserved so error messages can refer back to it.
     std::vector<CoreCoord> booted_cores;
 
+    // R5 G2: optional fast-dispatch instance. When set, dispatch_execute_multi
+    // routes through it for single-kernel launches (host writes ELF/RTA/launch_msg
+    // via PCIe as usual, then FD fires GO + polls DONE over NOC).
+    // Owned externally (caller is responsible for lifetime + start/terminate).
+    struct FastDispatch* fast_dispatch{nullptr};
+
     static uint64_t core_key(uint32_t x, uint32_t y) { return (static_cast<uint64_t>(x) << 32) | y; }
 
     L1Allocator& l1_for_core(const CoreCoord& logical_core);
