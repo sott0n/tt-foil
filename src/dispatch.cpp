@@ -7,9 +7,13 @@
 #include "fast_dispatch.hpp"
 // kMaxRtaWords defined in kernel.hpp
 
+#include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 // tt-metal headers
@@ -31,6 +35,99 @@
 namespace tt::foil {
 
 namespace {
+
+// Forward decl — defined below.
+tt::umd::CoreCoord kernel_translated_coord(const Kernel& kernel);
+
+// ---------------------------------------------------------------------------
+// Dispatch-stage tracing (TT_FOIL_DISPATCH_TRACE=1)
+// ---------------------------------------------------------------------------
+// Aggregates per-stage wall ns across all dispatch_execute_multi calls,
+// separately for single-kernel (FD or slow) and multi-kernel (batch) paths.
+// Prints a summary at process exit. Cheap when disabled (one TLS load per
+// call + a single branch). When enabled, ~30 ns per timestamp via
+// steady_clock — negligible against ~µs PCIe writes.
+struct DispatchTrace {
+    std::atomic<uint64_t> single_count{0};
+    std::atomic<uint64_t> single_reset_ns{0};
+    std::atomic<uint64_t> single_setup_ns{0};
+    std::atomic<uint64_t> single_fence_ns{0};
+    std::atomic<uint64_t> single_fire_wait_ns{0};   // FD push_launch+notify+wait OR slow fire+poll
+    std::atomic<uint64_t> multi_count{0};
+    std::atomic<uint64_t> multi_workers{0};
+    std::atomic<uint64_t> multi_reset_ns{0};
+    std::atomic<uint64_t> multi_setup_ns{0};
+    std::atomic<uint64_t> multi_fence_ns{0};
+    std::atomic<uint64_t> multi_fire_wait_ns{0};
+    bool enabled{false};
+
+    DispatchTrace() {
+        const char* env = std::getenv("TT_FOIL_DISPATCH_TRACE");
+        enabled = env && env[0] && env[0] != '0';
+    }
+    ~DispatchTrace() {
+        if (!enabled) return;
+        std::fprintf(stderr,
+            "\n=== dispatch trace (TT_FOIL_DISPATCH_TRACE) ===\n");
+        uint64_t sc = single_count.load();
+        if (sc) {
+            auto avg = [sc](uint64_t v) { return v / sc / 1000.0; };  // us/call
+            std::fprintf(stderr,
+                "  single-kernel  count=%lu   avg per call (us):\n"
+                "    reset      %7.2f\n"
+                "    setup      %7.2f\n"
+                "    fence      %7.2f\n"
+                "    fire+wait  %7.2f   <- includes worker device exec\n"
+                "    total      %7.2f\n",
+                sc,
+                avg(single_reset_ns), avg(single_setup_ns),
+                avg(single_fence_ns), avg(single_fire_wait_ns),
+                avg(single_reset_ns + single_setup_ns + single_fence_ns + single_fire_wait_ns));
+        }
+        uint64_t mc = multi_count.load();
+        if (mc) {
+            auto avg = [mc](uint64_t v) { return v / mc / 1000.0; };
+            std::fprintf(stderr,
+                "  multi-kernel   count=%lu  avg workers=%.2f   avg per call (us):\n"
+                "    reset      %7.2f\n"
+                "    setup      %7.2f\n"
+                "    fence      %7.2f\n"
+                "    fire+wait  %7.2f\n"
+                "    total      %7.2f\n",
+                mc, double(multi_workers.load()) / mc,
+                avg(multi_reset_ns), avg(multi_setup_ns),
+                avg(multi_fence_ns), avg(multi_fire_wait_ns),
+                avg(multi_reset_ns + multi_setup_ns + multi_fence_ns + multi_fire_wait_ns));
+        }
+    }
+};
+DispatchTrace& dispatch_trace() {
+    static DispatchTrace t;
+    return t;
+}
+inline uint64_t now_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// Scope l1_membar to just the worker cores participating in this dispatch.
+// UMD's `l1_membar(chip, {})` (empty set) issues a host-to-device barrier
+// against every Tensix + ETH + DRAM core on the chip (~150 cores on
+// Blackhole), which takes ~800 µs. The launch_msg/GO_MSG writes only target
+// the worker's own L1, so a 1-core barrier is sufficient and ~50× cheaper.
+// See docs/perf_post_pathB_analysis.md for the measurement (wall 9.59 →
+// 4.56 s, -53%) and tokens-bit-identical verification.
+void scoped_l1_membar(tt::umd::Cluster& driver, uint32_t chip,
+                      std::span<Kernel* const> kernels) {
+    std::unordered_set<tt::umd::CoreCoord> cores;
+    cores.reserve(kernels.size());
+    for (Kernel* k : kernels) cores.insert(kernel_translated_coord(*k));
+    driver.l1_membar(chip, cores);
+}
+void scoped_l1_membar_one(tt::umd::Cluster& driver, uint32_t chip, Kernel& k) {
+    std::unordered_set<tt::umd::CoreCoord> cores{kernel_translated_coord(k)};
+    driver.l1_membar(chip, cores);
+}
 
 // One-kernel "stage" helpers shared by single- and multi-kernel paths.
 // All three operate on the same translated coord computed once.
@@ -162,7 +259,7 @@ void dispatch_stage_send_reset(
         static_cast<uint8_t>(tt_metal::dev_msgs::RUN_MSG_RESET_READ_PTR_FROM_HOST),
         0, 0, 0);
     driver.write_to_device_reg(&reset_val, sizeof(reset_val), chip, cc, go_entry_addr);
-    driver.l1_membar(chip);
+    scoped_l1_membar_one(driver, chip, kernel);
     uint64_t go_idx_addr = hal.get_dev_addr(
         tt_metal::HalProgrammableCoreType::TENSIX,
         tt_metal::HalL1MemAddrType::GO_MSG_INDEX);
@@ -241,16 +338,16 @@ void dispatch_launch_async(Device& dev, Kernel& kernel) {
     const uint32_t chip          = dev.chip_id;
 
     dispatch_stage_send_reset(kernel, hal, driver, chip);
-    driver.l1_membar(chip);
+    scoped_l1_membar_one(driver, chip, kernel);
 
     dispatch_stage_setup(dev, kernel, hal, driver, chip);
 
     tt_driver_atomics::sfence();
-    driver.l1_membar(chip);
+    scoped_l1_membar_one(driver, chip, kernel);
 
     dispatch_stage_fire_go(kernel, hal, driver, chip);
 
-    driver.l1_membar(chip);
+    scoped_l1_membar_one(driver, chip, kernel);
     // No wait_done — caller manages the kernel's lifecycle.
 }
 
@@ -267,6 +364,11 @@ void dispatch_execute_multi(
     tt::umd::Cluster& driver     = *dev.umd_driver;
     const uint32_t chip          = dev.chip_id;
 
+    auto& trace = dispatch_trace();
+    const bool trace_on = trace.enabled;
+    const bool is_single = (kernels.size() == 1);
+    uint64_t t0 = trace_on ? now_ns() : 0;
+
     // Stage 0: send RUN_MSG_RESET_READ_PTR_FROM_HOST to each core's
     // GO_MSG, then zero GO_MSG_INDEX. Mirrors tt-metal's slow-dispatch
     // send_reset_go_signal (llrt.cpp:115). Without this BRISC firmware's
@@ -274,16 +376,22 @@ void dispatch_execute_multi(
     // right after — see the long comment in test_tile_copy.cpp for the
     // diagnostic trail.
     for (Kernel* k : kernels) dispatch_stage_send_reset(*k, hal, driver, chip);
-    driver.l1_membar(chip);
+    scoped_l1_membar(driver, chip, kernels);
+
+    uint64_t t1 = trace_on ? now_ns() : 0;
 
     // Stage 1: write ELF + RTA + launch_msg for every kernel.
     for (Kernel* k : kernels) dispatch_stage_setup(dev, *k, hal, driver, chip);
+
+    uint64_t t2 = trace_on ? now_ns() : 0;
 
     // Host memory fence + device L1 barrier so all setup writes (kernel
     // ELF, RTA, launch_msg, and the CB blob from register_cbs) have
     // landed on the chip before firmware sees the GO.
     tt_driver_atomics::sfence();
-    driver.l1_membar(chip);
+    scoped_l1_membar(driver, chip, kernels);
+
+    uint64_t t3 = trace_on ? now_ns() : 0;
 
     // R5 G2a: if a FastDispatch is attached AND we have a single-kernel
     // launch, route the fire+wait through the on-chip dispatcher.
@@ -312,13 +420,30 @@ void dispatch_execute_multi(
         dev.fast_dispatch->push_notify();
         dev.fast_dispatch->wait_for_completion(
             dev.fast_dispatch->expected_completion, timeout_ms);
+        if (trace_on) {
+            uint64_t t4 = now_ns();
+            if (is_single) {
+                trace.single_count.fetch_add(1);
+                trace.single_reset_ns.fetch_add(t1 - t0);
+                trace.single_setup_ns.fetch_add(t2 - t1);
+                trace.single_fence_ns.fetch_add(t3 - t2);
+                trace.single_fire_wait_ns.fetch_add(t4 - t3);
+            } else {
+                trace.multi_count.fetch_add(1);
+                trace.multi_workers.fetch_add(kernels.size());
+                trace.multi_reset_ns.fetch_add(t1 - t0);
+                trace.multi_setup_ns.fetch_add(t2 - t1);
+                trace.multi_fence_ns.fetch_add(t3 - t2);
+                trace.multi_fire_wait_ns.fetch_add(t4 - t3);
+            }
+        }
         return;
     }
 
     // Slow-dispatch path: stage 2 fire all GOs, then stage 3 poll all DONE.
     for (Kernel* k : kernels) dispatch_stage_fire_go(*k, hal, driver, chip);
 
-    driver.l1_membar(chip);
+    scoped_l1_membar(driver, chip, kernels);
 
     auto overall_start = std::chrono::steady_clock::now();
     for (Kernel* k : kernels) {
@@ -328,6 +453,24 @@ void dispatch_execute_multi(
             ? std::max<int>(1, timeout_ms - static_cast<int>(elapsed))
             : 0;
         dispatch_stage_wait_done(*k, hal, driver, chip, remaining);
+    }
+
+    if (trace_on) {
+        uint64_t t4 = now_ns();
+        if (is_single) {
+            trace.single_count.fetch_add(1);
+            trace.single_reset_ns.fetch_add(t1 - t0);
+            trace.single_setup_ns.fetch_add(t2 - t1);
+            trace.single_fence_ns.fetch_add(t3 - t2);
+            trace.single_fire_wait_ns.fetch_add(t4 - t3);
+        } else {
+            trace.multi_count.fetch_add(1);
+            trace.multi_workers.fetch_add(kernels.size());
+            trace.multi_reset_ns.fetch_add(t1 - t0);
+            trace.multi_setup_ns.fetch_add(t2 - t1);
+            trace.multi_fence_ns.fetch_add(t3 - t2);
+            trace.multi_fire_wait_ns.fetch_add(t4 - t3);
+        }
     }
 }
 
