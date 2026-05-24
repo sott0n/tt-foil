@@ -393,6 +393,21 @@ int main(int argc, char** argv) try {
     if (use_fd) {
         boot_cores.push_back(fd_dispatcher_core);
     }
+    // Path B: dedicated cores for shape-keyed cached single-core ops.
+    // matmul grid stays on (0,0..7); each cached op type gets its own row-1
+    // core so per-op pinned L1 (rmsnorm ~520 KB, add_rmsnorm ~780 KB, etc.)
+    // doesn't collide with neighbors or the matmul kernel's ~770 KB
+    // cb_a+cb_b.
+    const tt::foil::CoreCoord kCachedCore       {1, 1};  // rmsnorm
+    const tt::foil::CoreCoord kCachedAddRmsCore {1, 2};  // add_rmsnorm
+    const tt::foil::CoreCoord kCachedSiluCore   {1, 3};  // silu_mul
+    const tt::foil::CoreCoord kCachedGqaCore    {1, 4};  // gqa_decode
+    const tt::foil::CoreCoord kCachedKvCore     {1, 5};  // kv_append
+    boot_cores.push_back(kCachedCore);
+    boot_cores.push_back(kCachedAddRmsCore);
+    boot_cores.push_back(kCachedSiluCore);
+    boot_cores.push_back(kCachedGqaCore);
+    boot_cores.push_back(kCachedKvCore);
     auto dev = tt::foil::open_device(pcie_index, "", boot_cores);
     tt::foil::CoreCoord core{0, 0};
 
@@ -676,7 +691,7 @@ int main(int argc, char** argv) try {
     // loop, the post-FFN residual add is fused with the NEXT layer's ln1g
     // (T_xnorm1 carries the result forward), so this single pre-loop
     // dispatch primes the chain.
-    run1("pre:rmsnorm", [&] { return ol::make_rmsnorm(*dev, T_layer_in, layers[0].ln1g, T_xnorm1, kSt, kHt, kEps); });
+    run1("pre:rmsnorm", [&] { return ol::make_rmsnorm(*dev, T_layer_in, layers[0].ln1g, T_xnorm1, kSt, kHt, kEps, kCachedCore); });
     for (uint32_t li = 0; li < kNumLayers; ++li) {
         const LayerW& w = layers[li];
         std::fprintf(stderr, "  prefill layer %u …\n", li);
@@ -717,11 +732,11 @@ int main(int argc, char** argv) try {
                                       kSt, kDt, kNumQ, kNumKv);
         });
         run_matmul_grid("pre:matmul_o", T_attn, w.Wo, T_proj, kSt, kNqDt, kHt);
-        run1("pre:add_rmsnorm", [&] { return ol::make_add_rmsnorm(*dev, T_layer_in, T_proj, w.ln2g, T_xmid, T_ynorm, kSt, kHt, kEps); });
+        run1("pre:add_rmsnorm", [&] { return ol::make_add_rmsnorm(*dev, T_layer_in, T_proj, w.ln2g, T_xmid, T_ynorm, kSt, kHt, kEps, kCachedAddRmsCore); });
         // Fused gate+up matmul (iter8). One dispatch instead of two; T_gate
         // and T_up are pre-set offset views into T_gateup.
         run_matmul_grid("pre:matmul_ffn", T_ynorm, w.Wgateup, T_gateup, kSt, kHt, kFFtFused);
-        run1("pre:silu_mul",   [&] { return ol::make_silu_mul(*dev, T_gate, T_up, T_fused); });
+        run1("pre:silu_mul",   [&] { return ol::make_silu_mul(*dev, T_gate, T_up, T_fused, kCachedSiluCore); });
         run_matmul_grid("pre:matmul_ffn", T_fused, w.Wdown, T_down, kSt, kFFt, kHt);
         if (li + 1 < kNumLayers) {
             // Fuse this layer's residual add with the NEXT layer's ln1g
@@ -731,7 +746,7 @@ int main(int argc, char** argv) try {
             const LayerW& w_next = layers[li + 1];
             run1("pre:add_rmsnorm", [&] {
                 return ol::make_add_rmsnorm(*dev, T_xmid, T_down, w_next.ln1g,
-                                            T_layer_out, T_xnorm1, kSt, kHt, kEps);
+                                            T_layer_out, T_xnorm1, kSt, kHt, kEps, kCachedAddRmsCore);
             });
         } else {
             // Last layer: no next-layer ln1g; final_rmsnorm has its own
@@ -744,7 +759,7 @@ int main(int argc, char** argv) try {
 
     // Prefill final norm + lm_head → argmax(row S-1) is the first decode input.
     std::fprintf(stderr, "  prefill final norm + lm_head ...\n");
-    run1("pre:final_rmsnorm", [&] { return ol::make_rmsnorm(*dev, T_layer_in, T_final_g, T_normed, kSt, kHt, kEps); });
+    run1("pre:final_rmsnorm", [&] { return ol::make_rmsnorm(*dev, T_layer_in, T_final_g, T_normed, kSt, kHt, kEps, kCachedCore); });
     run_matmul_lmhead("pre:lm_head", T_normed, T_W_lm, T_logits, kSt, kHt, kVt);
     std::vector<uint16_t> logits_tiles(static_cast<size_t>(kSt) * kVt * kTileWords);
     {
@@ -800,7 +815,7 @@ int main(int argc, char** argv) try {
 
         // iter18: prime T_xnorm1 with layer-0 ln1g rmsnorm; the layer-loop's
         // tail does the post-FFN add fused with the next layer's ln1g.
-        run1("dec:rmsnorm", [&] { return ol::make_rmsnorm(*dev, T_layer_in, layers[0].ln1g, T_xnorm1, kSt, kHt, kEps); });
+        run1("dec:rmsnorm", [&] { return ol::make_rmsnorm(*dev, T_layer_in, layers[0].ln1g, T_xnorm1, kSt, kHt, kEps, kCachedCore); });
         for (uint32_t li = 0; li < kNumLayers; ++li) {
             const LayerW& w = layers[li];
             // Fused QKV matmul (iter7) — see comments above the T_QKV
@@ -814,26 +829,27 @@ int main(int argc, char** argv) try {
                 run1("dec:kv_append", [&] {
                     return ol::make_kv_append(*dev, T_Kr, T_V,
                                               T_Kt_cache[li], T_V_cache[li],
-                                              slot1_r, kNkDt, kStKvDec, core);
+                                              slot1_r, kNkDt, kStKvDec, kCachedKvCore);
                 });
             }
 
             run1("dec:gqa_decode", [&] {
                 return ol::make_gqa_decode(*dev, T_Qr, T_Kt_cache[li], T_V_cache[li],
                                            T_dmask, T_attn,
-                                           kStDec, kStKvDec, kDt, kNumQ, kNumKv);
+                                           kStDec, kStKvDec, kDt, kNumQ, kNumKv,
+                                           kCachedGqaCore);
             });
             run_matmul_grid("dec:matmul_o", T_attn, w.Wo, T_proj, kSt, kNqDt, kHt);
-            run1("dec:add_rmsnorm", [&] { return ol::make_add_rmsnorm(*dev, T_layer_in, T_proj, w.ln2g, T_xmid, T_ynorm, kSt, kHt, kEps); });
+            run1("dec:add_rmsnorm", [&] { return ol::make_add_rmsnorm(*dev, T_layer_in, T_proj, w.ln2g, T_xmid, T_ynorm, kSt, kHt, kEps, kCachedAddRmsCore); });
             // Fused gate+up matmul (iter8). One dispatch instead of two.
             run_matmul_grid("dec:matmul_ffn", T_ynorm, w.Wgateup, T_gateup, kSt, kHt, kFFtFused);
-            run1("dec:silu_mul",   [&] { return ol::make_silu_mul(*dev, T_gate, T_up, T_fused); });
+            run1("dec:silu_mul",   [&] { return ol::make_silu_mul(*dev, T_gate, T_up, T_fused, kCachedSiluCore); });
             run_matmul_grid("dec:matmul_ffn", T_fused, w.Wdown, T_down, kSt, kFFt, kHt);
             if (li + 1 < kNumLayers) {
                 const LayerW& w_next = layers[li + 1];
                 run1("dec:add_rmsnorm", [&] {
                     return ol::make_add_rmsnorm(*dev, T_xmid, T_down, w_next.ln1g,
-                                                T_layer_out, T_xnorm1, kSt, kHt, kEps);
+                                                T_layer_out, T_xnorm1, kSt, kHt, kEps, kCachedAddRmsCore);
                 });
             } else {
                 run1("dec:add", [&] { return ol::make_eltwise_add(*dev, T_xmid, T_down, T_layer_out); });
@@ -841,7 +857,7 @@ int main(int argc, char** argv) try {
             std::swap(T_layer_in, T_layer_out);
         }
 
-        run1("dec:final_rmsnorm", [&] { return ol::make_rmsnorm(*dev, T_layer_in, T_final_g, T_normed, kSt, kHt, kEps); });
+        run1("dec:final_rmsnorm", [&] { return ol::make_rmsnorm(*dev, T_layer_in, T_final_g, T_normed, kSt, kHt, kEps, kCachedCore); });
         run_matmul_lmhead("dec:lm_head", T_normed, T_W_lm, T_logits, kSt, kHt, kVt);
         // Device-side argmax over row 0 of T_logits (single-core BRISC
         // scan in ops/argmax_row0). Replaces the 9.7-MB tile readback +
