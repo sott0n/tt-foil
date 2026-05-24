@@ -228,6 +228,8 @@ tt_foil_hw_test(test_brisc_col1_boot_diag test_brisc_col1_boot_diag.cpp "${EX}/a
 
 # ---- op_lib: primitive op library tests ----
 set(OPS "${CMAKE_SOURCE_DIR}/ops")
+# G0 dispatch-floor measurement (no-op kernel × N launches)
+tt_foil_hw_test(test_noop_dispatch_loop test_noop_dispatch_loop.cpp "${OPS}/noop/prebuilt")
 _tt_default(SILU_NT 8)
 tt_foil_hw_test(test_silu        test_silu.cpp        "${OPS}/eltwise_unary/prebuilt"
     "SILU_NT=${SILU_NT}")
