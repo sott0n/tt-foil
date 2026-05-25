@@ -10,13 +10,15 @@ The standard tt-metal runtime is ~660K lines and includes JIT kernel compilation
 fast-dispatch firmware, profiling, multi-device mesh support, and Python bindings.
 For embedding use cases most of that is unnecessary. tt-foil keeps only what's
 needed to cold-boot a chip, load pre-compiled kernels, and dispatch them across a
-small set of Tensix cores.
+small set of Tensix cores. Dispatch defaults to slow-dispatch (direct mailbox);
+an opt-in on-chip dispatcher (`TT_FOIL_FAST_DISPATCH=1`) is available for
+latency-sensitive decode loops.
 
 | Feature                          | tt-metal                   | tt-foil                                |
 | -------------------------------- | -------------------------- | -------------------------------------- |
-| Codebase size                    | ~660K lines                | ~2.5K lines (incl. bundled llrt subset)|
+| Codebase size                    | ~660K lines                | ~6.9K lines (core + op-lib + vendored llrt)|
 | JIT kernel compilation           | Yes                        | No — pre-compiled ELFs only            |
-| Dispatch firmware                | Yes                        | No — slow-dispatch via direct mailbox  |
+| Dispatch firmware                | Yes                        | Slow-dispatch (default) + fast-dispatch (opt-in)|
 | `libtt_metal.so` link            | Required                   | **Not linked**                         |
 | `MetalContext` / IDevice         | Required                   | **Not used** — own UMD + HAL directly  |
 | Multi-device / Mesh              | Yes                        | No — single chip                       |
@@ -24,8 +26,8 @@ small set of Tensix cores.
 | NOC inter-core (`noc_async_*`)   | Yes                        | Yes (unicast)                          |
 | TRISC compute + Circular Buffers | Yes                        | Yes                                    |
 | Target hardware                  | WH, BH, Quasar             | Blackhole only                         |
-| Runtime dynamic deps             | `libtt_metal.so`, UMD, ... | UMD only (`libtt-umd.so`)              |
-| Runtime image on disk            | ~27 MB shared libs         | **~5 MB** (binary + libtt-umd.so)      |
+| Runtime dynamic deps             | `libtt_metal.so`, UMD, ... | UMD + fmt (`libtt-umd.so`, `libfmt.so`)|
+| Runtime image on disk            | ~27 MB shared libs         | **~5 MB** (binary + libtt-umd.so + libfmt.so)|
 | Test binary (stripped)           | n/a (linked against .so)   | **~600 KB**                            |
 
 ## Dependencies
@@ -41,7 +43,7 @@ runtime the binary has exactly one TT-specific dynamic dep —
 | --------------------- | ----------------------------------------- | --------------------------------------- |
 | **Build inputs**      | tt-metal headers + libs                   | tt-metal headers + libs                 |
 | **Build output**      | your binary (links `libtt_metal.so`)      | your binary (statically holds tt-foil)  |
-| **Runtime TT deps**   | `libtt_metal.so` (22 MB) + UMD (4.3 MB)   | `libtt-umd.so` only (4.3 MB)            |
+| **Runtime TT deps**   | `libtt_metal.so` (22 MB) + UMD (4.4 MB)   | `libtt-umd.so` (4.4 MB) + `libfmt.so` (0.18 MB) |
 | **Runtime image**     | ~27 MB                                    | **~5 MB**                               |
 
 ### Phase diagram
@@ -89,9 +91,10 @@ runtime the binary has exactly one TT-specific dynamic dep —
 │   │   • tile/bf16 helpers                                    │           │
 │   └──────────────────────────────────────────────────────────┘           │
 │                       │                                                  │
-│                       │ dynamic-links one TT-specific .so:               │
+│                       │ dynamic-links two TT-specific .so files:          │
 │                       ▼                                                  │
-│              libtt-umd.so.0   (4.3 MB)   ──► PCIe / TLB / DMA            │
+│              libtt-umd.so.0   (4.4 MB)   ──► PCIe / TLB / DMA            │
+│              libfmt.so.11     (0.18 MB)  ──► logging / formatting         │
 │                                                  │                       │
 │                                                  ▼                       │
 │                                          Blackhole chip                  │
@@ -109,8 +112,8 @@ runtime the binary has exactly one TT-specific dynamic dep —
 
 In other words: tt-metal acts as a **build-time SDK** (source, HAL,
 firmware sources, SFPI compiler, and one shared lib called UMD). After
-the CMake build finishes, the only TT-related file that needs to ride
-along with the binary is `libtt-umd.so`. See [Firmware ELF
+the CMake build finishes, the only TT-specific files that need to ride
+along with the binary are `libtt-umd.so` and `libfmt.so`. See [Firmware ELF
 selection](#firmware-elf-selection) for how the runtime resolves the
 self-built firmware ELFs.
 
@@ -120,22 +123,22 @@ Measured against `tests/test_matmul_1tile` on Blackhole x86_64:
 
 | Artifact                                        | Size      |
 | ----------------------------------------------- | --------- |
-| `libtt_foil.a` (static, all of tt-foil's logic) | **6.7 MB**|
-| `libtt_foil_hal_local.a` (HAL .cpp, static)     | 4.2 MB    |
-| Test binary `test_matmul_1tile` (stripped)      | **633 KB**|
-| Test binary (unstripped, with debug)            | 820 KB    |
-| `libtt-umd.so.0` (the only runtime dynamic dep) | 4.3 MB    |
-| **Total runtime image on disk** (binary + UMD)  | **~5 MB** |
+| `libtt_foil.a` (static, release build)          | **~7 MB** |
+| `libtt_foil_hal_local.a` (HAL .cpp, static)     | ~4 MB     |
+| Test binary `test_matmul_1tile` (stripped)      | **~600 KB**|
+| `libtt-umd.so.0` (TT PCIe/DMA runtime dep)      | 4.4 MB    |
+| `libfmt.so.11` (logging runtime dep)            | 0.18 MB   |
+| **Total runtime image on disk** (binary + deps) | **~5 MB** |
 
 An equivalent tt-metal test binary loads `libtt_metal.so` (22 MB)
-**and** `libtt-umd.so` (4.3 MB) at runtime — about **27 MB** of
+**and** `libtt-umd.so` (4.4 MB) at runtime — about **27 MB** of
 TT-specific shared objects, ~5–6× the tt-foil footprint. tt-foil's
-static lib is 6.7 MB because it bundles HAL + llrt subset; the *image
-actually mapped to run a kernel* is a single ~600 KB binary plus
-`libtt-umd.so`.
+static lib bundles HAL + llrt subset + op-lib; the *image actually
+mapped to run a kernel* is a single ~600 KB binary plus `libtt-umd.so`
+and `libfmt.so`.
 
-Source-line count: ~700 lines of own runtime code + ~1.2K lines
-vendored from tt-metal (`tt_memory.cpp`, `tt_elffile.cpp`).
+Source-line count: ~3.1K lines of own core runtime + ~2.4K lines op-lib
++ ~1.4K lines vendored from tt-metal (`tt_memory.cpp`, `tt_elffile.cpp`).
 
 ## Requirements
 
@@ -245,6 +248,8 @@ if unset on the CMake line, and to `0` otherwise.
 | `TT_FOIL_DEVICE`         | PCIe device index, e.g. `3` (default: `0`)               |
 | `TT_FOIL_FIRMWARE_DIR`   | Explicit firmware dir; overrides auto-discovery          |
 | `TT_FOIL_KERNEL_DIR`     | Directory containing your kernel ELFs (test convention)  |
+| `TT_FOIL_FAST_DISPATCH`  | Set to `1` to enable on-chip fast-dispatch (persistent BRISC dispatcher on core (1,0)); recommended for decode loops |
+| `TT_FOIL_OPS_DIR`        | Directory containing op kernel ELFs (required for fast-dispatch; e.g. `$PWD/ops`) |
 
 ### Firmware ELF selection
 
