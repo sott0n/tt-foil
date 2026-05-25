@@ -51,6 +51,7 @@
 #include <vector>
 
 #include "tt_foil/runtime.hpp"
+#include "tt_foil/profiling.h"
 #include "cb_config.hpp"
 #include "tile_utils.hpp"
 
@@ -639,6 +640,7 @@ int main() try {
     // Phase A — Stem + Layer1
     // Both use conv_3x3_l1 (Mt=1 Kt=9 Nt=32) and residual_add_n32.
     // ================================================================
+    { TT_FOIL_ZONE("Phase_A_stem_layer1");
     k_conv_s1 = load(kernel_root + "/conv_3x3_l1");
     k_add     = load(kernel_root + "/residual_add_n32");
     k_bias    = load(kernel_root + "/bias_relu_post");
@@ -687,9 +689,11 @@ int main() try {
         check_stage("post_layer1." + std::to_string(b), 16, 32, 32);
     }
 
+    }  // end Phase A
     // ================================================================
     // Phase B — Layer2 (3 blocks; first is downsample)
     // ================================================================
+    { TT_FOIL_ZONE("Phase_B_layer2");
     k_conv_s1.reset(); k_add.reset(); k_bias.reset();
     tt::foil::release_kernels(*dev, core);
 
@@ -742,9 +746,11 @@ int main() try {
         check_stage("post_layer2." + std::to_string(b), 32, 16, 16);
     }
 
+    }  // end Phase B
     // ================================================================
     // Phase C — Layer3 (3 blocks; first is downsample)
     // ================================================================
+    { TT_FOIL_ZONE("Phase_C_layer3");
     k_conv_s2.reset(); k_conv_s1.reset(); k_add.reset(); k_bias.reset();
     tt::foil::release_kernels(*dev, core);
 
@@ -795,9 +801,15 @@ int main() try {
         check_stage("post_layer3." + std::to_string(b), 64, 8, 8);
     }
 
+    }  // end Phase C
     // ================================================================
     // Phase D — Tail: GAP + FC + bias
     // ================================================================
+    // logits_padded outlives the Phase D zone so the host-side argmax
+    // below (which we explicitly do NOT want inside the phase profile)
+    // can read it.
+    std::vector<uint16_t> logits_padded(kTileH, 0);
+    { TT_FOIL_ZONE("Phase_D_tail");
     k_conv_s2.reset(); k_conv_s1.reset(); k_add.reset(); k_bias.reset();
     tt::foil::release_kernels(*dev, core);
 
@@ -855,7 +867,6 @@ int main() try {
     // vertically: rows 0..63 of column 0 carry the GAP means, others
     // zero. Output (32, 32) — only column 0, rows 0..9 are the real
     // logits.
-    std::vector<uint16_t> logits_padded(kTileH, 0);
     {
         auto wfc = read_bf16_layer(W, "fc.w");                  // (10, 64)
         auto bfc = read_bf16_layer(W, "fc.b");                  // (10,)
@@ -918,6 +929,7 @@ int main() try {
         for (int k = 0; k < kNumClasses; ++k)
             logits_padded[k] = out_rm[k * kTileW + 0];
     }
+    }  // end Phase D
 
     // ---- Compare to golden + report argmax -------------------------
     std::vector<float> dev_logits(kNumClasses), ref_logits(kNumClasses);
