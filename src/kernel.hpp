@@ -76,6 +76,18 @@ struct Kernel {
     // .valid == false means no CBs registered → dispatch leaves those fields
     // at their default (mask=0, min_index=NUM_CIRCULAR_BUFFERS).
     CbAllocation cb_alloc;
+
+    // Short identifier for profiling/debugging. Derived from the parent
+    // directory of the first binary's ELF path at load_kernel() time
+    // (the prebuilt/<name>/<risc>.elf convention). Tracy zones attach
+    // this via ZoneText so per-kernel breakdowns are possible.
+    std::string name;
+
+    // Destructor: fires TF_FREE for the KERNEL_CONFIG region allocations
+    // (kernel text + RTA) so the Memory Report stays balanced. The
+    // underlying bytes in L1 are reclaimed by release_kernels rewinding
+    // the kernel_config bump allocator, not by per-buffer free.
+    ~Kernel();
 };
 
 // Resolve a RiscId to HAL processor_class + processor_type indices, plus the

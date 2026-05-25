@@ -73,6 +73,12 @@ inline void emit_mem_event(const char* op, const char* pool,
 // CPU timeline zones (→ Performance Report).
 #  define TF_ZONE_N(name)          ZoneScopedN(name)
 #  define TF_FRAME_MARK()          FrameMark
+// Attach a runtime-computed context string to the enclosing zone.
+// Aggregator splits stats by (zone_name, zone_text) — used to tag a
+// dispatch with the kernel name so per-kernel breakdowns appear in the
+// Performance Report. `text` is a const char*; lifetime only needs to
+// span the macro call (Tracy copies it).
+#  define TF_ZONE_TEXT(text, len)  ZoneText((text), (len))
 // Buffer alloc/free tracking (→ Memory Report).
 // `pool` is a const char* identifying the memory pool (e.g. "Device L1").
 // We emit BOTH the native Tracy alloc event (visible in Tracy GUI's
@@ -90,6 +96,7 @@ inline void emit_mem_event(const char* op, const char* pool,
 #else
 #  define TF_ZONE_N(name)          do {} while (0)
 #  define TF_FRAME_MARK()          do {} while (0)
+#  define TF_ZONE_TEXT(text, len)  do {} while (0)
 #  define TF_ALLOC(ptr, sz, pool)  do {} while (0)
 #  define TF_FREE(ptr, pool)       do {} while (0)
 #endif

@@ -13,6 +13,22 @@
 
 namespace tt::foil {
 
+Kernel::~Kernel() {
+    // Balance the TF_ALLOC fired in kernel_load / register_cbs. Pool names
+    // must match exactly. kernel_text gets a separate FREE per RISC
+    // (matches the per-RISC allocation pattern).
+    if (rta_region_size > 0) {
+        TF_FREE(rta_base_addr, "Device L1 (kernel_RTA)");
+    }
+    for (const auto& lr : riscs) {
+        if (lr.kernel_text_addr != 0 && lr.mem) {
+            TF_FREE(lr.kernel_text_addr, "Device L1 (kernel_text)");
+        }
+    }
+    if (cb_alloc.valid && cb_alloc.blob_bytes > 0) {
+        TF_FREE(cb_alloc.blob_l1_addr, "Device L1 (CB_blob)");
+    }
+}
 
 Kernel* kernel_load(
     Device& dev,
@@ -32,6 +48,16 @@ Kernel* kernel_load(
         kernel->virt_y = virt.y;
     }
 
+    // Derive a short kernel name from the first binary's parent directory
+    // (the prebuilt/<name>/<risc>.elf convention used by all examples and
+    // models). Profiling zones tag dispatches with this so per-kernel
+    // breakdowns are possible in the Performance Report.
+    if (!binaries.empty()) {
+        std::filesystem::path p(binaries[0].elf_path);
+        kernel->name = p.parent_path().filename().string();
+        TF_ZONE_TEXT(kernel->name.c_str(), kernel->name.size());
+    }
+
     // Allocate a contiguous RTA region inside the KERNEL_CONFIG region (MEM_MAP_END).
     // rta_offset in launch_msg is uint16_t (relative to kernel_config_base), so
     // the RTA must live within the KERNEL_CONFIG region, not DEFAULT_UNRESERVED.
@@ -39,6 +65,7 @@ Kernel* kernel_load(
     uint32_t rta_region_bytes = kMaxRiscs * kMaxRtaWords * sizeof(uint32_t);
     kernel->rta_base_addr  = dev.kernel_config_for_core(logical_core).alloc(rta_region_bytes, /*alignment=*/16);
     kernel->rta_region_size = rta_region_bytes;
+    TF_ALLOC(kernel->rta_base_addr, rta_region_bytes, "Device L1 (kernel_RTA)");
 
     for (const auto& rb : binaries) {
         if (!std::filesystem::exists(rb.elf_path)) {
@@ -56,6 +83,7 @@ Kernel* kernel_load(
         // The binary will be written here; firmware calls kernel_config_base + text_offset.
         std::size_t text_bytes = lr.mem->size() * sizeof(uint32_t);
         lr.kernel_text_addr = dev.kernel_config_for_core(logical_core).alloc(text_bytes, /*alignment=*/16);
+        TF_ALLOC(lr.kernel_text_addr, text_bytes, "Device L1 (kernel_text)");
 
         kernel->riscs.push_back(std::move(lr));
     }

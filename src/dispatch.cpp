@@ -331,6 +331,7 @@ int64_t dispatch_stage_wait_done(
 // ---------------------------------------------------------------------------
 void dispatch_execute(Device& dev, Kernel& kernel, int timeout_ms) {
     TF_ZONE_N("TF_dispatch_execute");
+    TF_ZONE_TEXT(kernel.name.c_str(), kernel.name.size());
     Kernel* one = &kernel;
     dispatch_execute_multi(dev, std::span<Kernel* const>(&one, 1), timeout_ms);
 }
@@ -340,6 +341,7 @@ void dispatch_execute(Device& dev, Kernel& kernel, int timeout_ms) {
 // ---------------------------------------------------------------------------
 void dispatch_launch_async(Device& dev, Kernel& kernel) {
     TF_ZONE_N("TF_dispatch_launch_async");
+    TF_ZONE_TEXT(kernel.name.c_str(), kernel.name.size());
     const tt::tt_metal::Hal& hal = *dev.hal;
     tt::umd::Cluster& driver     = *dev.umd_driver;
     const uint32_t chip          = dev.chip_id;
@@ -367,6 +369,22 @@ void dispatch_execute_multi(
     if (kernels.empty()) {
         throw std::runtime_error("tt-foil: dispatch_execute_multi: no kernels");
     }
+
+    // Build a short context string from kernel names for the Tracy zone.
+    // Single kernel → "name"; multi-kernel → "name1+name2[+...]" capped at
+    // the first 3 to keep zone text small.
+#if defined(TRACY_ENABLE)
+    {
+        std::string ctx;
+        const size_t kCap = 3;
+        for (size_t i = 0; i < kernels.size() && i < kCap; ++i) {
+            if (!ctx.empty()) ctx += '+';
+            ctx += kernels[i]->name;
+        }
+        if (kernels.size() > kCap) ctx += "+...";
+        TF_ZONE_TEXT(ctx.c_str(), ctx.size());
+    }
+#endif
 
     const tt::tt_metal::Hal& hal = *dev.hal;
     tt::umd::Cluster& driver     = *dev.umd_driver;
