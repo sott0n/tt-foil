@@ -67,6 +67,17 @@ BUILD="${BUILD:-/tmp/tt_foil_build}"
 PREBUILT="${PREBUILT_DIR:-$HERE/prebuilt}"
 mkdir -p "$BUILD" "$PREBUILT"
 
+# Optional device profiler — same pattern as scripts/build_firmware.sh.
+PROFILE_DEFINES=()
+LTO_FLAGS=()
+if [[ -n "${TT_FOIL_PROFILE_KERNEL:-}" ]]; then
+    PROFILE_DEFINES=(
+        -DPROFILE_KERNEL="${TT_FOIL_PROFILE_KERNEL}"
+        -DPROFILER_FULL_HOST_BUFFER_SIZE_PER_RISC=4096
+    )
+    LTO_FLAGS=(-flto=auto -ffat-lto-objects)
+fi
+
 # Common preprocessor + include flags shared by both RISC compiles.
 COMMON_CFLAGS=(
     -std=c++17 -fno-exceptions -fno-use-cxa-atexit
@@ -113,11 +124,14 @@ build_one() {
     local elf="$PREBUILT/${out_name}.elf"
 
     "$GXX" "${COMMON_CFLAGS[@]}" \
+        "${PROFILE_DEFINES[@]}" \
+        "${LTO_FLAGS[@]}" \
         -DCOMPILE_FOR_${risc^^} -DPROCESSOR_INDEX=$proc_idx \
         -c "$TT/tt_metal/hw/firmware/src/tt-1xx/${risc}k.cc" \
         -o "$obj"
 
     "$GXX" \
+        "${LTO_FLAGS[@]}" \
         -Os -mcpu=tt-bh -fno-tree-loop-distribute-patterns \
         -fno-exceptions -fno-use-cxa-atexit -std=c++17 \
         -Wl,-z,max-page-size=16 -Wl,-z,common-page-size=16 -nostartfiles \
@@ -257,6 +271,8 @@ EOF
         #                         standard tt-metal compute flags
         # Later -mcpu / -O3 win over the COMMON_CFLAGS values.
         "$GXX" "${COMMON_CFLAGS[@]}" \
+            "${PROFILE_DEFINES[@]}" \
+            "${LTO_FLAGS[@]}" \
             -mcpu=tt-bh-tensix -O3 \
             -ffast-math \
             -ftt-nttp -ftt-constinit -ftt-consteval \
@@ -270,6 +286,7 @@ EOF
             -o "$obj"
 
         "$GXX" \
+            "${LTO_FLAGS[@]}" \
             -O3 -mcpu=tt-bh-tensix -ffast-math \
             -fno-exceptions -fno-use-cxa-atexit -std=c++17 \
             -Wl,-z,max-page-size=16 -Wl,-z,common-page-size=16 -nostartfiles \

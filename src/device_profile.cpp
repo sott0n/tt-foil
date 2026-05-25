@@ -72,6 +72,46 @@ CsvSink& sink() {
     return s;
 }
 
+// Clock-sync state — populated lazily on the first marker we see.
+//
+// Blackhole's wall-clock runs at 1 GHz, so cycle and ns are 1:1 in
+// magnitude — we only need a single offset `b` such that
+//     host_aligned_ns = cycle + b
+// Recording (host_ns_first, cycle_first) at the first capture and using
+// b = host_ns_first - cycle_first is approximate (host_ns is sampled
+// *after* the chip already ran, so b includes ~few μs of post-dispatch
+// PCIe latency) but precise enough to put device zones on the same wall
+// timeline as host TF_ zones. Phase 4 sticks to this simple model;
+// a future iteration can fit b via a dedicated calibration kernel.
+struct ClockSync {
+    std::mutex mu;
+    bool calibrated = false;
+    uint64_t host_ns_first = 0;
+    uint64_t cycle_first = 0;
+};
+ClockSync& clock_sync() {
+    static ClockSync c;
+    return c;
+}
+
+void write_clock_sync_file() {
+    const char* path = std::getenv("TT_FOIL_DEVICE_CLOCK_SYNC");
+    if (path == nullptr || path[0] == '\0') {
+        path = "tt_foil_device_clock_sync.csv";
+    }
+    std::FILE* fp = std::fopen(path, "w");
+    if (fp == nullptr) return;
+    std::fputs("host_ns_first,cycle_first,ns_per_cycle\n", fp);
+    ClockSync& c = clock_sync();
+    // Lock not strictly needed (writes happen post-mortem) but keeps
+    // the contract.
+    std::lock_guard<std::mutex> lock(c.mu);
+    std::fprintf(fp, "%llu,%llu,1.0\n",
+                 static_cast<unsigned long long>(c.host_ns_first),
+                 static_cast<unsigned long long>(c.cycle_first));
+    std::fclose(fp);
+}
+
 bool decode_marker(uint32_t w0, uint32_t w1,
                    uint16_t& zone_hash, uint8_t& packet_type, uint64_t& cycle) {
     if ((w0 & 0x80000000u) == 0) return false;
@@ -137,6 +177,21 @@ void capture_device_profile(Device& dev, std::span<Kernel* const> kernels) {
                                    zone_hash, pkt, cycle)) {
                     continue;
                 }
+                // First marker we ever see anchors the clock-sync mapping.
+                {
+                    ClockSync& cs = clock_sync();
+                    std::lock_guard<std::mutex> cs_lock(cs.mu);
+                    if (!cs.calibrated) {
+                        cs.host_ns_first = host_ns;
+                        cs.cycle_first   = cycle;
+                        cs.calibrated    = true;
+                    } else if (cycle < cs.cycle_first) {
+                        // A later RISC may have started earlier — keep the
+                        // earliest cycle as the anchor for the cleanest
+                        // offset.
+                        cs.cycle_first = cycle;
+                    }
+                }
                 const char* risc_name =
                     risc_id < 5 ? kRiscNames[risc_id] : "?";
                 const char* pkt_name =
@@ -163,6 +218,9 @@ void flush_device_profile_csv() {
         // Don't close the file here — atexit may fire while other code
         // is still alive; closing risks SIGSEGV in the destructor chain.
         // The OS will reclaim it on process exit.
+    }
+    if (clock_sync().calibrated) {
+        write_clock_sync_file();
     }
 }
 
