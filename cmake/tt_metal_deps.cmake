@@ -128,3 +128,24 @@ set_target_properties(tt_foil_hal_local PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Convenience alias to match existing references.
 add_library(HAL::1xx ALIAS tt_foil_hal_local)
+
+# ---- Tracy (optional, reuses tt-metal's build) ----
+# Enabled when the top-level TT_FOIL_ENABLE_TRACY option is ON.
+# Reuses libtracy.so + headers already produced by tt-metal's Tracy build.
+if(TT_FOIL_ENABLE_TRACY)
+    set(_tracy_inc "${TT_METAL_ROOT}/tt_metal/third_party/tracy/public")
+    set(_tracy_lib "${TT_METAL_BUILD_DIR}/lib/libtracy.so")
+    if(NOT EXISTS "${_tracy_inc}/tracy/Tracy.hpp" OR NOT EXISTS "${_tracy_lib}")
+        message(FATAL_ERROR
+            "Tracy not found. Build tt-metal with ENABLE_TRACY=ON first.\n"
+            "Expected header: ${_tracy_inc}/tracy/Tracy.hpp\n"
+            "Expected lib:    ${_tracy_lib}")
+    endif()
+    add_library(tracy::TracyClient SHARED IMPORTED)
+    set_target_properties(tracy::TracyClient PROPERTIES
+        IMPORTED_LOCATION "${_tracy_lib}"
+        INTERFACE_INCLUDE_DIRECTORIES "${_tracy_inc}"
+        INTERFACE_COMPILE_DEFINITIONS TRACY_ENABLE
+    )
+    message(STATUS "tt-foil: Tracy enabled (${_tracy_lib})")
+endif()

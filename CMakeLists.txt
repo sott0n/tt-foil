@@ -8,6 +8,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(TT_FOIL_BUILD_TESTS     "Build tests"                              ON)
 option(TT_FOIL_BUILD_EXAMPLES  "Build examples"                           ON)
 option(TT_FOIL_BUILD_FIRMWARE  "Self-build RISC firmware ELFs (Plan L)"   ON)
+option(TT_FOIL_ENABLE_TRACY
+    "Enable Tracy profiling for offline Performance/Memory Report generation" OFF)
 
 # Pull in tt-metal submodule components (UMD, HAL, llrt subset)
 include(cmake/tt_metal_deps.cmake)
@@ -71,6 +73,14 @@ target_link_libraries(tt_foil
         tt_foil_llrt
         tt_foil_hal_local
 )
+
+if(TT_FOIL_ENABLE_TRACY)
+    # Public so dependents of tt_foil see TRACY_ENABLE and link libtracy.so.
+    # ZoneScoped uses RAII objects, so any TU that calls into the tt_foil API
+    # may emit Tracy symbols.
+    target_link_libraries(tt_foil PUBLIC tracy::TracyClient)
+    target_compile_options(tt_foil PRIVATE -fno-omit-frame-pointer)
+endif()
 
 if(TT_FOIL_BUILD_TESTS)
     enable_testing()

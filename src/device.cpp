@@ -23,6 +23,7 @@
 #include "firmware_load.hpp"
 #include "firmware_paths.hpp"
 #include "mailbox_init.hpp"
+#include "profiling.hpp"
 #include "reset.hpp"
 
 #include <cstdlib>
@@ -126,6 +127,7 @@ std::unique_ptr<Device> device_open(
     int pcie_device_index,
     const std::string& /*firmware_dir*/,
     std::vector<CoreCoord> cores) {
+    TF_ZONE_N("TF_device_open");
 
     if (cores.empty()) {
         throw std::runtime_error(
@@ -271,6 +273,7 @@ std::unique_ptr<Device> device_open(
     // firmware boot, but keeping them inline keeps the failure modes easy
     // to attribute to a specific core.
     for (const auto& logical : cores) {
+        TF_ZONE_N("TF_device/core_boot");
         auto core = soc_logical_to_translated(soc_desc, logical.x, logical.y);
 
         assert_tensix_reset(*dev->umd_driver, dev->chip_id, core);
@@ -301,6 +304,7 @@ std::unique_ptr<Device> device_open(
 }
 
 void device_close(Device& dev) {
+    TF_ZONE_N("TF_device_close");
     // Park every Tensix RISC before releasing the UMD handle. Without this,
     // BRISC and subordinates keep running their idle firmware loop after we
     // exit; the next program's broadcast-assert can fail to interrupt a

@@ -3,10 +3,31 @@
 
 #include "buffer.hpp"
 #include "device.hpp"
+#include "profiling.hpp"
 
 #include <stdexcept>
 
 namespace tt::foil {
+
+namespace {
+constexpr const char* kPoolL1   = "Device L1";
+constexpr const char* kPoolDram = "Device DRAM";
+
+inline const char* pool_name(BufferLocation loc) {
+    return loc == BufferLocation::L1 ? kPoolL1 : kPoolDram;
+}
+
+// Tracy tracks allocations by address inside each named pool. tt-foil's L1
+// is per-core, so two cores can each allocate at the same device address —
+// which would look like a double-alloc to Tracy. Encode the logical core in
+// the upper 16 bits to keep keys unique within the "Device L1" pool.
+inline uintptr_t tracy_key(BufferLocation loc, uint64_t dev_addr, CoreCoord core) {
+    if (loc == BufferLocation::DRAM) return static_cast<uintptr_t>(dev_addr);
+    return (static_cast<uintptr_t>(core.x) << 56)
+         | (static_cast<uintptr_t>(core.y) << 48)
+         | static_cast<uintptr_t>(dev_addr);
+}
+}  // namespace
 
 Buffer* buffer_alloc(Device& dev, BufferLocation loc, std::size_t size_bytes, CoreCoord logical_core) {
     if (size_bytes == 0) {
@@ -31,12 +52,18 @@ Buffer* buffer_alloc(Device& dev, BufferLocation loc, std::size_t size_bytes, Co
     buf->device_addr = dev_addr;
     buf->size_bytes  = size_bytes;
     buf->core        = logical_core;
+
+    TF_ALLOC(tracy_key(loc, dev_addr, logical_core), size_bytes, pool_name(loc));
     return buf;
 }
 
 void buffer_free(Buffer* buf) {
     // Bump allocator: freeing is a no-op.
     // Callers use reset() on the allocator to reclaim all memory at once.
+    if (buf != nullptr) {
+        TF_FREE(tracy_key(buf->location, buf->device_addr, buf->core),
+                pool_name(buf->location));
+    }
     delete buf;
 }
 

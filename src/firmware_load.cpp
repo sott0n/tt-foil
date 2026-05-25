@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "firmware_load.hpp"
+#include "profiling.hpp"
 
 #include <stdexcept>
 #include <vector>
@@ -21,6 +22,7 @@ void load_tensix_firmware(
     const tt::umd::CoreCoord& core,
     const std::string& elf_path,
     TensixRiscId risc) {
+    TF_ZONE_N("TF_firmware_load");
 
     // Tensix programmable_core_type_index is 0 on Blackhole.
     constexpr uint32_t kTensixIdx = 0;

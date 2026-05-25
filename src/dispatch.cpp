@@ -5,6 +5,7 @@
 #include "device.hpp"
 #include "kernel.hpp"
 #include "fast_dispatch.hpp"
+#include "profiling.hpp"
 // kMaxRtaWords defined in kernel.hpp
 
 #include <atomic>
@@ -146,6 +147,7 @@ void dispatch_stage_setup(
     const tt::tt_metal::Hal& hal,
     tt::umd::Cluster& driver,
     uint32_t chip) {
+    TF_ZONE_N("TF_dispatch/setup");
     auto cc = kernel_translated_coord(kernel);
 
     const auto& dev_msgs_factory =
@@ -251,6 +253,7 @@ void dispatch_stage_send_reset(
     const tt::tt_metal::Hal& hal,
     tt::umd::Cluster& driver,
     uint32_t chip) {
+    TF_ZONE_N("TF_dispatch/send_reset");
     auto cc = kernel_translated_coord(kernel);
     uint64_t go_entry_addr = hal.get_dev_noc_addr(
         tt_metal::HalProgrammableCoreType::TENSIX,
@@ -273,6 +276,7 @@ void dispatch_stage_fire_go(
     const tt::tt_metal::Hal& hal,
     tt::umd::Cluster& driver,
     uint32_t chip) {
+    TF_ZONE_N("TF_dispatch/fire_go");
     auto cc = kernel_translated_coord(kernel);
     uint64_t go_entry_addr = hal.get_dev_noc_addr(
         tt_metal::HalProgrammableCoreType::TENSIX,
@@ -291,6 +295,7 @@ int64_t dispatch_stage_wait_done(
     tt::umd::Cluster& driver,
     uint32_t chip,
     int timeout_ms) {
+    TF_ZONE_N("TF_dispatch/wait_done");
     auto cc = kernel_translated_coord(kernel);
     const auto& dev_msgs_factory =
         hal.get_dev_msgs_factory(tt_metal::HalProgrammableCoreType::TENSIX);
@@ -325,6 +330,7 @@ int64_t dispatch_stage_wait_done(
 // dispatch_execute — blocking slow-dispatch, single kernel
 // ---------------------------------------------------------------------------
 void dispatch_execute(Device& dev, Kernel& kernel, int timeout_ms) {
+    TF_ZONE_N("TF_dispatch_execute");
     Kernel* one = &kernel;
     dispatch_execute_multi(dev, std::span<Kernel* const>(&one, 1), timeout_ms);
 }
@@ -333,6 +339,7 @@ void dispatch_execute(Device& dev, Kernel& kernel, int timeout_ms) {
 // dispatch_launch_async — fire-and-forget, R5 G1
 // ---------------------------------------------------------------------------
 void dispatch_launch_async(Device& dev, Kernel& kernel) {
+    TF_ZONE_N("TF_dispatch_launch_async");
     const tt::tt_metal::Hal& hal = *dev.hal;
     tt::umd::Cluster& driver     = *dev.umd_driver;
     const uint32_t chip          = dev.chip_id;
@@ -355,6 +362,7 @@ void dispatch_execute_multi(
     Device& dev,
     std::span<Kernel* const> kernels,
     int timeout_ms) {
+    TF_ZONE_N("TF_dispatch_execute_multi");
 
     if (kernels.empty()) {
         throw std::runtime_error("tt-foil: dispatch_execute_multi: no kernels");
@@ -437,6 +445,7 @@ void dispatch_execute_multi(
                 trace.multi_fire_wait_ns.fetch_add(t4 - t3);
             }
         }
+        TF_FRAME_MARK();
         return;
     }
 
@@ -472,6 +481,7 @@ void dispatch_execute_multi(
             trace.multi_fire_wait_ns.fetch_add(t4 - t3);
         }
     }
+    TF_FRAME_MARK();
 }
 
 

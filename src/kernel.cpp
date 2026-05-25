@@ -3,6 +3,7 @@
 
 #include "kernel.hpp"
 #include "device.hpp"
+#include "profiling.hpp"
 
 #include <filesystem>
 #include <stdexcept>
@@ -18,6 +19,7 @@ Kernel* kernel_load(
     std::span<const RiscBinary> binaries,
     CoreCoord logical_core)
 {
+    TF_ZONE_N("TF_kernel_load");
     if (binaries.empty()) {
         throw std::runtime_error("tt-foil: no binaries provided to load_kernel");
     }
