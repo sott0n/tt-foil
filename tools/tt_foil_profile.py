@@ -11,7 +11,8 @@ Outputs (under <out_dir>, default: generated/profiler/):
     .logs/tracy_profile_log.tracy   -- raw Tracy capture (binary, Tracy GUI)
     .logs/tracy_ops_times.csv       -- per-zone timing (TF_ prefix filtered)
     .logs/tt_foil_memlog.csv        -- raw buffer alloc/free event log
-    reports/tt_foil_perf_results.csv    -- Performance Report (zones)
+    reports/tt_foil_perf_results.csv    -- Performance Report (zone aggregate)
+    reports/tt_foil_perf_per_call.csv   -- per-call timeline (seq, ts, zone, dur, ctx)
     reports/tt_foil_memory_report.csv   -- Memory Report (per-pool stats)
 
 Requires:
@@ -69,49 +70,88 @@ def find_tools(build: pathlib.Path):
 # Report generation
 # ---------------------------------------------------------------------------
 
-def generate_perf_report(ops_times_csv: pathlib.Path,
-                         perf_report: pathlib.Path) -> None:
-    """Convert csvexport-release -u output to a Performance Report.
+def generate_per_call_csv(ops_times_csv: pathlib.Path,
+                          per_call_csv: pathlib.Path) -> None:
+    """Emit a cleaned per-event CSV preserving temporal order.
 
-    csvexport -u emits one row per zone instance with at least these columns:
-        name, src_file, src_line, total_ns, ...
+    csvexport-release -u writes one row per zone instance with many columns
+    (src_file, src_line, thread, ...). We project to the useful subset and
+    sort by time so users can scan the timeline directly:
 
-    We aggregate by name: call_count, total_ns, mean_ns, min_ns, max_ns.
+        seq, ts_ns, zone, duration_ns, context
+
+    `context` is whatever `ZoneText(...)` attached at runtime (e.g., the
+    kernel name in TF_dispatch_execute_multi after improvement (2)). Empty
+    when the zone has no per-call context.
     """
+    headers = ["seq", "ts_ns", "zone", "duration_ns", "context"]
     if not ops_times_csv.exists() or ops_times_csv.stat().st_size == 0:
-        print(f"  (no zone data in {ops_times_csv})")
-        # Still create an empty report so downstream tooling sees the file.
-        with perf_report.open("w", newline="") as fh:
-            csv.writer(fh).writerow(
-                ["ZONE_NAME", "CALL_COUNT", "TOTAL_NS",
-                 "MEAN_NS", "MIN_NS", "MAX_NS"])
+        with per_call_csv.open("w", newline="") as fh:
+            csv.writer(fh).writerow(headers)
         return
 
-    Stats = collections.namedtuple("Stats", "count total mn mx")
-    agg: dict[str, list] = {}
-
+    rows = []
     with ops_times_csv.open() as fh:
         reader = csv.DictReader(fh)
-        time_field = None
-        if reader.fieldnames:
-            # csvexport -u column for per-event time is typically "ns_since_start"
-            # paired with "exec_time_ns" (the duration). Fall back to common
-            # alternatives so this works across Tracy versions.
-            for candidate in ("exec_time_ns", "ns", "time_ns", "duration"):
-                if candidate in reader.fieldnames:
-                    time_field = candidate
-                    break
         for row in reader:
             name = row.get("name") or row.get("zone_name") or ""
             if not name:
                 continue
             try:
-                t = int(row.get(time_field, 0)) if time_field else 0
+                ts = int(row.get("ns_since_start", 0))
+                dur = int(row.get("exec_time_ns", 0))
+            except ValueError:
+                continue
+            # zone_text is set via ZoneText() at runtime (e.g., kernel name).
+            ctx = row.get("zone_text") or ""
+            rows.append((ts, name, dur, ctx))
+
+    rows.sort()
+    with per_call_csv.open("w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(headers)
+        for i, (ts, name, dur, ctx) in enumerate(rows):
+            w.writerow([i, ts, name, dur, ctx])
+
+
+def generate_perf_report(ops_times_csv: pathlib.Path,
+                         perf_report: pathlib.Path) -> None:
+    """Convert csvexport-release -u output to a Performance Report.
+
+    csvexport -u emits one row per zone instance with at least these columns:
+        name, src_file, src_line, zone_text, ns_since_start, exec_time_ns, ...
+
+    Aggregates by (zone_name, zone_text) tuple. When zone_text is non-empty
+    (set via ZoneText() at runtime — e.g., the kernel name attached in
+    dispatch_execute_multi), each context gets its own row so users can
+    see "TF_dispatch_execute_multi(conv_3x3_l1): 8 calls, mean 530μs"
+    instead of just the un-split aggregate.
+    """
+    headers = ["ZONE_NAME", "CONTEXT", "CALL_COUNT", "TOTAL_NS",
+               "MEAN_NS", "MIN_NS", "MAX_NS"]
+    if not ops_times_csv.exists() or ops_times_csv.stat().st_size == 0:
+        print(f"  (no zone data in {ops_times_csv})")
+        with perf_report.open("w", newline="") as fh:
+            csv.writer(fh).writerow(headers)
+        return
+
+    agg: dict[tuple[str, str], list] = {}
+
+    with ops_times_csv.open() as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            name = row.get("name") or row.get("zone_name") or ""
+            if not name:
+                continue
+            ctx = row.get("zone_text") or ""
+            try:
+                t = int(row.get("exec_time_ns", 0))
             except ValueError:
                 t = 0
-            cur = agg.get(name)
+            key = (name, ctx)
+            cur = agg.get(key)
             if cur is None:
-                agg[name] = [1, t, t, t]
+                agg[key] = [1, t, t, t]
             else:
                 cur[0] += 1
                 cur[1] += t
@@ -120,14 +160,16 @@ def generate_perf_report(ops_times_csv: pathlib.Path,
                 if t > cur[3]:
                     cur[3] = t
 
+    # Sort by zone, then by descending total_ns inside zone — hot context first.
+    sorted_keys = sorted(agg.keys(), key=lambda k: (k[0], -agg[k][1]))
     with perf_report.open("w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["ZONE_NAME", "CALL_COUNT", "TOTAL_NS",
-                    "MEAN_NS", "MIN_NS", "MAX_NS"])
-        for name in sorted(agg.keys()):
-            count, total, mn, mx = agg[name]
+        w.writerow(headers)
+        for key in sorted_keys:
+            name, ctx = key
+            count, total, mn, mx = agg[key]
             mean = total // count if count else 0
-            w.writerow([name, count, total, mean, mn, mx])
+            w.writerow([name, ctx, count, total, mean, mn, mx])
 
 
 def generate_memory_report(memlog_csv: pathlib.Path,
@@ -203,8 +245,10 @@ def main() -> int:
     )
     ap.add_argument("-o", "--output-folder", default="generated/profiler",
                     help="output directory (default: %(default)s)")
-    ap.add_argument("--zone-prefix", default="TF_",
-                    help="zone-name prefix to filter (default: %(default)s)")
+    ap.add_argument("--zone-filter", default="",
+                    help="substring filter for zone names; empty = include all "
+                         "(default: empty, capturing both tt-foil's TF_* zones "
+                         "and any user-set TT_FOIL_ZONE() zones)")
     ap.add_argument("--capture-port", type=int, default=8086,
                     help="Tracy capture server port (default: %(default)s)")
     ap.add_argument("--verbose", "-v", action="store_true",
@@ -232,6 +276,7 @@ def main() -> int:
     ops_times_csv = logs / "tracy_ops_times.csv"
     memlog_csv = logs / "tt_foil_memlog.csv"
     perf_report = reports / "tt_foil_perf_results.csv"
+    per_call_csv = reports / "tt_foil_perf_per_call.csv"
     mem_report = reports / "tt_foil_memory_report.csv"
 
     # Remove stale capture; capture-release will not overwrite by default.
@@ -283,16 +328,19 @@ def main() -> int:
     # 5. Export CSVs from the capture (zones only — memory comes from the
     # direct CSV log written by src/profiling.hpp::emit_mem_event).
     print(f"[tt_foil_profile] exporting CSVs")
+    cmd_export = [str(csvexport), "-u", str(tracy_file)]
+    if args.zone_filter:
+        cmd_export[2:2] = ["-f", args.zone_filter]
     with ops_times_csv.open("w") as fh:
-        subprocess.run(
-            [str(csvexport), "-u", "-f", args.zone_prefix, str(tracy_file)],
-            stdout=fh, check=False)
+        subprocess.run(cmd_export, stdout=fh, check=False)
 
     # 6. Post-process into final reports.
     generate_perf_report(ops_times_csv, perf_report)
+    generate_per_call_csv(ops_times_csv, per_call_csv)
     generate_memory_report(memlog_csv, mem_report)
 
     print(f"[tt_foil_profile] Performance Report: {perf_report}")
+    print(f"[tt_foil_profile] Per-call timeline:  {per_call_csv}")
     print(f"[tt_foil_profile] Memory Report:      {mem_report}")
     return proc.returncode
 
