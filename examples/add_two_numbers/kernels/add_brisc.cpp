@@ -22,7 +22,12 @@
 // get_arg_val<T>(i) reads from the RTA region set up by the host.
 #include "dataflow_api.h"
 
+// Device profiler (no-op when the build is not -DPROFILE_KERNEL).
+#include "tools/profiler/kernel_profiler.hpp"
+
 void kernel_main() {
+    DeviceZoneScopedN("add_two_numbers");
+
     // Read the three L1 addresses passed as runtime args.
     uint32_t addr_a      = get_arg_val<uint32_t>(0);
     uint32_t addr_b      = get_arg_val<uint32_t>(1);

@@ -48,6 +48,7 @@ add_library(tt_foil STATIC
     src/runtime_impl.cpp
     src/fast_dispatch.cpp
     src/profiling.cpp
+    src/device_profile.cpp
     # Bundled tt-metal llrt sources (Phase B3-2 + B3-3): copied from
     # tt_metal/llrt/, namespace renamed ll_api → tt::foil::ll_api so they
     # don't conflict with libtt_metal.so's copies, and tt_memory.cpp's one
@@ -97,6 +98,13 @@ if(TT_FOIL_ENABLE_TRACY)
     # may emit Tracy symbols.
     target_link_libraries(tt_foil PUBLIC tracy::TracyClient)
     target_compile_options(tt_foil PRIVATE -fno-omit-frame-pointer)
+endif()
+if(TT_FOIL_DEVICE_PROFILER)
+    # Host-side compile gate. Activates the device_profile.cpp code path
+    # that reads the profiler L1 buffer back after each dispatch. The
+    # kernel-side counterpart is PROFILE_KERNEL in the firmware/kernel
+    # SFPI build (see scripts/build_firmware.sh).
+    target_compile_definitions(tt_foil PRIVATE TT_FOIL_DEVICE_PROFILER_ENABLED=1)
 endif()
 
 if(TT_FOIL_BUILD_TESTS)

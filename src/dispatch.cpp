@@ -3,6 +3,7 @@
 
 #include "dispatch.hpp"
 #include "device.hpp"
+#include "device_profile.hpp"
 #include "kernel.hpp"
 #include "fast_dispatch.hpp"
 #include "profiling.hpp"
@@ -473,6 +474,7 @@ void dispatch_execute_multi(
                 trace.multi_fire_wait_ns.fetch_add(t4 - t3);
             }
         }
+        capture_device_profile(dev, kernels);
         TF_FRAME_MARK();
         return;
     }
@@ -509,6 +511,10 @@ void dispatch_execute_multi(
             trace.multi_fire_wait_ns.fetch_add(t4 - t3);
         }
     }
+    // Device profiler read-back: pull the per-RISC cycle markers each
+    // kernel's core wrote into its mailbox-resident profiler buffer.
+    // No-op when TT_FOIL_DEVICE_PROFILER_ENABLED is unset at compile time.
+    capture_device_profile(dev, kernels);
     TF_FRAME_MARK();
 }
 
