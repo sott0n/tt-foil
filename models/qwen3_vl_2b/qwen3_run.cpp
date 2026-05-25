@@ -62,7 +62,7 @@ constexpr float    kRopeTheta = 5000000.0f;
 
 constexpr uint32_t kSt      = kS       / kTileH;   // 1
 constexpr uint32_t kStDec   = 1;
-constexpr uint32_t kStKvDec = 2;
+constexpr uint32_t kStKvDec = 17;
 constexpr uint32_t kHt      = kH       / kTileW;
 constexpr uint32_t kFFt     = kFFN     / kTileW;
 constexpr uint32_t kDt      = kHeadDim / kTileW;
@@ -296,7 +296,7 @@ int main(int argc, char** argv) try {
     const std::string prompt_path = argv[1];
     const uint32_t kNumDecode = std::stoul(argv[2]);
     if (kS + kNumDecode > kStKvDec * kTileH)
-        throw std::runtime_error("num_decode > 32 would overflow St_kv=2 cache");
+        throw std::runtime_error("num_decode would overflow KV cache (max " + std::to_string(kStKvDec * kTileH - kS) + ")");
 
     const char* dev_env = std::getenv("TT_FOIL_DEVICE");
     int pcie_index = dev_env ? std::stoi(dev_env) : 0;
@@ -571,12 +571,14 @@ int main(int argc, char** argv) try {
     };
 
     const uint32_t kTotalNk    = kNkDt * kTileW;
-    const uint32_t kSlot1Rows  = kStKvDec * kTileH - kS;
     const std::size_t kSlot0Bytes = static_cast<std::size_t>(kNkDt) * kTileBytes;
-    std::vector<std::vector<uint16_t>> cache_K_slot1_rm(kNumLayers,
-        std::vector<uint16_t>(static_cast<size_t>(kSlot1Rows) * kTotalNk, 0));
-    std::vector<std::vector<uint16_t>> cache_V_slot1_rm(kNumLayers,
-        std::vector<uint16_t>(static_cast<size_t>(kSlot1Rows) * kTotalNk, 0));
+    // All decode slots in the KV cache need to be zero-filled before the
+    // first decode step: gqa_decode masks scores *after* exp(), so any
+    // garbage K at an invalid position can overflow to ±inf and produce
+    // NaN (0*inf in bf16) once multiplied by the mask.
+    const std::size_t kDecodeSlotsBytes =
+        static_cast<std::size_t>(kStKvDec - kSt) * kSlot0Bytes;
+    std::vector<uint16_t> dec_zeros(kDecodeSlotsBytes / 2, 0);
 
     auto rope_tile = [&](const std::vector<uint16_t>& row) {
         std::vector<uint16_t> rm(kTileH * kHalf, 0);
@@ -587,16 +589,6 @@ int main(int argc, char** argv) try {
         std::vector<uint16_t> rm(kTileH * (kStKvDec * kTileW), 0);
         for (uint32_t c = 0; c < valid_cols; ++c) rm[c] = one_bf16;
         return tile2d(rm, kTileH, kStKvDec * kTileW);
-    };
-    auto build_slot1_KT_tiles = [&](const std::vector<uint16_t>& slot1_K_rm) {
-        std::vector<uint16_t> KT_rm(static_cast<size_t>(kTotalNk) * kSlot1Rows, 0);
-        for (uint32_t r = 0; r < kSlot1Rows; ++r)
-            for (uint32_t c = 0; c < kTotalNk; ++c)
-                KT_rm[c * kSlot1Rows + r] = slot1_K_rm[r * kTotalNk + c];
-        return tile2d(KT_rm, kTotalNk, kSlot1Rows);
-    };
-    auto build_slot1_V_tiles = [&](const std::vector<uint16_t>& slot1_V_rm) {
-        return tile2d(slot1_V_rm, kSlot1Rows, kTotalNk);
     };
 
     // -----------------------------------------------------------------
@@ -721,11 +713,10 @@ int main(int argc, char** argv) try {
                                    KT_slot0_tiles.data(), KT_slot0_tiles.size() * 2);
             tt::foil::write_buffer(*dev, *T_V_cache[li].buf, 0,
                                    V_slot0_tiles.data(),  V_slot0_tiles.size()  * 2);
-            std::vector<uint16_t> zeros(kSlot0Bytes / 2, 0);
             tt::foil::write_buffer(*dev, *T_Kt_cache[li].buf, kSlot0Bytes,
-                                   zeros.data(), zeros.size() * 2);
+                                   dec_zeros.data(), kDecodeSlotsBytes);
             tt::foil::write_buffer(*dev, *T_V_cache[li].buf, kSlot0Bytes,
-                                   zeros.data(), zeros.size() * 2);
+                                   dec_zeros.data(), kDecodeSlotsBytes);
         }
 
         run1("pre:gqa_fused",  [&] {

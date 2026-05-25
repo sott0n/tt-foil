@@ -12,17 +12,21 @@
 //   T_V_cache   — V tile-format, shape (Mt=StKv, Nt=Nk) so
 //                 tile(slot, c) at offset (slot*Nk + c)*2048.
 //
-// Append plan for a new position pos with slot1_r = pos - kS (slot=1):
+// Append plan for a new position pos. The host passes slot1_r = pos - kS
+// (decode step index). Inside the kernel we derive
+//     slot        = 1 + slot1_r / 32   (slot 0 is prefill; decode lands in 1+)
+//     row_in_slot = slot1_r % 32       (which row of that slot tile)
+// so a single op handles all decode positions up to (StKv-1)*32 - 1.
 //
-//   V:  per NK-block c, dest tile (1, c). We write *row slot1_r* of
+//   V:  per NK-block c, dest tile (slot, c). We write *row row_in_slot* of
 //       this tile. That row spans 32 cols = the 32 NK values for the
 //       new pos within block c. In face layout the row crosses two
 //       faces (left-cols and right-cols). Each face's row is 32 bytes
 //       contiguous → 2 plain noc_async_write per NK-block. No
-//       read-modify-write needed (other rows hold earlier slot1_r's
+//       read-modify-write needed (other rows hold earlier row_in_slot's
 //       data and we don't touch them).
 //
-//   K:  per NK-block c, dest tile (c, 1). We write *col slot1_r* of
+//   K:  per NK-block c, dest tile (slot, c). We write *col row_in_slot* of
 //       this tile. That col spans 32 rows = the 32 NK values for the
 //       new pos within block c, but laid out at a 32-byte stride
 //       inside each face (one bf16 per row). 2-byte NOC writes don't
@@ -34,9 +38,9 @@
 //   arg[ 2.. 3] = T_V  NOC (lo, hi)
 //   arg[ 4.. 5] = T_Kt_cache base NOC (lo, hi)
 //   arg[ 6.. 7] = T_V_cache  base NOC (lo, hi)
-//   arg[    8 ] = slot1_r  (0..StKv*16-1)
+//   arg[    8 ] = slot1_r  (decode step idx; valid 0..(StKv-1)*32-1)
 //   arg[    9 ] = Nk       (column-tile count, = kNkDt)
-//   arg[   10 ] = StKv     (row-tile count for V / col-tile count for K, = kStKvDec)
+//   arg[   10 ] = StKv     (slot-tile count, = kStKvDec)
 
 #include <cstdint>
 #include "dataflow_api.h"
@@ -60,6 +64,12 @@ void kernel_main() {
     const uint32_t Nk      = get_arg_val<uint32_t>(9);
     const uint32_t StKv    = get_arg_val<uint32_t>(10);
 
+    // slot1_r is the decode step index (pos - kS). Prefill occupies slot 0,
+    // so decode positions 0..31 land in slot 1, 32..63 in slot 2, etc.
+    constexpr uint32_t kTileH = 32;
+    const uint32_t slot         = 1 + slot1_r / kTileH;
+    const uint32_t row_in_slot  = slot1_r % kTileH;
+
     cb_reserve_back(cb_io, 1);
     const uint32_t l1_base   = get_write_ptr(cb_io);
     const uint32_t scratch_K = l1_base;
@@ -72,19 +82,19 @@ void kernel_main() {
     noc_async_read_barrier();
 
     // V faces (row determines top vs bottom pair).
-    const bool     v_bot_half  = (slot1_r >= 16);
+    const bool     v_bot_half  = (row_in_slot >= 16);
     const uint32_t v_face_left  = v_bot_half ? 2 : 0;  // cols 0-15
     const uint32_t v_face_right = v_bot_half ? 3 : 1;  // cols 16-31
-    const uint32_t v_row_in_face = slot1_r & 15;
+    const uint32_t v_row_in_face = row_in_slot & 15;
 
     // ---------------------------- V append -----------------------------
-    // Slot1 is mt=1 in T_V_cache. Tile (1, c) at offset (1*Nk + c)*2048.
-    // Write face-row at v_row_in_face (32 bytes per face) for both face A
+    // Tile (slot, c) at offset (slot*Nk + c)*2048 in T_V_cache. Write
+    // face-row at v_row_in_face (32 bytes per face) for both face A
     // and face B per NK-block.
     for (uint32_t c = 0; c < Nk; ++c) {
         const uint32_t src_f0 = scratch_V + c * kTileBytes;                  // face 0 row 0
         const uint32_t src_f1 = scratch_V + c * kTileBytes + kFaceBytes;     // face 1 row 0
-        const uint64_t tile_base = v_base + (uint64_t)(1 * Nk + c) * kTileBytes;
+        const uint64_t tile_base = v_base + (uint64_t)(slot * Nk + c) * kTileBytes;
         const uint64_t dst_left  = tile_base + (uint64_t)v_face_left  * kFaceBytes
                                               + (uint64_t)v_row_in_face * kFaceRowBytes;
         const uint64_t dst_right = tile_base + (uint64_t)v_face_right * kFaceBytes
@@ -95,14 +105,15 @@ void kernel_main() {
     noc_async_write_barrier();
 
     // ---------------------------- K append -----------------------------
-    // K^T cache tile (c, 1) at offset (c*StKv + 1)*2048. We write col
-    // slot1_r of this tile, which sits in face (top, bot) determined by
-    // slot1_r/16 along the column axis. col_right means cols 16-31 of
-    // the tile → faces (1, 3); else cols 0-15 → faces (0, 2).
-    const bool     k_col_right = (slot1_r >= 16);
+    // K^T cache tile (slot, c) at offset (slot*Nk + c)*2048 (slot-major,
+    // same as V cache; see ops/gqa_decode/reader.cpp). We write col
+    // row_in_slot of this tile, which sits in face (top, bot) determined
+    // by row_in_slot/16 along the column axis. col_right means cols 16-31
+    // of the tile → faces (1, 3); else cols 0-15 → faces (0, 2).
+    const bool     k_col_right = (row_in_slot >= 16);
     const uint32_t k_face_top = k_col_right ? 1 : 0;
     const uint32_t k_face_bot = k_col_right ? 3 : 2;
-    const uint32_t k_col_in_face = slot1_r & 15;
+    const uint32_t k_col_in_face = row_in_slot & 15;
 
     volatile uint16_t* face_words = reinterpret_cast<volatile uint16_t*>(face_buf);
 
@@ -114,9 +125,9 @@ void kernel_main() {
         volatile uint16_t* src_bot = reinterpret_cast<volatile uint16_t*>(
             scratch_K + c * kTileBytes + kFaceBytes);
 
-        // K^T cache is slot-major (see ops/gqa_decode/reader.cpp): slot 1
-        // tile c lives at offset (1 * Nk + c) * 2048, same shape as V cache.
-        const uint64_t tile_base = kt_base + (uint64_t)(1 * Nk + c) * kTileBytes;
+        // K^T cache is slot-major (see ops/gqa_decode/reader.cpp): slot s
+        // tile c lives at offset (s * Nk + c) * 2048, same shape as V cache.
+        const uint64_t tile_base = kt_base + (uint64_t)(slot * Nk + c) * kTileBytes;
 
         // ---- top face (NK rows c*32..c*32+15) ----
         const uint64_t face_top_addr = tile_base + (uint64_t)k_face_top * kFaceBytes;
