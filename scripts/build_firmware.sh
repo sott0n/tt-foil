@@ -29,6 +29,23 @@ TT="${TT_METAL_ROOT:-/home/kyamaguchi/tt-metal}"
 TT_FOIL_BUILD="${TT_FOIL_BUILD:-$REPO/build}"
 OUT_DIR="${OUT_DIR:-$TT_FOIL_BUILD/firmware}"
 
+# Optional: device profiler. When TT_FOIL_PROFILE_KERNEL is non-empty (and
+# numeric), pass it as -DPROFILE_KERNEL=<value> so tt-metal's
+# kernel_profiler.hpp activates. Default off → no profiler in firmware.
+#
+# PROFILER_FULL_HOST_BUFFER_SIZE_PER_RISC is required by kernel_profiler.hpp
+# but only used on the DRAM-offload "quick_push" code path which tt-foil
+# does not exercise (we read the L1 buffer directly post-dispatch). A
+# small fixed value keeps the constexpr expressions consumable; the actual
+# DRAM region this implies is never allocated.
+PROFILE_DEFINES=()
+if [[ -n "${TT_FOIL_PROFILE_KERNEL:-}" ]]; then
+    PROFILE_DEFINES=(
+        -DPROFILE_KERNEL="${TT_FOIL_PROFILE_KERNEL}"
+        -DPROFILER_FULL_HOST_BUFFER_SIZE_PER_RISC=4096
+    )
+fi
+
 GXX="$TT/build_Release/libexec/tt-metalium/runtime/sfpi/compiler/bin/riscv-tt-elf-g++"
 LIB="$TT/runtime/hw/lib/blackhole"
 LDDIR="$TT/runtime/hw/toolchain/blackhole"
@@ -88,13 +105,26 @@ build_dm() {
         link_noc=("$LIB/noc.o")
     fi
 
+    # When profiler is on, BRISC firmware grows by ~1.2 KB and overflows
+    # its 0x2200 (8.5 KB) region. tt-metal's JIT build uses -flto=auto
+    # which inlines + drops dead code aggressively, shrinking BRISC FW
+    # roughly in half. We mirror that here only when PROFILE_KERNEL is on
+    # to avoid regressing the non-profile build.
+    local lto_flags=()
+    if [[ -n "${TT_FOIL_PROFILE_KERNEL:-}" ]]; then
+        lto_flags=(-flto=auto -ffat-lto-objects)
+    fi
+
     "$GXX" "${COMMON_CFLAGS[@]}" \
+        "${PROFILE_DEFINES[@]}" \
+        "${lto_flags[@]}" \
         -mcpu=tt-bh \
         -DCOMPILE_FOR_${risc^^} -DPROCESSOR_INDEX=$proc_idx \
         -c "$TT/tt_metal/hw/firmware/src/tt-1xx/${risc}.cc" \
         -o "$obj"
 
     "$GXX" \
+        "${lto_flags[@]}" \
         -Os -mcpu=tt-bh -fno-tree-loop-distribute-patterns \
         -fno-exceptions -fno-use-cxa-atexit -std=c++17 \
         -Wl,-z,max-page-size=16 -Wl,-z,common-page-size=16 -nostartfiles \
@@ -120,7 +150,16 @@ build_trisc_fw() {
         local elf="$odir/trisc${i}.elf"
         local welf="$odir/trisc${i}_weakened.elf"
 
+        # Same LTO trick as BRISC/NCRISC to keep the profiler-on text
+        # section inside TRISC's tight region (limit 0xa00 for TRISC0).
+        local trisc_lto=()
+        if [[ -n "${TT_FOIL_PROFILE_KERNEL:-}" ]]; then
+            trisc_lto=(-flto=auto -ffat-lto-objects)
+        fi
+
         "$GXX" "${COMMON_CFLAGS[@]}" \
+            "${PROFILE_DEFINES[@]}" \
+            "${trisc_lto[@]}" \
             -mcpu=tt-bh-tensix -O3 \
             -ffast-math \
             -ftt-nttp -ftt-constinit -ftt-consteval \
@@ -133,6 +172,7 @@ build_trisc_fw() {
             -o "$obj"
 
         "$GXX" \
+            "${trisc_lto[@]}" \
             -O3 -mcpu=tt-bh-tensix -ffast-math \
             -fno-exceptions -fno-use-cxa-atexit -std=c++17 \
             -Wl,-z,max-page-size=16 -Wl,-z,common-page-size=16 -nostartfiles \

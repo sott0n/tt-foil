@@ -10,6 +10,22 @@ option(TT_FOIL_BUILD_EXAMPLES  "Build examples"                           ON)
 option(TT_FOIL_BUILD_FIRMWARE  "Self-build RISC firmware ELFs (Plan L)"   ON)
 option(TT_FOIL_ENABLE_TRACY
     "Enable Tracy profiling for offline Performance/Memory Report generation" OFF)
+# Device-side cycle profiler (firmware + kernel instrumented with
+# DeviceZoneScopedN). Implies TT_FOIL_ENABLE_TRACY since the per-RISC
+# zones flow through the same report pipeline. See
+# docs/device_profiler_plan.md for the design.
+option(TT_FOIL_DEVICE_PROFILER
+    "Enable device-side cycle profiling — rebuilds firmware + kernels with PROFILE_KERNEL" OFF)
+if(TT_FOIL_DEVICE_PROFILER AND NOT TT_FOIL_ENABLE_TRACY)
+    message(FATAL_ERROR
+        "TT_FOIL_DEVICE_PROFILER requires TT_FOIL_ENABLE_TRACY=ON "
+        "(device zones share the host profiler's CSV pipeline).")
+endif()
+# Bitmask passed as -DPROFILE_KERNEL=<value> to firmware + kernel builds.
+# Bit 0 = base profiling (zone start/end markers). See tt-metal's
+# kernel_profiler.hpp for higher-bit options (DISPATCH, TRACE, SUM).
+set(TT_FOIL_PROFILE_KERNEL_BITMASK "1" CACHE STRING
+    "PROFILE_KERNEL bitmask when TT_FOIL_DEVICE_PROFILER=ON")
 
 # Pull in tt-metal submodule components (UMD, HAL, llrt subset)
 include(cmake/tt_metal_deps.cmake)
@@ -147,12 +163,21 @@ if(TT_FOIL_BUILD_FIRMWARE)
         "${CMAKE_BINARY_DIR}/firmware/trisc2/trisc2.elf"
         "${CMAKE_BINARY_DIR}/firmware/trisc2/trisc2_weakened.elf"
     )
+    # When the device profiler is enabled, pass the bitmask through to
+    # build_firmware.sh so SFPI g++ compiles brisc.cc / ncrisc.cc / trisc.cc
+    # with -DPROFILE_KERNEL=<bitmask>.
+    set(_tt_foil_fw_profile_env "")
+    if(TT_FOIL_DEVICE_PROFILER)
+        set(_tt_foil_fw_profile_env
+            "TT_FOIL_PROFILE_KERNEL=${TT_FOIL_PROFILE_KERNEL_BITMASK}")
+    endif()
     add_custom_command(
         OUTPUT ${_tt_foil_fw_outputs}
         COMMAND ${CMAKE_COMMAND} -E env
             TT_METAL_ROOT=${TT_METAL_ROOT}
             TT_FOIL_BUILD=${CMAKE_BINARY_DIR}
             OUT_DIR=${CMAKE_BINARY_DIR}/firmware
+            ${_tt_foil_fw_profile_env}
             ${CMAKE_CURRENT_SOURCE_DIR}/scripts/build_firmware.sh
         DEPENDS
             ${CMAKE_CURRENT_SOURCE_DIR}/scripts/build_firmware.sh
