@@ -16,17 +16,18 @@ namespace tt::foil {
 Kernel::~Kernel() {
     // Balance the TF_ALLOC fired in kernel_load / register_cbs. Pool names
     // must match exactly. kernel_text gets a separate FREE per RISC
-    // (matches the per-RISC allocation pattern).
+    // (matches the per-RISC allocation pattern). Per-core pool names so
+    // multi-core workloads can tell which core is closest to L1 capacity.
     if (rta_region_size > 0) {
-        TF_FREE(rta_base_addr, "Device L1 (kernel_RTA)");
+        TF_FREE_CORE(rta_base_addr, "L1 RTA", core.x, core.y);
     }
     for (const auto& lr : riscs) {
         if (lr.kernel_text_addr != 0 && lr.mem) {
-            TF_FREE(lr.kernel_text_addr, "Device L1 (kernel_text)");
+            TF_FREE_CORE(lr.kernel_text_addr, "L1 kernel_text", core.x, core.y);
         }
     }
     if (cb_alloc.valid && cb_alloc.blob_bytes > 0) {
-        TF_FREE(cb_alloc.blob_l1_addr, "Device L1 (CB_blob)");
+        TF_FREE_CORE(cb_alloc.blob_l1_addr, "L1 CB_blob", core.x, core.y);
     }
 }
 
@@ -65,7 +66,8 @@ Kernel* kernel_load(
     uint32_t rta_region_bytes = kMaxRiscs * kMaxRtaWords * sizeof(uint32_t);
     kernel->rta_base_addr  = dev.kernel_config_for_core(logical_core).alloc(rta_region_bytes, /*alignment=*/16);
     kernel->rta_region_size = rta_region_bytes;
-    TF_ALLOC(kernel->rta_base_addr, rta_region_bytes, "Device L1 (kernel_RTA)");
+    TF_ALLOC_CORE(kernel->rta_base_addr, rta_region_bytes,
+                  "L1 RTA", logical_core.x, logical_core.y);
 
     for (const auto& rb : binaries) {
         if (!std::filesystem::exists(rb.elf_path)) {
@@ -83,7 +85,8 @@ Kernel* kernel_load(
         // The binary will be written here; firmware calls kernel_config_base + text_offset.
         std::size_t text_bytes = lr.mem->size() * sizeof(uint32_t);
         lr.kernel_text_addr = dev.kernel_config_for_core(logical_core).alloc(text_bytes, /*alignment=*/16);
-        TF_ALLOC(lr.kernel_text_addr, text_bytes, "Device L1 (kernel_text)");
+        TF_ALLOC_CORE(lr.kernel_text_addr, text_bytes,
+                      "L1 kernel_text", logical_core.x, logical_core.y);
 
         kernel->riscs.push_back(std::move(lr));
     }
@@ -145,6 +148,16 @@ void release_kernels(Device& device, CoreCoord logical_core) {
     if (kc_it != device.kernel_config_allocs.end()) {
         kc_it->second.reset();
     }
+    // Signal Memory Report aggregator that the kernel_config region for
+    // this core has rewound. Kernel destructors already TF_FREE'd each
+    // outstanding kernel_text/RTA/CB_blob when the user dropped the
+    // shared_ptr; this is a safety net for users who call
+    // release_kernels without dropping their shared_ptrs first
+    // (which the runtime.hpp contract permits — the addresses just
+    // become stale).
+    TF_POOL_RESET_CORE("L1 kernel_text", logical_core.x, logical_core.y);
+    TF_POOL_RESET_CORE("L1 RTA",         logical_core.x, logical_core.y);
+    TF_POOL_RESET_CORE("L1 CB_blob",     logical_core.x, logical_core.y);
     // Evict resident kernels except those explicitly pinned. Pinned
     // kernels live below the kernel_config watermark; their text is
     // intact across this reset.
@@ -171,6 +184,9 @@ void reset_l1(Device& device, CoreCoord logical_core) {
     uint64_t key = Device::core_key(logical_core.x, logical_core.y);
     auto it = device.l1_allocs.find(key);
     if (it != device.l1_allocs.end()) it->second.reset();
+    // Signal Memory Report aggregator that anything still considered
+    // live in this core's L1 user-buffer pool is gone.
+    TF_POOL_RESET_CORE("Device L1", logical_core.x, logical_core.y);
 }
 
 }  // namespace tt::foil

@@ -8,7 +8,7 @@
 // unconditionally. Include only from .cpp files — never from public headers.
 //
 // Naming convention: zone names are prefixed with "TF_" so csvexport-release
-// can filter to just tt-foil zones via `-p TF_` (same scheme as tt-metal's
+// can filter to just tt-foil zones via `-f TF_` (same scheme as tt-metal's
 // "TT_" prefix).
 
 #pragma once
@@ -59,7 +59,10 @@ inline void emit_mem_event(const char* op, const char* pool,
 
     // Monotonic timestamp from Tracy's clock (matches zone timestamps).
     const int64_t ts = tracy::Profiler::GetTime();
-    std::fprintf(fp, "%s,%s,0x%lx,%zu,%lld\n",
+    // Pool name is double-quoted because per-core variants contain commas
+    // ("Device L1 (0,0)"). Python's csv module strips the quotes
+    // transparently. We never put double quotes themselves into pool names.
+    std::fprintf(fp, "%s,\"%s\",0x%lx,%zu,%lld\n",
                  op, pool,
                  static_cast<unsigned long>(addr),
                  size,
@@ -67,6 +70,12 @@ inline void emit_mem_event(const char* op, const char* pool,
     // Flush is omitted on the hot path — atexit + line buffering keep the
     // file usable. If the process crashes mid-run, the tail is lost.
 }
+
+// Return a process-lifetime interned pool name of the form
+// "<base> (x,y)" for use with TF_ALLOC / TF_FREE. The returned pointer
+// is stable for the rest of the process — Tracy stores it.
+// Defined in profiling.cpp.
+const char* core_pool_name(const char* base, int x, int y);
 
 }  // namespace tt::foil::profiling
 
@@ -93,10 +102,28 @@ inline void emit_mem_event(const char* op, const char* pool,
         ::tt::foil::profiling::emit_mem_event( \
             "FREE", (pool), static_cast<std::uintptr_t>(ptr), 0); \
     } while (0)
+// Per-core variant: pool is a const char* base name (e.g. "Device L1")
+// and the macro appends "(x,y)" via the interner.
+#  define TF_ALLOC_CORE(ptr, sz, base, cx, cy) \
+        TF_ALLOC((ptr), (sz), ::tt::foil::profiling::core_pool_name((base), (cx), (cy)))
+#  define TF_FREE_CORE(ptr, base, cx, cy) \
+        TF_FREE((ptr), ::tt::foil::profiling::core_pool_name((base), (cx), (cy)))
+// Emit a pool-wide reset event into the memlog. The Python aggregator
+// treats it as "every still-live allocation in `pool` is freed at this
+// timestamp" — used by reset_l1 / release_kernels to signal that the
+// bump allocator behind a pool has rewound and nothing carried over.
+#  define TF_POOL_RESET(pool) \
+        ::tt::foil::profiling::emit_mem_event("RESET", (pool), 0, 0)
+#  define TF_POOL_RESET_CORE(base, cx, cy) \
+        TF_POOL_RESET(::tt::foil::profiling::core_pool_name((base), (cx), (cy)))
 #else
-#  define TF_ZONE_N(name)          do {} while (0)
-#  define TF_FRAME_MARK()          do {} while (0)
-#  define TF_ZONE_TEXT(text, len)  do {} while (0)
-#  define TF_ALLOC(ptr, sz, pool)  do {} while (0)
-#  define TF_FREE(ptr, pool)       do {} while (0)
+#  define TF_ZONE_N(name)                       do {} while (0)
+#  define TF_FRAME_MARK()                       do {} while (0)
+#  define TF_ZONE_TEXT(text, len)               do {} while (0)
+#  define TF_ALLOC(ptr, sz, pool)               do {} while (0)
+#  define TF_FREE(ptr, pool)                    do {} while (0)
+#  define TF_ALLOC_CORE(ptr, sz, base, cx, cy)  do {} while (0)
+#  define TF_FREE_CORE(ptr, base, cx, cy)       do {} while (0)
+#  define TF_POOL_RESET(pool)                   do {} while (0)
+#  define TF_POOL_RESET_CORE(base, cx, cy)      do {} while (0)
 #endif

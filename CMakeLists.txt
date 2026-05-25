@@ -31,6 +31,7 @@ add_library(tt_foil STATIC
     src/umd_boot.cpp
     src/runtime_impl.cpp
     src/fast_dispatch.cpp
+    src/profiling.cpp
     # Bundled tt-metal llrt sources (Phase B3-2 + B3-3): copied from
     # tt_metal/llrt/, namespace renamed ll_api → tt::foil::ll_api so they
     # don't conflict with libtt_metal.so's copies, and tt_memory.cpp's one

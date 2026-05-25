@@ -88,12 +88,14 @@ void register_cbs(
     // allocator (release_kernels rewinds), but for the Memory Report's
     // host-side balance the prior blob is no longer the live one.
     if (kernel.cb_alloc.valid && kernel.cb_alloc.blob_bytes > 0) {
-        TF_FREE(kernel.cb_alloc.blob_l1_addr, "Device L1 (CB_blob)");
+        TF_FREE_CORE(kernel.cb_alloc.blob_l1_addr, "L1 CB_blob",
+                     kernel.core.x, kernel.core.y);
     }
 
     auto& kcfg = dev.kernel_config_for_core(kernel.core);
     const uint64_t blob_addr = kcfg.alloc(blob_bytes, kCbBlobAlignment);
-    TF_ALLOC(blob_addr, blob_bytes, "Device L1 (CB_blob)");
+    TF_ALLOC_CORE(blob_addr, blob_bytes, "L1 CB_blob",
+                  kernel.core.x, kernel.core.y);
 
     // kernel_config_base = HAL TENSIX KERNEL_CONFIG addr — relative offset
     // for the launch_msg field.
