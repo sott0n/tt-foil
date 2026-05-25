@@ -304,11 +304,21 @@ int64_t dispatch_stage_wait_done(
         tt_metal::HalL1MemAddrType::GO_MSG);
     auto go_msg_buf = dev_msgs_factory.create<tt_metal::dev_msgs::go_msg_t>();
     auto start = std::chrono::steady_clock::now();
+    uint32_t poll_count = 0;
     while (true) {
+        ++poll_count;
         driver.read_from_device(
             go_msg_buf.data(), chip, cc, go_entry_addr,
             static_cast<std::size_t>(go_msg_buf.size()));
         if (go_msg_buf.view().signal() == tt_metal::dev_msgs::RUN_MSG_DONE) {
+#if defined(TRACY_ENABLE)
+            // Attach poll count to the zone so the per-call CSV / aggregate
+            // can tell PCIe-bound dispatches (polls==1) from chip-bound ones
+            // (polls >> 1, sleep 100us per iteration).
+            char buf[32];
+            int n = std::snprintf(buf, sizeof(buf), "polls=%u", poll_count);
+            if (n > 0) TF_ZONE_TEXT(buf, static_cast<std::size_t>(n));
+#endif
             return std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start).count();
         }
