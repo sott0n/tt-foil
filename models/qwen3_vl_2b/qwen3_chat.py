@@ -128,7 +128,7 @@ def main() -> int:
     # noise occasionally leaks here too, so skip anything non-numeric.
     gen_ids = [int(line) for line in proc.stdout.split()
                if line.strip().isdigit()]
-    print(f"generated IDs   = {gen_ids}", file=sys.stderr)
+    print(f"\ngenerated IDs   = {gen_ids}", file=sys.stderr)
     completion = tk.decode(gen_ids)
     print(f"\n=== completion ===\n{args.prompt}{completion}")
     return 0
