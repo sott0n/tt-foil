@@ -11,9 +11,11 @@
 #include "kernel.hpp"
 #include "dispatch.hpp"
 #include "noc_addr.hpp"
+#include "profiling.hpp"
 
 #include <umd/device/types/core_coordinates.hpp>
 
+#include <cstdio>
 #include <stdexcept>
 
 namespace tt::foil {
@@ -55,9 +57,22 @@ void write_buffer(Device& device, Buffer& buf, const void* src, std::size_t byte
 
 void write_buffer(Device& device, Buffer& buf, std::size_t offset_bytes,
                   const void* src, std::size_t bytes) {
+    TF_ZONE_N("TF_write_buffer");
     if (offset_bytes + bytes > buf.size_bytes) {
         throw std::runtime_error("tt-foil: write_buffer offset+size exceeds allocation");
     }
+#if defined(TRACY_ENABLE)
+    {
+        // Attach pool name + transfer size so per-call CSV shows e.g.
+        // "L1 (0,0): 2048 B" — useful for spotting big PCIe writes.
+        char tag[64];
+        int n = std::snprintf(
+            tag, sizeof(tag), "%s %zuB",
+            buf.location == BufferLocation::L1 ? "L1" : "DRAM",
+            bytes);
+        if (n > 0) TF_ZONE_TEXT(tag, static_cast<std::size_t>(n));
+    }
+#endif
     switch (buf.location) {
         case BufferLocation::L1:
             write_l1(device, buf.core, buf.device_addr + offset_bytes, src, bytes);
@@ -69,9 +84,20 @@ void write_buffer(Device& device, Buffer& buf, std::size_t offset_bytes,
 }
 
 void read_buffer(Device& device, Buffer& buf, void* dst, std::size_t bytes) {
+    TF_ZONE_N("TF_read_buffer");
     if (bytes > buf.size_bytes) {
         throw std::runtime_error("tt-foil: read_buffer size exceeds allocation");
     }
+#if defined(TRACY_ENABLE)
+    {
+        char tag[64];
+        int n = std::snprintf(
+            tag, sizeof(tag), "%s %zuB",
+            buf.location == BufferLocation::L1 ? "L1" : "DRAM",
+            bytes);
+        if (n > 0) TF_ZONE_TEXT(tag, static_cast<std::size_t>(n));
+    }
+#endif
     switch (buf.location) {
         case BufferLocation::L1:
             read_l1(device, buf.core, buf.device_addr, dst, bytes);
