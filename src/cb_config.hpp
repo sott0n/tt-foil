@@ -54,6 +54,7 @@ struct CbConfig {
 // so dispatch can leave the CB fields default.
 struct CbAllocation {
     uint64_t blob_l1_addr{0};       // absolute L1 address of the CB blob (debug)
+    uint32_t blob_bytes{0};         // size of the blob (for Memory Report TF_FREE)
     uint32_t local_cb_offset{0};    // byte offset from kernel_config_base
     uint64_t local_cb_mask{0};      // bitmask of populated cb indices, bit i ↔ CB i
     bool     valid{false};          // true iff any CBs were registered

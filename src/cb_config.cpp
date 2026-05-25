@@ -9,6 +9,7 @@
 
 #include "device.hpp"
 #include "kernel.hpp"
+#include "profiling.hpp"
 
 #include "llrt/hal.hpp"
 
@@ -82,8 +83,17 @@ void register_cbs(
     // Allocate inside KERNEL_CONFIG region for this core (the same bump
     // allocator that the per-RISC kernel ELF + RTA slots come from). Aligned
     // to 16 B because firmware does pointer arithmetic in 16 B units.
+    // Free a previously-registered CB blob (if any) before allocating
+    // a fresh one. The underlying L1 bytes aren't reclaimed by the bump
+    // allocator (release_kernels rewinds), but for the Memory Report's
+    // host-side balance the prior blob is no longer the live one.
+    if (kernel.cb_alloc.valid && kernel.cb_alloc.blob_bytes > 0) {
+        TF_FREE(kernel.cb_alloc.blob_l1_addr, "Device L1 (CB_blob)");
+    }
+
     auto& kcfg = dev.kernel_config_for_core(kernel.core);
     const uint64_t blob_addr = kcfg.alloc(blob_bytes, kCbBlobAlignment);
+    TF_ALLOC(blob_addr, blob_bytes, "Device L1 (CB_blob)");
 
     // kernel_config_base = HAL TENSIX KERNEL_CONFIG addr — relative offset
     // for the launch_msg field.
@@ -105,6 +115,7 @@ void register_cbs(
     // Record the allocation; dispatch_execute will pick it up next launch.
     CbAllocation a;
     a.blob_l1_addr             = blob_addr;
+    a.blob_bytes               = blob_bytes;
     a.local_cb_offset          = local_cb_offset;
     a.local_cb_mask            = seen_mask;
     a.valid                    = true;
