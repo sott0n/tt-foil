@@ -91,10 +91,10 @@ runtime the binary has exactly one TT-specific dynamic dep —
 │   │   • tile/bf16 helpers                                    │           │
 │   └──────────────────────────────────────────────────────────┘           │
 │                       │                                                  │
-│                       │ dynamic-links two TT-specific .so files:          │
+│                       │ dynamic-links two TT-specific .so files:         │
 │                       ▼                                                  │
 │              libtt-umd.so.0   (4.4 MB)   ──► PCIe / TLB / DMA            │
-│              libfmt.so.11     (0.18 MB)  ──► logging / formatting         │
+│              libfmt.so.11     (0.18 MB)  ──► logging / formatting        │
 │                                                  │                       │
 │                                                  ▼                       │
 │                                          Blackhole chip                  │
