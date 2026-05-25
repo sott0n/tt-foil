@@ -70,6 +70,72 @@ def find_tools(build: pathlib.Path):
 # Report generation
 # ---------------------------------------------------------------------------
 
+def detect_phases(ops_times_csv: pathlib.Path,
+                  phases_csv: pathlib.Path,
+                  gap_us: int = 1000) -> None:
+    """Cluster TF_kernel_load events into Phase_N groups by inter-event gap.
+
+    Many tt-foil workloads (e.g. ResNet-20 inference) load a fresh set of
+    kernels at each phase boundary, then dispatch many times against them
+    before loading the next set. Detecting these bursts gives us virtual
+    phase zones for free without requiring the user to wrap their code in
+    TT_FOIL_ZONE().
+
+    Output CSV columns:
+        phase, kernel_load_count, t_start_ns, t_end_ns, duration_ns,
+        first_kernel, last_kernel
+
+    `duration_ns` is the wall-time from the first kernel_load of the
+    phase to the last dispatch_execute that runs against those kernels
+    (i.e., end = next phase's first kernel_load, or end-of-trace).
+    """
+    headers = ["phase", "kernel_load_count", "t_start_ns", "t_end_ns",
+               "duration_ns", "first_kernel", "last_kernel"]
+    if not ops_times_csv.exists() or ops_times_csv.stat().st_size == 0:
+        with phases_csv.open("w", newline="") as fh:
+            csv.writer(fh).writerow(headers)
+        return
+
+    kls = []  # (ts_ns, context/kernel_name)
+    last_ts = 0
+    with ops_times_csv.open() as fh:
+        for row in csv.DictReader(fh):
+            try:
+                ts = int(row.get("ns_since_start", 0))
+            except ValueError:
+                continue
+            if ts > last_ts:
+                last_ts = ts
+            if row.get("name") == "TF_kernel_load":
+                kls.append((ts, row.get("zone_text") or ""))
+    kls.sort()
+
+    # Cluster: gap > gap_us microseconds → new phase.
+    gap_ns = gap_us * 1000
+    clusters: list[list[tuple[int, str]]] = []
+    cur: list[tuple[int, str]] = []
+    for ts, name in kls:
+        if cur and ts - cur[-1][0] > gap_ns:
+            clusters.append(cur)
+            cur = []
+        cur.append((ts, name))
+    if cur:
+        clusters.append(cur)
+
+    with phases_csv.open("w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(headers)
+        for i, c in enumerate(clusters):
+            t_start = c[0][0]
+            # Phase ends when the next phase begins, or at the last
+            # event seen in the trace.
+            t_end = clusters[i + 1][0][0] if i + 1 < len(clusters) else last_ts
+            first_k = c[0][1]
+            last_k = c[-1][1]
+            w.writerow([f"Phase_{i}", len(c), t_start, t_end,
+                        t_end - t_start, first_k, last_k])
+
+
 def generate_per_call_csv(ops_times_csv: pathlib.Path,
                           per_call_csv: pathlib.Path) -> None:
     """Emit a cleaned per-event CSV preserving temporal order.
@@ -224,6 +290,15 @@ def generate_memory_report(memlog_csv: pathlib.Path,
                 free_count[pool] += 1
                 sz = live[pool].pop(addr, 0)
                 live_bytes[pool] -= sz
+            elif op == "RESET":
+                # Pool-wide reset: the underlying bump allocator rewound,
+                # so anything still considered live for this pool is gone.
+                # Count each forgotten entry as a free so the alloc/free
+                # totals stay balanced.
+                if pool in live:
+                    free_count[pool] += len(live[pool])
+                    live[pool].clear()
+                live_bytes[pool] = 0
 
     with mem_report.open("w", newline="") as fh:
         w = csv.writer(fh)
@@ -277,6 +352,7 @@ def main() -> int:
     memlog_csv = logs / "tt_foil_memlog.csv"
     perf_report = reports / "tt_foil_perf_results.csv"
     per_call_csv = reports / "tt_foil_perf_per_call.csv"
+    phases_csv = reports / "tt_foil_phases.csv"
     mem_report = reports / "tt_foil_memory_report.csv"
 
     # Remove stale capture; capture-release will not overwrite by default.
@@ -337,10 +413,12 @@ def main() -> int:
     # 6. Post-process into final reports.
     generate_perf_report(ops_times_csv, perf_report)
     generate_per_call_csv(ops_times_csv, per_call_csv)
+    detect_phases(ops_times_csv, phases_csv)
     generate_memory_report(memlog_csv, mem_report)
 
     print(f"[tt_foil_profile] Performance Report: {perf_report}")
     print(f"[tt_foil_profile] Per-call timeline:  {per_call_csv}")
+    print(f"[tt_foil_profile] Phases (auto):      {phases_csv}")
     print(f"[tt_foil_profile] Memory Report:      {mem_report}")
     return proc.returncode
 
