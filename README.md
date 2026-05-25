@@ -224,6 +224,10 @@ tt::foil::close_device(std::move(dev));
 
 Full API reference: [`docs/api.md`](docs/api.md).
 
+Optional Tracy-based profiling for Performance + Memory Reports:
+[`docs/profiling.md`](docs/profiling.md) (design rationale in
+[`docs/memory_management.md`](docs/memory_management.md)).
+
 ### Running tests with `ctest`
 
 `tests/CMakeLists.txt` wires the kernel-dir + device env vars per
