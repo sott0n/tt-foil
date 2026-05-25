@@ -685,6 +685,7 @@ int main(int argc, char** argv) try {
     // (QKV, O, FFN gate/up/down, lm_head) use run_matmul_grid (1×4);
     // every other op stays on (0,0) via run1.
     // -----------------------------------------------------------------
+    const auto prefill_t0 = Clock::now();
     {
     TIMED("prefill:total");
     // iter18: lift first layer's ln1g rmsnorm out of the loop. Inside the
@@ -788,7 +789,10 @@ int main(int argc, char** argv) try {
 
     std::printf("%u\n", cur_token);
     std::fflush(stdout);
+    const auto first_token_t = Clock::now();
 
+    uint32_t decode_tokens_emitted = 0;
+    const auto decode_loop_t0 = Clock::now();
     {
     TIMED("decode:total");
     for (uint32_t t = 0; t < kNumDecode; ++t) {
@@ -873,8 +877,10 @@ int main(int argc, char** argv) try {
         std::printf("%u\n", nxt);
         std::fflush(stdout);
         cur_token = nxt;
+        ++decode_tokens_emitted;
     }
     }
+    const auto decode_loop_end = Clock::now();
 
     g_prof.report();
     if (fd_owner) {
@@ -893,6 +899,44 @@ int main(int argc, char** argv) try {
         Clock::now() - wall_t0).count();
     std::fprintf(stderr, "\n=== real_wall ===\n  wall_ms %.1f  (= %.2f s)\n",
                  wall_ms, wall_ms / 1000.0);
+
+    // -----------------------------------------------------------------
+    // LLM perf metrics
+    //   TTFT (cold)  : main() entry → first generated token printed
+    //                  (includes UMD open + weights load + prefill + lm_head + argmax)
+    //   TTFT (warm)  : prefill start → first generated token printed
+    //                  (excludes one-shot init; what an already-warm server pays)
+    //   TPOT         : mean time per output token in the decode loop
+    //                  (= decode-loop wall / decode_tokens_emitted, exclusive of TTFT)
+    //   tokens/s     : 1000 / TPOT  (single-user throughput)
+    //   tps/user     : same as tokens/s; this run is batch=1 so per-user == total
+    // generated_tokens counts the lm_head-derived first token + each decode-loop emit.
+    // -----------------------------------------------------------------
+    const double ttft_cold_ms = std::chrono::duration<double, std::milli>(
+        first_token_t - wall_t0).count();
+    const double ttft_warm_ms = std::chrono::duration<double, std::milli>(
+        first_token_t - prefill_t0).count();
+    const double decode_loop_ms = std::chrono::duration<double, std::milli>(
+        decode_loop_end - decode_loop_t0).count();
+    const uint32_t generated_tokens = 1 + decode_tokens_emitted;
+    std::fprintf(stderr, "\n=== llm_perf ===\n");
+    std::fprintf(stderr, "  generated_tokens   %u  (= 1 prefill + %u decode)\n",
+                 generated_tokens, decode_tokens_emitted);
+    std::fprintf(stderr, "  ttft_cold_ms       %.1f  (main entry → first token)\n",
+                 ttft_cold_ms);
+    std::fprintf(stderr, "  ttft_warm_ms       %.1f  (prefill start → first token)\n",
+                 ttft_warm_ms);
+    if (decode_tokens_emitted > 0) {
+        const double tpot_ms = decode_loop_ms / decode_tokens_emitted;
+        const double tps = 1000.0 / tpot_ms;
+        std::fprintf(stderr, "  decode_loop_ms     %.1f  (%u tokens)\n",
+                     decode_loop_ms, decode_tokens_emitted);
+        std::fprintf(stderr, "  tpot_ms            %.2f  (per output token)\n", tpot_ms);
+        std::fprintf(stderr, "  tokens_per_sec     %.2f  (single-user, batch=1)\n", tps);
+        std::fprintf(stderr, "  tokens_per_sec_per_user %.2f\n", tps);
+    } else {
+        std::fprintf(stderr, "  (decode loop emitted 0 tokens; tpot/tps not reported)\n");
+    }
     return 0;
 } catch (const std::exception& e) {
     std::fprintf(stderr, "qwen3_run: FAIL — %s\n", e.what());
