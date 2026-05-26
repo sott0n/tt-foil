@@ -1,6 +1,9 @@
 # Device-Side Cycle Profiler for tt-foil — Implementation Plan
 
-Status: Pre-implementation design
+Status: **Implemented** (Phases 1–7). The end-user guide moved to
+[`profiling.md` §4 "Device Performance Report"](profiling.md). This
+document is kept as the original design record — the phase breakdown,
+trade-offs, and the lessons learned along the way.
 Target: Blackhole, slow dispatch (CLAUDE.md current scope)
 Companion docs: [`profiling.md`](profiling.md), [`memory_management.md`](memory_management.md)
 

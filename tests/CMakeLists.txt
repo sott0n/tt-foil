@@ -56,12 +56,31 @@ function(tt_foil_hw_test name src kernel_dir)
         if(TT_FOIL_DEVICE_PROFILER)
             set(_profile_env "TT_FOIL_PROFILE_KERNEL=${TT_FOIL_PROFILE_KERNEL_BITMASK}")
         endif()
+        # Forward any KEY=VALUE entries from ARGN as env vars to
+        # build_kernels.sh — that's how matmul tile sizes (MM_MT, MM_KT,
+        # MM_NT) and similar build-time knobs reach the kernel compiler.
+        # Non-`KEY=VALUE` entries are silently skipped (they only apply
+        # as test-binary compile defines).
+        set(_extra_env "")
+        foreach(_arg IN LISTS ARGN)
+            if(_arg MATCHES "^[A-Za-z_][A-Za-z0-9_]*=")
+                list(APPEND _extra_env "${_arg}")
+            endif()
+        endforeach()
+        # Give each test its own BUILD dir so parallel kernel builds
+        # don't stomp on shared /tmp/tt_foil_build/*.o (LTO objects from
+        # one test would otherwise collide with another's link). The
+        # default in build_kernels.sh is /tmp/tt_foil_build.
+        set(_kbuild "${CMAKE_BINARY_DIR}/kernel_obj/${name}")
         add_custom_command(
             OUTPUT "${_stamp}"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/kernel_stamps"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${_kbuild}"
             COMMAND ${CMAKE_COMMAND} -E env
                 TT_METAL_ROOT=${TT_METAL_ROOT}
+                BUILD=${_kbuild}
                 ${_profile_env}
+                ${_extra_env}
                 bash "${_build_script}"
             COMMAND ${CMAKE_COMMAND} -E touch "${_stamp}"
             DEPENDS tt_foil_firmware "${_build_script}"

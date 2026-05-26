@@ -11,9 +11,11 @@ Outputs (under <out_dir>, default: generated/profiler/):
     .logs/tracy_profile_log.tracy   -- raw Tracy capture (binary, Tracy GUI)
     .logs/tracy_ops_times.csv       -- per-zone timing (TF_ prefix filtered)
     .logs/tt_foil_memlog.csv        -- raw buffer alloc/free event log
-    reports/tt_foil_perf_results.csv    -- Performance Report (zone aggregate)
+    .logs/tt_foil_device_zones.csv  -- raw device-side zone events (if profiler-on)
+    reports/tt_foil_perf_results.csv    -- host Performance Report (zone aggregate)
     reports/tt_foil_perf_per_call.csv   -- per-call timeline (seq, ts, zone, dur, ctx)
     reports/tt_foil_memory_report.csv   -- Memory Report (per-pool stats)
+    reports/tt_foil_device_perf.csv     -- device-side Perf Report (per RISC × zone)
 
 Requires:
     * tt-foil built with -DTT_FOIL_ENABLE_TRACY=ON
@@ -26,6 +28,7 @@ import collections
 import csv
 import os
 import pathlib
+import re
 import shutil
 import signal
 import subprocess
@@ -310,6 +313,145 @@ def generate_memory_report(memlog_csv: pathlib.Path,
 
 
 # ---------------------------------------------------------------------------
+# Device-side zone aggregation
+# ---------------------------------------------------------------------------
+#
+# src/device_profile.cpp writes a raw per-event CSV at
+#   $TT_FOIL_DEVICE_ZONES_CSV  (default: tt_foil_device_zones.csv in cwd)
+# with columns:
+#   dispatch_idx,host_ns,core_x,core_y,risc,packet_type,zone_hash,cycle
+#
+# Each kernel-side `DeviceZoneScopedN("name")` emits one START + one END
+# row. We pair them per (core, risc) using a stack (zones nest), compute
+# the cycle duration, and aggregate by (risc, zone_hash).
+#
+# zone_hash is `kernel_profiler::Hash16_CT(name "," __FILE__ "," __LINE__
+# ",KERNEL_PROFILER")` — a 16-bit folded FNV-1a. To put readable names in
+# the report we scan kernel sources for `DeviceZoneScopedN("...")` calls
+# and rehash with the matching (abs_path, line_no), building a hash → name
+# table. Best-effort: if the file path used at compile time differs from
+# what rglob() finds (e.g. via a symlink), the entry stays unnamed and
+# shows as "0xABCD".
+
+
+def compute_device_zone_hash(name: str, src_file: str, line: int) -> int:
+    """Replicate kernel_profiler::Hash16_CT(name "," file "," line ",KERNEL_PROFILER")."""
+    s = f"{name},{src_file},{line},KERNEL_PROFILER"
+    h = 2166136261
+    for c in s.encode("utf-8"):
+        h = ((h ^ c) * 16777619) & 0xFFFFFFFF
+    return ((h & 0xFFFF) ^ ((h >> 16) & 0xFFFF)) & 0xFFFF
+
+
+# Matches every DeviceZoneScopedN-family macro. Many of the events seen
+# in a typical capture come from kernel_profiler's auto-zones in tt-metal
+# firmware (DeviceZoneScopedMainN("BRISC-FW"), DeviceZoneScopedMainChildN
+# ("TRISC-KERNEL"), etc.), so scan firmware sources as well as our own
+# kernels.
+_ZONE_PAT = re.compile(
+    r'DeviceZoneScoped(?:MainN|MainChildN|SumN1|SumN2|N)\s*\(\s*"([^"]+)"\s*\)')
+
+
+def discover_device_zone_names(search_dirs: list[pathlib.Path]) -> dict[int, str]:
+    """Scan kernel + firmware sources for DeviceZoneScoped*("...") and pre-compute hashes."""
+    table: dict[int, str] = {}
+    seen_files: set[pathlib.Path] = set()
+    exts = (".cpp", ".cc", ".c", ".h", ".hpp")
+    for root in search_dirs:
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if path.suffix.lower() not in exts:
+                continue
+            rp = path.resolve()
+            if rp in seen_files:
+                continue
+            seen_files.add(rp)
+            try:
+                lines = rp.read_text(errors="ignore").splitlines()
+            except OSError:
+                continue
+            for line_no, text in enumerate(lines, 1):
+                m = _ZONE_PAT.search(text)
+                if not m:
+                    continue
+                name = m.group(1)
+                h = compute_device_zone_hash(name, str(rp), line_no)
+                table[h] = name
+    return table
+
+
+def generate_device_perf_report(zones_csv: pathlib.Path,
+                                perf_csv: pathlib.Path,
+                                name_table: dict[int, str]) -> None:
+    """Pair START/END device events and aggregate by (risc, zone)."""
+    headers = ["RISC", "ZONE", "ZONE_HASH", "CALL_COUNT",
+               "TOTAL_CYCLES", "MEAN_CYCLES", "MIN_CYCLES", "MAX_CYCLES"]
+    if not zones_csv.exists() or zones_csv.stat().st_size == 0:
+        with perf_csv.open("w", newline="") as fh:
+            csv.writer(fh).writerow(headers)
+        return
+
+    # (risc, hash) -> [durations]
+    agg: dict[tuple[str, int], list[int]] = collections.defaultdict(list)
+    # (core_x, core_y, risc) -> stack of (hash, start_cycle)
+    stacks: dict[tuple[int, int, str], list[tuple[int, int]]] = collections.defaultdict(list)
+    orphan_starts = 0
+    orphan_ends = 0
+
+    with zones_csv.open() as fh:
+        for row in csv.DictReader(fh):
+            try:
+                cx = int(row["core_x"])
+                cy = int(row["core_y"])
+                risc = row["risc"]
+                pkt = row["packet_type"]
+                zh_s = row["zone_hash"]
+                zh = int(zh_s, 16) if zh_s.startswith("0x") else int(zh_s)
+                cyc = int(row["cycle"])
+            except (KeyError, ValueError):
+                continue
+            key = (cx, cy, risc)
+            if pkt == "START":
+                stacks[key].append((zh, cyc))
+            elif pkt == "END":
+                stk = stacks[key]
+                # Pop the matching same-hash entry (top of stack) — naive
+                # but correct for cleanly-nested zones, which is all we
+                # generate today.
+                if stk and stk[-1][0] == zh:
+                    start_cyc = stk.pop()[1]
+                    agg[(risc, zh)].append(cyc - start_cyc)
+                else:
+                    orphan_ends += 1
+            # TOTAL / TS_DATA / TS_EVENT etc. — not zone pairs, ignored.
+
+    for stk in stacks.values():
+        orphan_starts += len(stk)
+
+    # Build the sortable rows.
+    out_rows = []
+    for (risc, zh), durs in agg.items():
+        n = len(durs)
+        total = sum(durs)
+        mean = total // n if n else 0
+        out_rows.append((risc, name_table.get(zh, ""), zh, n,
+                         total, mean, min(durs), max(durs)))
+    # Sort by total cycles desc — hot zones first.
+    out_rows.sort(key=lambda r: -r[4])
+
+    with perf_csv.open("w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(headers)
+        for risc, name, zh, n, total, mean, mn, mx in out_rows:
+            w.writerow([risc, name, f"0x{zh:04x}", n, total, mean, mn, mx])
+
+    if orphan_starts or orphan_ends:
+        print(f"[tt_foil_profile] device_perf: {orphan_starts} unmatched START, "
+              f"{orphan_ends} unmatched END (truncated trace?)")
+
+
+# ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 
@@ -328,6 +470,10 @@ def main() -> int:
                     help="Tracy capture server port (default: %(default)s)")
     ap.add_argument("--verbose", "-v", action="store_true",
                     help="show capture-release output")
+    ap.add_argument("--kernel-source-dirs", default="examples,models,src",
+                    help="comma-separated dirs (relative to repo root) to scan for "
+                         "DeviceZoneScopedN(\"...\") so the device perf report can "
+                         "resolve hashes to names (default: %(default)s)")
     ap.add_argument("cmd", nargs=argparse.REMAINDER,
                     help="binary and args to profile (use -- to separate)")
     args = ap.parse_args()
@@ -350,10 +496,13 @@ def main() -> int:
     tracy_file = logs / "tracy_profile_log.tracy"
     ops_times_csv = logs / "tracy_ops_times.csv"
     memlog_csv = logs / "tt_foil_memlog.csv"
+    device_zones_csv = logs / "tt_foil_device_zones.csv"
+    device_clock_sync_csv = logs / "tt_foil_device_clock_sync.csv"
     perf_report = reports / "tt_foil_perf_results.csv"
     per_call_csv = reports / "tt_foil_perf_per_call.csv"
     phases_csv = reports / "tt_foil_phases.csv"
     mem_report = reports / "tt_foil_memory_report.csv"
+    device_perf_report = reports / "tt_foil_device_perf.csv"
 
     # Remove stale capture; capture-release will not overwrite by default.
     if tracy_file.exists():
@@ -375,6 +524,8 @@ def main() -> int:
     # Point the in-process memory logger (src/profiling.hpp) at our log dir.
     env = os.environ.copy()
     env["TT_FOIL_MEM_LOG"] = str(memlog_csv)
+    env["TT_FOIL_DEVICE_ZONES_CSV"] = str(device_zones_csv)
+    env["TT_FOIL_DEVICE_CLOCK_SYNC"] = str(device_clock_sync_csv)
     print(f"[tt_foil_profile] running: {' '.join(cmd)}")
     try:
         proc = subprocess.run(cmd, env=env)
@@ -416,10 +567,30 @@ def main() -> int:
     detect_phases(ops_times_csv, phases_csv)
     generate_memory_report(memlog_csv, mem_report)
 
-    print(f"[tt_foil_profile] Performance Report: {perf_report}")
-    print(f"[tt_foil_profile] Per-call timeline:  {per_call_csv}")
-    print(f"[tt_foil_profile] Phases (auto):      {phases_csv}")
-    print(f"[tt_foil_profile] Memory Report:      {mem_report}")
+    # 7. Device-side aggregation (only when the C++ runtime was built
+    # with TT_FOIL_DEVICE_PROFILER=ON and produced a zones CSV).
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    kdirs = [repo_root / d.strip()
+             for d in args.kernel_source_dirs.split(",") if d.strip()]
+    # Auto-include tt-metal firmware sources — kernel_profiler.hpp's
+    # auto-zones (BRISC-FW, NCRISC-KERNEL, TRISC-KERNEL, ...) come from
+    # there. Hashes use the absolute path that the kernel-build script
+    # passes via -c, so we resolve TT_METAL_ROOT the same way.
+    tt_metal_root = pathlib.Path(
+        os.environ.get("TT_METAL_ROOT")
+        or (repo_root / "third_party" / "tt-metal"))
+    if tt_metal_root.exists():
+        kdirs.append(tt_metal_root / "tt_metal" / "hw" / "firmware" / "src" / "tt-1xx")
+    name_table = discover_device_zone_names(kdirs)
+    generate_device_perf_report(device_zones_csv, device_perf_report, name_table)
+
+    print(f"[tt_foil_profile] Performance Report:  {perf_report}")
+    print(f"[tt_foil_profile] Per-call timeline:   {per_call_csv}")
+    print(f"[tt_foil_profile] Phases (auto):       {phases_csv}")
+    print(f"[tt_foil_profile] Memory Report:       {mem_report}")
+    if device_zones_csv.exists():
+        print(f"[tt_foil_profile] Device Perf Report:  {device_perf_report}  "
+              f"({len(name_table)} zone names known)")
     return proc.returncode
 
 
