@@ -329,7 +329,12 @@ int64_t dispatch_stage_wait_done(
             throw std::runtime_error(
                 "tt-foil: timeout waiting for kernel completion on core ("
                 + std::to_string(kernel.core.x) + ","
-                + std::to_string(kernel.core.y) + ")");
+                + std::to_string(kernel.core.y) + "); last go_msg.signal=0x"
+                + [&] {
+                    char b[8]; std::snprintf(b, sizeof(b), "%02x",
+                        go_msg_buf.view().signal());
+                    return std::string(b);
+                  }() + " kernel=" + (kernel.name.empty() ? "?" : kernel.name));
         }
         std::this_thread::sleep_for(std::chrono::microseconds(100));
     }

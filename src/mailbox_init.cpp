@@ -54,6 +54,35 @@ void init_tensix_mailboxes(
     const uint64_t go_idx_addr = hal.get_dev_addr(
         HalProgrammableCoreType::TENSIX, HalL1MemAddrType::GO_MSG_INDEX);
     driver.write_to_device(&zero32, sizeof(zero32), chip_id, core, go_idx_addr);
+
+    // ---- profiler control buffer: CORE_COUNT_PER_DRAM = 1 ----
+    // tt-metal's BRISC profiler firmware's finish_profiler() computes
+    //   core_flat_id % profiler_control_buffer[CORE_COUNT_PER_DRAM]
+    // when the BRISC-FW guaranteed zone closes. If CORE_COUNT_PER_DRAM is
+    // 0 (the default after our L1 zero-fill; tt-metal normally writes a
+    // real value from host runtime setup), the modulo divides by zero
+    // and the firmware hangs the first time a kernel finishes — visible
+    // as a "timeout waiting for kernel completion" downstream. We write
+    // 1 so the calculation is well-defined; the resulting dram_offset is
+    // meaningless but never NOC-flushed because DRAM_PROFILER_ADDRESS
+    // stays 0 (gating that path).
+    //
+    // The write is harmless on a non-profiler firmware (the slot is
+    // unread), so issue unconditionally rather than gating on a build
+    // flag we'd have to thread through.
+    {
+        // ControlBuffer::CORE_COUNT_PER_DRAM = 17 in profiler_common.h.
+        constexpr uint32_t kCoreCountPerDramOffset = 17 * sizeof(uint32_t);
+        const uint64_t profiler_base = hal.get_dev_addr(
+            HalProgrammableCoreType::TENSIX, HalL1MemAddrType::PROFILER);
+        const uint64_t profiler_size = hal.get_dev_size(
+            HalProgrammableCoreType::TENSIX, HalL1MemAddrType::PROFILER);
+        if (profiler_size > kCoreCountPerDramOffset) {
+            const uint32_t one = 1;
+            driver.write_to_device(&one, sizeof(one), chip_id, core,
+                                   profiler_base + kCoreCountPerDramOffset);
+        }
+    }
 }
 
 }  // namespace tt::foil
