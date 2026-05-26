@@ -15,6 +15,7 @@ zones via `tools/tt_foil_profile.py`. Build with `-DTT_FOIL_ENABLE_TRACY=ON
 | Baseline (PERFORMANCE.md re-run) | **166.9 ms** | — | — | 1.00× |
 | Step 1 — Tier 1.1 DevBuf threading | **117.7 ms** | −49.2 ms | −49.2 ms | 1.42× |
 | Step 5 — Tier 2.2 pin bias_relu_post | **114.7 ms** | −3.0 ms | −52.2 ms | 1.46× |
+| Step 3 — Tier 1.2 fuse ReLU into add | **111.0 ms** | −3.7 ms | −55.9 ms | 1.50× |
 
 ---
 
@@ -110,4 +111,57 @@ TT_FOIL_KERNEL_DIR=$PWD/models/resnet20/prebuilt \
 TT_FOIL_DATA_DIR=$PWD/data/resnet20 \
 python3 tools/tt_foil_profile.py -o generated/step5 -- ./build/tests/test_resnet20
 grep -E "^Phase_|TF_kernel_load,bias" generated/step5/reports/tt_foil_perf_results.csv
+```
+
+---
+
+## Step 3 — Tier 1.2: Fuse ReLU into residual_add (partial writer fusion)
+
+**Date**: 2026-05-26
+**Commit**: (pending)
+
+### What changed
+
+Smaller-scope variant of PERFORMANCE.md §5.1.2 — fuse only the post-add ReLU (rather
+than bias+add+ReLU into the conv writer). The trailing `bias_relu_post(zero, relu=1)`
+after every `residual_add` becomes redundant if `residual_add` itself applies ReLU.
+
+- `examples/residual_add/kernels/compute.cpp` — add `relu_tile_init()` and a per-tile
+  `relu_tile(0)` guarded by a new `arg[0] = relu_enable` runtime arg.
+- `tests/test_resnet20.cpp` `run_add` — set TRISC RTAs with `relu_enable`, default
+  to off so existing callers stay correct.
+- `run_block` — pass `relu_enable=1` to the post-conv2 `run_add` and drop the
+  trailing `run_bias_relu(zero, relu=1)` dispatch.
+
+### Numbers
+
+| Phase | After Step 5 | After Step 3 | Δ |
+|---|---:|---:|---:|
+| Phase A (stem + layer1) | 68.4 ms | 70.9 ms | +2.5 ms (run-to-run variance) |
+| Phase B (layer2) | 23.4 ms | 20.4 ms | −3.0 ms |
+| Phase C (layer3) | 20.4 ms | 17.3 ms | −3.1 ms |
+| Phase D (tail) | 2.4 ms | 2.5 ms | ~0 |
+| **Total** | **114.7 ms** | **111.0 ms** | **−3.7 ms** |
+
+`TF_dispatch_execute,bias_relu_post` drops 29 → 20 (saved 9 dispatches × ~425 μs
+≈ 3.8 ms — matches measured wall delta). Stem (1) + 3 blocks/phase × 2 calls + Phase D's
+FC bias = 7 + 6 + 6 + 1 = 20. Phase A variance is normal cross-run jitter; Phase B + C
+deltas are stable.
+
+### Correctness
+
+`worst_abs = 0.1367` identical. `PASS argmax dev=3 (cat) ref=3 (cat)`.
+
+### Reproduce
+
+```bash
+# Force residual_add kernel rebuild (build helper caches per-source-hash):
+rm -rf examples/residual_add/prebuilt models/resnet20/prebuilt/residual_add_n*
+$HOME/tt-venv/bin/tt-smi -r 0
+TT_FOIL_DEVICE=0 \
+TT_FOIL_KERNEL_DIR=$PWD/models/resnet20/prebuilt \
+TT_FOIL_DATA_DIR=$PWD/data/resnet20 \
+python3 tools/tt_foil_profile.py -o generated/step3 -- ./build/tests/test_resnet20
+grep -E "^Phase_|TF_dispatch_execute,bias_relu_post" \
+    generated/step3/reports/tt_foil_perf_results.csv
 ```

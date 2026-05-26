@@ -565,12 +565,15 @@ int main() try {
 
     // Residual_add on DevBuf inputs. lhs and rhs are tiled DRAM buffers
     // already laid out by the producing op; output is written to out_buf
-    // (which must NOT alias lhs.buf or rhs.buf).
+    // (which must NOT alias lhs.buf or rhs.buf). When relu_enable is
+    // non-zero, the kernel fuses ReLU into the per-tile pipeline so we
+    // skip the trailing bias_relu_post(relu=1) entirely.
     auto run_add = [&](tt::foil::Kernel& k,
                        const DevBuf& lhs,
                        const DevBuf& rhs,
                        std::shared_ptr<tt::foil::Buffer> out_buf,
-                       uint64_t out_noc) -> DevBuf {
+                       uint64_t out_noc,
+                       uint32_t relu_enable = 0) -> DevBuf {
         TT_FOIL_ZONE("run_add");
         const int Mt = lhs.Mt;
         const int Nt = lhs.Nt;
@@ -585,8 +588,12 @@ int main() try {
             lo(rhs.noc_addr), hi(rhs.noc_addr),
         };
         std::array<uint32_t, 2> ran = { lo(out_noc), hi(out_noc) };
+        std::array<uint32_t, 1> rac = { relu_enable };
         tt::foil::set_runtime_args(*dev, k, R::RiscId::BRISC,  rab);
         tt::foil::set_runtime_args(*dev, k, R::RiscId::NCRISC, ran);
+        tt::foil::set_runtime_args(*dev, k, R::RiscId::TRISC0, rac);
+        tt::foil::set_runtime_args(*dev, k, R::RiscId::TRISC1, rac);
+        tt::foil::set_runtime_args(*dev, k, R::RiscId::TRISC2, rac);
         tt::foil::register_cbs(*dev, k, matmul_cbs);
         tt::foil::execute(*dev, k);
 
@@ -664,17 +671,15 @@ int main() try {
         }
         DevBuf skip_dev = write_skip_chw(skip_chw, Mt_out, Nt_out, HWout);
 
-        // Stage 4: add(t2_post + skip) → buf_Y (free again now that
-        // bias_relu2 has consumed conv2's output).
-        DevBuf add_devY = run_add(add_k, t2_devP, skip_dev, buf_Y, Y_noc);
-
-        // Stage 5: final ReLU (bias=0, relu=1) → buf_post.
-        std::vector<uint16_t> zero_bias(Mt_out * kTileH, 0);
-        DevBuf y_devP = run_bias_relu(bias_k, add_devY, zero_bias, 1,
-                                      buf_post, post_noc);
+        // Stage 4 (Tier 1.2): add(t2_post + skip) with fused ReLU →
+        // buf_Y (free now that bias_relu2 consumed conv2's output).
+        // The fused relu replaces the standalone trailing
+        // bias_relu(zero, relu=1) dispatch.
+        DevBuf y_devY = run_add(add_k, t2_devP, skip_dev, buf_Y, Y_noc,
+                                /*relu_enable=*/1);
 
         // Read back for next block's conv1 host im2col.
-        devbuf_to_chw(y_devP, act);
+        devbuf_to_chw(y_devY, act);
         act_C = CoutPad;
         act_H = Ho;
         act_W = Wo;
