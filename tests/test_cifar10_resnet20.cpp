@@ -150,6 +150,7 @@ std::vector<uint16_t> read_bf16_layer(const WeightStore& w, const std::string& n
 void tile_matrix(const std::vector<uint16_t>& m_rm,
                  int rows_t, int cols_t, int col_dim,
                  std::vector<uint16_t>& out) {
+    TT_FOIL_ZONE("host_tile_matrix");
     out.clear();
     out.reserve(static_cast<size_t>(rows_t) * cols_t * kTileWords);
     std::vector<uint16_t> block(kTileH * kTileW);
@@ -167,6 +168,7 @@ void tile_matrix(const std::vector<uint16_t>& m_rm,
 void untile_matrix(const std::vector<uint16_t>& tiles,
                    int rows_t, int cols_t, int col_dim,
                    std::vector<uint16_t>& m_rm) {
+    TT_FOIL_ZONE("host_untile_matrix");
     m_rm.assign(static_cast<size_t>(rows_t) * kTileH * col_dim, 0);
     std::vector<uint16_t> block(kTileH * kTileW);
     for (int rt = 0; rt < rows_t; ++rt) {
@@ -223,6 +225,7 @@ void pad_bias(const std::vector<uint16_t>& src, int C, int Cpad,
 void im2col_3x3(const std::vector<uint16_t>& x_chw,
                 int Cpad, int Hi, int Wi, int Ho, int Wo, int stride,
                 std::vector<uint16_t>& a) {
+    TT_FOIL_ZONE("host_im2col_3x3");
     constexpr int kK = 3;
     constexpr int kPad = 1;
     a.assign(static_cast<size_t>(Cpad) * kK * kK * Ho * Wo, 0);
@@ -247,6 +250,7 @@ void im2col_3x3(const std::vector<uint16_t>& x_chw,
 void weight_3x3_reshape(const std::vector<uint16_t>& w_cchw,
                         int CoutPad, int CinPad,
                         std::vector<uint16_t>& w_mat) {
+    TT_FOIL_ZONE("host_weight_3x3_reshape");
     constexpr int kK = 3;
     w_mat.assign(static_cast<size_t>(CoutPad) * CinPad * kK * kK, 0);
     for (int co = 0; co < CoutPad; ++co)
@@ -459,6 +463,7 @@ int main() try {
                         const std::vector<uint16_t>& w_cchw,    // (CoutPad, CinPad, 3, 3)
                         const std::vector<uint16_t>& x_chw,     // (CinPad, Hi, Wi)
                         std::vector<uint16_t>& y_chw_out) {
+        TT_FOIL_ZONE("run_conv");
         const int CoutPad = Mt * (int)kTileH;
         const int HWout   = Ho * Wo;
         std::vector<uint16_t> w_mat, w_tiles, a_mat, a_tiles;
@@ -471,10 +476,10 @@ int main() try {
         const uint32_t wb = static_cast<uint32_t>(Mt * Kt) * kTileBytes;
         const uint32_t ab = static_cast<uint32_t>(Kt * Nt) * kTileBytes;
         const uint32_t yb = static_cast<uint32_t>(Mt * Nt) * kTileBytes;
-        tt::foil::write_buffer(*dev, *buf_W, w_tiles.data(), wb);
-        tt::foil::write_buffer(*dev, *buf_A, a_tiles.data(), ab);
+        tt::foil::write_buffer(*dev, *buf_W, w_tiles.data(), wb, "conv_weights");
+        tt::foil::write_buffer(*dev, *buf_A, a_tiles.data(), ab, "conv_act_im2col");
         std::vector<uint8_t> zero(yb, 0);
-        tt::foil::write_buffer(*dev, *buf_Y, zero.data(), yb);
+        tt::foil::write_buffer(*dev, *buf_Y, zero.data(), yb, "conv_out_zeroinit");
 
         std::array<uint32_t, 7> rab = {
             lo(W_noc), hi(W_noc), lo(A_noc), hi(A_noc),
@@ -488,7 +493,7 @@ int main() try {
         tt::foil::execute(*dev, k_conv);
 
         std::vector<uint16_t> y_tiles(static_cast<size_t>(Mt) * Nt * kTileWords, 0);
-        tt::foil::read_buffer(*dev, *buf_Y, y_tiles.data(), yb);
+        tt::foil::read_buffer(*dev, *buf_Y, y_tiles.data(), yb, "conv_out");
         untile_matrix(y_tiles, Mt, Nt, HWout, y_chw_out);
     };
 
@@ -501,19 +506,20 @@ int main() try {
                              int Mt, int Nt, int HW,
                              const std::vector<uint16_t>& bias_cpad,
                              uint32_t relu_enable) {
+        TT_FOIL_ZONE("run_bias_relu");
         const int n_tiles = Mt * Nt;
         const uint32_t bytes = n_tiles * kTileBytes;
         std::vector<uint16_t> in_tiles;
         tile_matrix(chw_inout, Mt, Nt, HW, in_tiles);
-        tt::foil::write_buffer(*dev, *buf_Y, in_tiles.data(), bytes);
+        tt::foil::write_buffer(*dev, *buf_Y, in_tiles.data(), bytes, "bias_relu_in");
 
         std::vector<uint16_t> bt;
         pack_bias_tile(bias_cpad, Mt, bt);
         tt::foil::write_buffer(*dev, *buf_bias_d, bt.data(),
-                               Mt * kTileBytes);
+                               Mt * kTileBytes, "bias_relu_bias");
 
         std::vector<uint8_t> zero(bytes, 0);
-        tt::foil::write_buffer(*dev, *buf_post, zero.data(), bytes);
+        tt::foil::write_buffer(*dev, *buf_post, zero.data(), bytes, "bias_relu_out_zeroinit");
 
         std::array<uint32_t, 6> rab = {
             lo(Y_noc),      hi(Y_noc),
@@ -532,7 +538,7 @@ int main() try {
         tt::foil::execute(*dev, k);
 
         std::vector<uint16_t> out_tiles(n_tiles * kTileWords, 0);
-        tt::foil::read_buffer(*dev, *buf_post, out_tiles.data(), bytes);
+        tt::foil::read_buffer(*dev, *buf_post, out_tiles.data(), bytes, "bias_relu_out");
         untile_matrix(out_tiles, Mt, Nt, HW, chw_inout);
     };
 
@@ -542,15 +548,16 @@ int main() try {
                        const std::vector<uint16_t>& b_chw,
                        int Mt, int Nt, int HW,
                        std::vector<uint16_t>& y_chw) {
+        TT_FOIL_ZONE("run_add");
         const int n_tiles = Mt * Nt;
         const uint32_t bytes = n_tiles * kTileBytes;
         std::vector<uint16_t> a_tiles, b_tiles;
         tile_matrix(a_chw, Mt, Nt, HW, a_tiles);
         tile_matrix(b_chw, Mt, Nt, HW, b_tiles);
-        tt::foil::write_buffer(*dev, *buf_Y,    a_tiles.data(), bytes);
-        tt::foil::write_buffer(*dev, *buf_skip, b_tiles.data(), bytes);
+        tt::foil::write_buffer(*dev, *buf_Y,    a_tiles.data(), bytes, "add_lhs");
+        tt::foil::write_buffer(*dev, *buf_skip, b_tiles.data(), bytes, "add_rhs_skip");
         std::vector<uint8_t> zero(bytes, 0);
-        tt::foil::write_buffer(*dev, *buf_post, zero.data(), bytes);
+        tt::foil::write_buffer(*dev, *buf_post, zero.data(), bytes, "add_out_zeroinit");
 
         std::array<uint32_t, 4> rab = {
             lo(Y_noc),    hi(Y_noc),
@@ -563,7 +570,7 @@ int main() try {
         tt::foil::execute(*dev, k);
 
         std::vector<uint16_t> y_tiles(n_tiles * kTileWords, 0);
-        tt::foil::read_buffer(*dev, *buf_post, y_tiles.data(), bytes);
+        tt::foil::read_buffer(*dev, *buf_post, y_tiles.data(), bytes, "add_out");
         untile_matrix(y_tiles, Mt, Nt, HW, y_chw);
     };
 
@@ -585,6 +592,7 @@ int main() try {
                          const std::vector<uint16_t>& b1_padded,
                          const std::vector<uint16_t>& w2_padded,
                          const std::vector<uint16_t>& b2_padded) {
+        TT_FOIL_ZONE("run_block");
         const int HWout = Ho * Wo;
 
         // Stage 1: conv1 + bias + ReLU

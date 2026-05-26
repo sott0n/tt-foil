@@ -55,23 +55,58 @@ void write_buffer(Device& device, Buffer& buf, const void* src, std::size_t byte
     write_buffer(device, buf, 0, src, bytes);
 }
 
+#if defined(TRACY_ENABLE)
+// Build a "DRAM 65536B @0x12345600" / "L1 (0,0) 4096B @0x1c000" string
+// describing a buffer transfer. Truncates safely if a caller-provided
+// label is longer than the buffer.
+//
+// The device_addr is included unconditionally — it's the cheapest way to
+// disambiguate which logical tensor a read/write is hitting when the
+// caller hasn't passed a label (the user knows from their own
+// allocate_buffer call site which name corresponds to which addr).
+static int fmt_buffer_tag(char* tag, std::size_t cap,
+                          const Buffer& buf, std::size_t bytes,
+                          const char* label) {
+    if (buf.location == BufferLocation::L1) {
+        if (label && label[0]) {
+            return std::snprintf(tag, cap, "L1 (%d,%d) %zuB @0x%lx [%s]",
+                                 buf.core.x, buf.core.y, bytes,
+                                 static_cast<unsigned long>(buf.device_addr),
+                                 label);
+        }
+        return std::snprintf(tag, cap, "L1 (%d,%d) %zuB @0x%lx",
+                             buf.core.x, buf.core.y, bytes,
+                             static_cast<unsigned long>(buf.device_addr));
+    }
+    if (label && label[0]) {
+        return std::snprintf(tag, cap, "DRAM %zuB @0x%lx [%s]",
+                             bytes, static_cast<unsigned long>(buf.device_addr),
+                             label);
+    }
+    return std::snprintf(tag, cap, "DRAM %zuB @0x%lx",
+                         bytes, static_cast<unsigned long>(buf.device_addr));
+}
+#endif
+
 void write_buffer(Device& device, Buffer& buf, std::size_t offset_bytes,
-                  const void* src, std::size_t bytes) {
+                  const void* src, std::size_t bytes,
+                  const char* label) {
     TF_ZONE_N("TF_write_buffer");
     if (offset_bytes + bytes > buf.size_bytes) {
         throw std::runtime_error("tt-foil: write_buffer offset+size exceeds allocation");
     }
 #if defined(TRACY_ENABLE)
     {
-        // Attach pool name + transfer size so per-call CSV shows e.g.
-        // "L1 (0,0): 2048 B" — useful for spotting big PCIe writes.
-        char tag[64];
-        int n = std::snprintf(
-            tag, sizeof(tag), "%s %zuB",
-            buf.location == BufferLocation::L1 ? "L1" : "DRAM",
-            bytes);
-        if (n > 0) TF_ZONE_TEXT(tag, static_cast<std::size_t>(n));
+        char tag[96];
+        int n = fmt_buffer_tag(tag, sizeof(tag), buf, bytes, label);
+        if (n > 0) {
+            std::size_t len = static_cast<std::size_t>(n);
+            if (len >= sizeof(tag)) len = sizeof(tag) - 1;
+            TF_ZONE_TEXT(tag, len);
+        }
     }
+#else
+    (void)label;
 #endif
     switch (buf.location) {
         case BufferLocation::L1:
@@ -83,20 +118,29 @@ void write_buffer(Device& device, Buffer& buf, std::size_t offset_bytes,
     }
 }
 
-void read_buffer(Device& device, Buffer& buf, void* dst, std::size_t bytes) {
+void write_buffer(Device& device, Buffer& buf, const void* src, std::size_t bytes,
+                  const char* label) {
+    write_buffer(device, buf, 0, src, bytes, label);
+}
+
+void read_buffer(Device& device, Buffer& buf, void* dst, std::size_t bytes,
+                 const char* label) {
     TF_ZONE_N("TF_read_buffer");
     if (bytes > buf.size_bytes) {
         throw std::runtime_error("tt-foil: read_buffer size exceeds allocation");
     }
 #if defined(TRACY_ENABLE)
     {
-        char tag[64];
-        int n = std::snprintf(
-            tag, sizeof(tag), "%s %zuB",
-            buf.location == BufferLocation::L1 ? "L1" : "DRAM",
-            bytes);
-        if (n > 0) TF_ZONE_TEXT(tag, static_cast<std::size_t>(n));
+        char tag[96];
+        int n = fmt_buffer_tag(tag, sizeof(tag), buf, bytes, label);
+        if (n > 0) {
+            std::size_t len = static_cast<std::size_t>(n);
+            if (len >= sizeof(tag)) len = sizeof(tag) - 1;
+            TF_ZONE_TEXT(tag, len);
+        }
     }
+#else
+    (void)label;
 #endif
     switch (buf.location) {
         case BufferLocation::L1:

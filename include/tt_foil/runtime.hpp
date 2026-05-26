@@ -87,16 +87,23 @@ std::shared_ptr<Buffer> allocate_buffer(
 // Release a buffer (bump allocator; only the most recent alloc is freed).
 void free_buffer(std::shared_ptr<Buffer> buffer);
 
-// Blocking host -> device write.
-void write_buffer(Device& device, Buffer& buf, const void* src, std::size_t bytes);
+// Blocking host -> device write. Optional `label` is attached to the
+// TF_write_buffer Tracy zone as ZoneText so the per-call CSV identifies
+// which logical tensor a transfer corresponds to (no effect when Tracy
+// is disabled — the label is read only inside the TF_ZONE block).
+void write_buffer(Device& device, Buffer& buf, const void* src, std::size_t bytes,
+                  const char* label = nullptr);
 
 // Blocking host -> device write, at a byte offset within the buffer. Useful
 // for partial updates of large buffers (e.g. a KV cache slot).
 void write_buffer(Device& device, Buffer& buf, std::size_t offset_bytes,
-                  const void* src, std::size_t bytes);
+                  const void* src, std::size_t bytes,
+                  const char* label = nullptr);
 
-// Blocking device -> host read.
-void read_buffer(Device& device, Buffer& buf, void* dst, std::size_t bytes);
+// Blocking device -> host read. Optional `label` is attached to the
+// TF_read_buffer Tracy zone (see write_buffer for semantics).
+void read_buffer(Device& device, Buffer& buf, void* dst, std::size_t bytes,
+                 const char* label = nullptr);
 
 // ---------------------------------------------------------------------------
 // Kernel
