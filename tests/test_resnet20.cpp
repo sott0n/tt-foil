@@ -680,6 +680,12 @@ int main() try {
         act_W = Wo;
     };
 
+    // Tier 2.2: bias_relu_post is shape-agnostic and used in every
+    // phase — load it once at startup and pin it so the per-phase
+    // release_kernels() leaves it resident.
+    k_bias = load(kernel_root + "/bias_relu_post");
+    tt::foil::pin_persistent(*dev, *k_bias, core);
+
     // ================================================================
     // Phase A — Stem + Layer1
     // Both use conv_3x3_l1 (Mt=1 Kt=9 Nt=32) and residual_add_n32.
@@ -687,7 +693,6 @@ int main() try {
     { TT_FOIL_ZONE("Phase_A_stem_layer1");
     k_conv_s1 = load(kernel_root + "/conv_3x3_l1");
     k_add     = load(kernel_root + "/residual_add_n32");
-    k_bias    = load(kernel_root + "/bias_relu_post");
 
     // Stem: conv 3×3 s=1 (3→16, 32×32). Cin=3 padded to 32, Cout=16 padded to 32.
     {
@@ -738,13 +743,12 @@ int main() try {
     // Phase B — Layer2 (3 blocks; first is downsample)
     // ================================================================
     { TT_FOIL_ZONE("Phase_B_layer2");
-    k_conv_s1.reset(); k_add.reset(); k_bias.reset();
-    tt::foil::release_kernels(*dev, core);
+    k_conv_s1.reset(); k_add.reset();          // drop non-pinned only
+    tt::foil::release_kernels(*dev, core);     // k_bias survives (pinned)
 
     k_conv_s2 = load(kernel_root + "/conv_3x3_s2_l2");      // Mt=1 Kt=9 Nt=8
     k_conv_s1 = load(kernel_root + "/conv_3x3_l2");         // Mt=1 Kt=9 Nt=8
     k_add     = load(kernel_root + "/residual_add_n8");
-    k_bias    = load(kernel_root + "/bias_relu_post");
 
     {
         // layer2.0 — downsample (16→32 channels, 32×32 → 16×16 spatial)
@@ -795,13 +799,12 @@ int main() try {
     // Phase C — Layer3 (3 blocks; first is downsample)
     // ================================================================
     { TT_FOIL_ZONE("Phase_C_layer3");
-    k_conv_s2.reset(); k_conv_s1.reset(); k_add.reset(); k_bias.reset();
+    k_conv_s2.reset(); k_conv_s1.reset(); k_add.reset();   // k_bias stays pinned
     tt::foil::release_kernels(*dev, core);
 
     k_conv_s2 = load(kernel_root + "/conv_3x3_s2_l3");      // Mt=2 Kt=9 Nt=2
     k_conv_s1 = load(kernel_root + "/conv_3x3_l3");         // Mt=2 Kt=18 Nt=2
     k_add     = load(kernel_root + "/residual_add_n4");
-    k_bias    = load(kernel_root + "/bias_relu_post");
 
     {
         // layer3.0 — downsample (32→64 channels, 16×16 → 8×8 spatial)
@@ -854,12 +857,11 @@ int main() try {
     // can read it.
     std::vector<uint16_t> logits_padded(kTileH, 0);
     { TT_FOIL_ZONE("Phase_D_tail");
-    k_conv_s2.reset(); k_conv_s1.reset(); k_add.reset(); k_bias.reset();
+    k_conv_s2.reset(); k_conv_s1.reset(); k_add.reset();  // k_bias stays pinned
     tt::foil::release_kernels(*dev, core);
 
     k_gap  = load(kernel_root + "/global_avg_pool");
     k_fc   = load(kernel_root + "/fc");
-    k_bias = load(kernel_root + "/bias_relu_post");
 
     // act is now (64, 8, 8) → tile as Mt=2, Nt=2 with HW=64. Run GAP
     // twice, once per Mt slice (the stock global_avg_pool kernel
