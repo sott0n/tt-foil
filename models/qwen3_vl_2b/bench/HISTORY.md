@@ -2,7 +2,7 @@
 
 Standing benchmark: prompt `[3838, 374, 279, 6722, 315, 6435] + 26×PAD` (i.e. "What is the capital of Tokyo" + endoftext padding), `num_decode=4`, device 0, fresh `tt-smi -r` before each run.
 
-Run with `bench/bench.sh <tag>`. Raw profile dumps land in `bench/runs/` (gitignored).
+Run with `models/qwen3_vl_2b/bench/bench.sh <tag>`. Raw profile dumps land in `models/qwen3_vl_2b/bench/runs/` (gitignored).
 
 Tokens generated for this fixed prompt (must stay bit-identical across optimizations): `2303, 220, 220, 16, 13`.
 

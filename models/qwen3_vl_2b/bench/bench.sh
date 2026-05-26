@@ -15,7 +15,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$HERE/.." && pwd)"
+REPO="$(cd "$HERE/../../.." && pwd)"
 TAG="${1:?usage: bench.sh <tag> [num_decode]}"
 NDEC="${2:-4}"
 DEV="${TT_FOIL_DEVICE:-0}"
@@ -36,7 +36,7 @@ if [[ -z "${BENCH_NO_RESET:-}" ]]; then
 fi
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
-OUT="$REPO/bench/runs/${STAMP}-${TAG}.txt"
+OUT="$HERE/runs/${STAMP}-${TAG}.txt"
 mkdir -p "$(dirname "$OUT")"
 
 echo "# tag=$TAG num_decode=$NDEC device=$DEV" >"$OUT"
