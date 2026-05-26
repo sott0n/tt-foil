@@ -424,7 +424,18 @@ def generate_device_perf_report(zones_csv: pathlib.Path,
                     agg[(risc, zh)].append(cyc - start_cyc)
                 else:
                     orphan_ends += 1
-            # TOTAL / TS_DATA / TS_EVENT etc. — not zone pairs, ignored.
+            elif pkt == "TOTAL":
+                # SumN-family accumulator zones (DeviceZoneScopedSumN1/N2)
+                # emit one TOTAL packet per kernel run carrying the sum of
+                # cycles spent inside the zone across all inner-loop
+                # iterations. Treat it as one synthetic "call" of that
+                # duration so it aggregates across dispatches just like
+                # paired START/END entries. The cycle field already
+                # contains the raw cumulative cycle count (src/
+                # device_profile.cpp decodes it from word1 — w0[11:0]
+                # is zero for TOTAL packets).
+                agg[(risc, zh)].append(cyc)
+            # TS_DATA / TS_EVENT — not zone pairs, ignored.
 
     for stk in stacks.values():
         orphan_starts += len(stk)
@@ -581,6 +592,12 @@ def main() -> int:
         or (repo_root / "third_party" / "tt-metal"))
     if tt_metal_root.exists():
         kdirs.append(tt_metal_root / "tt_metal" / "hw" / "firmware" / "src" / "tt-1xx")
+        # llk_io_{pack,unpack}.h emit CB-COMPUTE-WAIT-FRONT /
+        # CB-COMPUTE-RESERVE-BACK SumN zones inside compute kernels —
+        # these surface as the dominant TRISC time on CB-stall-bound
+        # workloads, so resolving the names makes the device perf
+        # report immediately actionable.
+        kdirs.append(tt_metal_root / "tt_metal" / "hw" / "ckernels" / "blackhole" / "metal" / "llk_io")
     name_table = discover_device_zone_names(kdirs)
     generate_device_perf_report(device_zones_csv, device_perf_report, name_table)
 

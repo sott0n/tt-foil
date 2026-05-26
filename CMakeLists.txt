@@ -22,9 +22,15 @@ if(TT_FOIL_DEVICE_PROFILER AND NOT TT_FOIL_ENABLE_TRACY)
         "(device zones share the host profiler's CSV pipeline).")
 endif()
 # Bitmask passed as -DPROFILE_KERNEL=<value> to firmware + kernel builds.
-# Bit 0 = base profiling (zone start/end markers). See tt-metal's
-# kernel_profiler.hpp for higher-bit options (DISPATCH, TRACE, SUM).
-set(TT_FOIL_PROFILE_KERNEL_BITMASK "1" CACHE STRING
+# Bit 0 (1) = base profiling (zone start/end markers).
+# Bit 1 (2) = also instrument dispatch cores (we have none, no effect).
+# Bit 2 (4) = trace-only mode (no zones, only trace markers — incompatible).
+# Bit 3 (8) = SUM mode — required for DeviceZoneScopedSumN1/N2 accumulator
+#             zones to actually accumulate. Used by conv_3x3/reader.cpp
+#             and any kernel that runs more zones per call than fit in
+#             the 512-word L1 profiler buffer (e.g. inner-loop zones).
+# Default 9 = base + SUM, no measurable cost over plain base.
+set(TT_FOIL_PROFILE_KERNEL_BITMASK "9" CACHE STRING
     "PROFILE_KERNEL bitmask when TT_FOIL_DEVICE_PROFILER=ON")
 
 # Pull in tt-metal submodule components (UMD, HAL, llrt subset)

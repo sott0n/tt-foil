@@ -16,6 +16,7 @@
 #include <cstdint>
 
 #include "dataflow_api.h"
+#include "tools/profiler/kernel_profiler.hpp"
 
 static inline uint64_t join64(uint32_t lo, uint32_t hi) {
     return (static_cast<uint64_t>(hi) << 32) | static_cast<uint64_t>(lo);
@@ -39,11 +40,23 @@ void kernel_main() {
 
     constexpr uint32_t kTileBytes = 32 * 32 * 2;
 
+    // Per-call SumN zones accumulate cycles across all Mt*Nt*Kt iterations
+    // into a single TOTAL packet per zone — this is the only viable
+    // option for big shapes like conv_3x3_l1 (Mt=1, Kt=9, Nt=32) where
+    // a per-iteration START/END pair would emit 576 markers per RISC,
+    // far past the 512-word L1 profiler buffer. Requires PROFILE_KERNEL
+    // bit 8 (SUM mode) set in the firmware build.
     for (uint32_t mt = 0; mt < Mt; ++mt) {
         for (uint32_t nt = 0; nt < Nt; ++nt) {
             for (uint32_t kt = 0; kt < Kt; ++kt) {
-                read_one_tile(0, a_base + (mt * Kt + kt) * kTileBytes);
-                read_one_tile(1, b_base + (kt * Nt + nt) * kTileBytes);
+                {
+                    DeviceZoneScopedSumN1("read_act");
+                    read_one_tile(0, a_base + (mt * Kt + kt) * kTileBytes);
+                }
+                {
+                    DeviceZoneScopedSumN2("read_w");
+                    read_one_tile(1, b_base + (kt * Nt + nt) * kTileBytes);
+                }
             }
         }
     }
