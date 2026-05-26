@@ -16,6 +16,11 @@ zones via `tools/tt_foil_profile.py`. Build with `-DTT_FOIL_ENABLE_TRACY=ON
 | Step 1 — Tier 1.1 DevBuf threading | **117.7 ms** | −49.2 ms | −49.2 ms | 1.42× |
 | Step 5 — Tier 2.2 pin bias_relu_post | **114.7 ms** | −3.0 ms | −52.2 ms | 1.46× |
 | Step 3 — Tier 1.2 fuse ReLU into add | **111.0 ms** | −3.7 ms | −55.9 ms | 1.50× |
+| Step 4 — Tier 2.1 fast-dispatch | _not landed (deferred)_ | — | — | — |
+| Step 2 — Tier 1.3 device im2col | _not landed (regression)_ | — | — | — |
+
+**Realized**: 1.50× (167→111 ms), ~31% of original wall removed.
+**Original target** in the plan was 1.50× from Tier 1+2 — hit by Step 1/3/5 alone.
 
 ---
 
@@ -165,3 +170,97 @@ python3 tools/tt_foil_profile.py -o generated/step3 -- ./build/tests/test_resnet
 grep -E "^Phase_|TF_dispatch_execute,bias_relu_post" \
     generated/step3/reports/tt_foil_perf_results.csv
 ```
+
+---
+
+## Step 4 — Tier 2.1 Fast-dispatch (DEFERRED, not landed)
+
+After Step 1+3+5, the dispatch sub-stage breakdown shows:
+
+| Sub-stage | Total | Mean per call |
+|---|---:|---:|
+| `TF_dispatch/send_reset` | 0.6 ms | 12 μs (×51) |
+| `TF_dispatch/setup` | 0.3 ms | 6 μs (×51) |
+| `TF_dispatch/fire_go` | 30 μs | 0.6 μs (×51) |
+| `TF_dispatch/wait_done` | 7.3 ms | varies (chip-bound) |
+
+`wait_done` dominates and is chip-bound — the host already exits the
+poll loop quickly when the chip is done. Fast-dispatch moves the poll
+to an on-chip dispatcher kernel but cannot shrink the actual chip
+execution time, so the realistic upper bound is well under the
+PERFORMANCE.md §5.2.1 estimate of 12 ms. Combined with the integration
+effort (separate dispatcher core, pre-staged launch_msg lifecycle, RTA
+re-write per dispatch), this was deferred in favour of attempting
+Step 2.
+
+---
+
+## Step 2 — Tier 1.3 Device im2col reader (EXPERIMENTAL, not landed)
+
+### What was attempted
+
+Added `examples/conv_3x3/kernels/reader_im2col.cpp`: a BRISC reader
+variant that takes the activation in its post-bias_relu tiled layout
+(no pre-im2col on host) and synthesises each im2col B-stream tile via
+per-element NOC reads from a single 2 KB L1 source-tile scratch.
+Driver side: a `run_conv_dev` helper, a new
+`buf_im2col_scratch` L1 allocation, and a parallel
+`k_conv_s1_im2col` kernel per phase loaded with the new reader. Used
+for the block's `conv2` (input already on device); `conv1` and stem
+kept their host-im2col path because their input `act` already lives on
+host as CHW.
+
+### Why it didn't land
+
+Two iterations were tested:
+
+1. **First iteration**: decoded `kt → (ci_block, ki, kj)` assuming
+   `kt = ci_block*9 + ki*3 + kj`. This is **wrong** for the layout
+   `tile_matrix` produces from `im2col_3x3` — that layout interleaves
+   `ci` slowly and `(ki, kj)` fast within each global row `r = ci*9 +
+   ki*3 + kj`, so a single 32-row im2col tile spans multiple `ci`
+   values (e.g. `kt=0` for `Cpad=32` covers `ci=0..3`). The first
+   correctness run mis-decoded every output element after layer1.0
+   (`worst_abs = 26.17`, argmax wrong).
+
+2. **Second iteration**: per-row `(ci, ki, kj)` decoding inside the
+   tile. Correctness restored (`worst_abs = 0.15` end-to-end, argmax
+   `cat` = ref, all stage-by-stage golden diffs ≤ 0.16 bf16). But the
+   per-element NOC + L1 scatter on BRISC became the new bottleneck:
+   `conv_3x3_l1` dispatch went from 825 μs/call to **16.7 ms/call**
+   (~20×). Total wall jumped from 111 ms to **264 ms** (2.4× *slower*).
+   Reverted.
+
+### What would unblock it
+
+The scatter is ~1 024 byte-level moves per im2col tile × 288 im2col
+tiles per Phase A conv. BRISC's scalar pipeline can't sustain this.
+Viable paths (future work):
+
+- Row-batched reads: for fixed `(kt, nt, r_in_tile)` all 32 dest cols
+  share `(ci, ki, kj)`, and (for Wo ≥ 32) the same source row in a
+  single source tile. One 64-byte NOC read of the source row + a
+  contiguous 64-byte L1 memcpy with boundary fix-up replaces 32 byte
+  ops.
+- A dedicated im2col compute kernel on TRISC (SIMD-friendly), with
+  BRISC just feeding raw source tiles. SFPU shuffle / pack
+  instructions can do the 4-face rearrangement in a few cycles per
+  tile.
+- Multi-bank DRAM reads (PERFORMANCE.md §5.3.1) plus row-batched
+  reads on BRISC, sharing the activation across all 9 `(ki, kj)`
+  offsets per `(mt, nt)`.
+
+### Reproduce the experiment
+
+The kernel source and driver wiring live on the in-progress branch
+prior to revert (see commit history pre-this entry). To repeat:
+
+1. Restore `examples/conv_3x3/kernels/reader_im2col.cpp` (final
+   row-decoded version), add `build_one brisc 0
+   "$HERE/kernels/reader_im2col.cpp" reader_im2col.brisc` to
+   `examples/conv_3x3/build_kernels.sh`.
+2. Allocate a 2 KB L1 `buf_im2col_scratch`, add `load_im2col` +
+   `run_conv_dev` helpers, route `conv2` in `run_block` through
+   `k_conv_s1_im2col`.
+3. Force-rebuild conv_3x3 variants. `test_resnet20` will PASS but
+   Phase A wall jumps to ~160 ms.
