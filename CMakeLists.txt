@@ -147,6 +147,17 @@ target_link_libraries(qwen3_run PRIVATE TT::Foil tt_foil_llrt)
 set_target_properties(qwen3_run PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/models/qwen3_vl_2b")
 
+# ---- qwen3vl_run device CLI ----
+# Qwen3-VL-2B with variable-length prefill and optional visual embeddings.
+# Pair with models/qwen3_vl_2b/qwen3vl_chat.py for image+text → text.
+add_executable(qwen3vl_run models/qwen3_vl_2b/qwen3vl_run.cpp)
+target_include_directories(qwen3vl_run PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+target_link_libraries(qwen3vl_run PRIVATE TT::Foil tt_foil_llrt)
+set_target_properties(qwen3vl_run PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/models/qwen3_vl_2b")
+
 # ---- tt_foil_inspect host CLI ----
 # Reads soft-reset/L1 state of every Tensix core without doing init.
 # Used to diagnose chip-state degradation after heavy workloads.
