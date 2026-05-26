@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Build the kernel set the cifar10_resnet20 test needs.
+# Build the kernel set the resnet20 test needs.
 #
 # ResNet-20 (akamaster, option-A skip) layer-by-layer kernel shapes:
 #
@@ -97,5 +97,5 @@ ln -sfn "$HERE/../../examples/bias_relu_post/prebuilt"  "$PREBUILT/bias_relu_pos
 ln -sfn "$HERE/../../examples/global_avg_pool/prebuilt" "$PREBUILT/global_avg_pool"
 
 echo
-echo "cifar10_resnet20 prebuilt root: $PREBUILT"
+echo "resnet20 prebuilt root: $PREBUILT"
 ls -la "$PREBUILT"

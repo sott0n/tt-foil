@@ -211,34 +211,6 @@ _tt_default(RA_NT 8)
 tt_foil_hw_test(test_residual_add     test_residual_add.cpp     "${EX}/residual_add/prebuilt"
     "RA_NT=${RA_NT}")
 
-# ---- v9.1: ResNet basic block (Conv → bias+ReLU → Conv → bias → skip+ReLU) ----
-# This test needs two kernel dirs: conv_3x3 prebuilt for both conv stages
-# and a residual_add build compiled with RA_NT=2 (matching this test's
-# Mt*Nt) under models/basic_block/prebuilt.
-add_executable(test_basic_block test_basic_block.cpp)
-target_include_directories(test_basic_block PRIVATE "${CMAKE_SOURCE_DIR}/src")
-target_link_libraries(test_basic_block PRIVATE TT::Foil tt_foil_llrt)
-add_test(NAME test_basic_block COMMAND test_basic_block)
-set_tests_properties(test_basic_block PROPERTIES
-    ENVIRONMENT "TT_FOIL_KERNEL_DIR=${EX}/conv_3x3/prebuilt;TT_FOIL_KERNEL_DIR_ADD=${MO}/basic_block/prebuilt;TT_FOIL_DEVICE=${TT_FOIL_DEVICE}")
-set_tests_properties(test_basic_block PROPERTIES RESOURCE_LOCK chip)
-set_tests_properties(test_basic_block PROPERTIES LABELS "hw")
-set_tests_properties(test_basic_block PROPERTIES TIMEOUT 90)
-
-# ---- v9.2: ResNet downsample block (3×3 s=2 main + 1×1 s=2 projection skip) ----
-# Single kernel root with four subdirs (conv_s2, conv, conv1x1, residual_add)
-# produced by models/downsample_block/build_kernels.sh.
-tt_foil_hw_test(test_downsample_block test_downsample_block.cpp
-    "${MO}/downsample_block/prebuilt")
-
-# ---- v9.3: ResNet layer (downsample_block + basic_block chained) ----
-# Reuses the downsample_block kernel root — all needed binaries
-# (conv_s2, conv, conv1x1, residual_add) already match this test's
-# tile shapes since C stays at 32 and spatial dims stay 8×8 after
-# block 1.
-tt_foil_hw_test(test_layer            test_layer.cpp
-    "${MO}/downsample_block/prebuilt")
-
 # ---- v9.4: 7×7 strided conv (ResNet stem input layer) ----
 _tt_default(MM_MT_C7  1)
 _tt_default(MM_KT_C7  49)   # C_in * 49 / 32 ; assumes C_in = 32
@@ -249,24 +221,6 @@ tt_foil_hw_test(test_conv_7x7         test_conv_7x7.cpp         "${EX}/conv_7x7/
 # ---- v9.5: 3×3 stride-2 maxpool (ResNet stem post-conv) ----
 tt_foil_hw_test(test_maxpool_3x3      test_maxpool_3x3.cpp      "${EX}/maxpool_3x3/prebuilt")
 
-# ---- v9.6: ResNet stem (Conv₇ₓ₇ → bias+ReLU → Maxpool₃ₓ₃) ----
-# Conv₇ₓ₇ is rebuilt at Nt=8 (input H=W=32 → H=W=16) under
-# stem/prebuilt/conv_7x7. Maxpool₃ₓ₃ matches its standalone default
-# fixture and is symlinked in.
-tt_foil_hw_test(test_stem             test_stem.cpp             "${MO}/stem/prebuilt")
-
-# ---- v9.7: Mini ResNet (stem + 2× basic_block) ----
-# All four kernel programs (conv_7x7, maxpool_3x3, conv, residual_add)
-# are symlinked into models/mini_resnet/prebuilt by its build script;
-# no fresh compiles needed for this test.
-tt_foil_hw_test(test_mini_resnet      test_mini_resnet.cpp      "${MO}/mini_resnet/prebuilt")
-
-# ---- v9.8: classifier tail (host GAP + device FC + host bias) ----
-tt_foil_hw_test(test_classifier_tail  test_classifier_tail.cpp  "${MO}/classifier_tail/prebuilt")
-
-# ---- v9.9: Full ResNet classifier — image in, logits out ----
-tt_foil_hw_test(test_resnet_classifier test_resnet_classifier.cpp
-    "${MO}/resnet_classifier/prebuilt")
 
 # ---- v10.1: bias_relu_post primitive ----
 tt_foil_hw_test(test_bias_relu_post   test_bias_relu_post.cpp   "${EX}/bias_relu_post/prebuilt")
@@ -412,43 +366,64 @@ set_tests_properties(test_qwen3_decode PROPERTIES TIMEOUT 3600)
 
 # ---- v10.2: CIFAR-10 ResNet-20 end-to-end inference ----
 # Reads pretrained weights + sample image + golden logits from
-# data/cifar10_resnet20/ (produced by models/cifar10_resnet20/export.py).
-add_executable(test_cifar10_resnet20 test_cifar10_resnet20.cpp)
-target_include_directories(test_cifar10_resnet20 PRIVATE "${CMAKE_SOURCE_DIR}/src")
-target_link_libraries(test_cifar10_resnet20 PRIVATE TT::Foil tt_foil_llrt)
+# data/resnet20/ (produced by models/resnet20/export.py, which is
+# auto-run on first build if the data directory is missing).
+add_executable(test_resnet20 test_resnet20.cpp)
+target_include_directories(test_resnet20 PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(test_resnet20 PRIVATE TT::Foil tt_foil_llrt)
 
-# Auto-build the cifar10 kernel set whenever firmware changes (or on
+# Auto-build the resnet20 kernel set whenever firmware changes (or on
 # first build). Stamp file gates re-runs; each example's build_kernels.sh
 # additionally self-skips when its own outputs are still in sync with
 # firmware + sources. This makes profiler ON/OFF switches hands-free —
 # `cmake --build build` propagates from firmware → kernels → test.
-set(_cifar10_kernels_stamp "${CMAKE_BINARY_DIR}/cifar10_kernels.stamp")
-set(_cifar10_profile_env "")
+set(_resnet20_kernels_stamp "${CMAKE_BINARY_DIR}/resnet20_kernels.stamp")
+set(_resnet20_profile_env "")
 if(TT_FOIL_DEVICE_PROFILER)
-    set(_cifar10_profile_env "TT_FOIL_PROFILE_KERNEL=${TT_FOIL_PROFILE_KERNEL_BITMASK}")
+    set(_resnet20_profile_env "TT_FOIL_PROFILE_KERNEL=${TT_FOIL_PROFILE_KERNEL_BITMASK}")
 endif()
 add_custom_command(
-    OUTPUT "${_cifar10_kernels_stamp}"
+    OUTPUT "${_resnet20_kernels_stamp}"
     COMMAND ${CMAKE_COMMAND} -E env
         TT_METAL_ROOT=${TT_METAL_ROOT}
-        ${_cifar10_profile_env}
-        bash ${CMAKE_SOURCE_DIR}/models/cifar10_resnet20/build_kernels.sh
-    COMMAND ${CMAKE_COMMAND} -E touch "${_cifar10_kernels_stamp}"
+        ${_resnet20_profile_env}
+        bash ${CMAKE_SOURCE_DIR}/models/resnet20/build_kernels.sh
+    COMMAND ${CMAKE_COMMAND} -E touch "${_resnet20_kernels_stamp}"
     DEPENDS
         tt_foil_firmware
-        ${CMAKE_SOURCE_DIR}/models/cifar10_resnet20/build_kernels.sh
-    COMMENT "Building cifar10_resnet20 prebuilt kernels"
+        ${CMAKE_SOURCE_DIR}/models/resnet20/build_kernels.sh
+    COMMENT "Building resnet20 prebuilt kernels"
     VERBATIM
 )
-add_custom_target(cifar10_kernels DEPENDS "${_cifar10_kernels_stamp}")
-add_dependencies(test_cifar10_resnet20 cifar10_kernels)
+add_custom_target(resnet20_kernels DEPENDS "${_resnet20_kernels_stamp}")
 
-add_test(NAME test_cifar10_resnet20 COMMAND test_cifar10_resnet20)
-set_tests_properties(test_cifar10_resnet20 PROPERTIES
-    ENVIRONMENT "TT_FOIL_KERNEL_DIR=${MO}/cifar10_resnet20/prebuilt;TT_FOIL_DATA_DIR=${CMAKE_SOURCE_DIR}/data/cifar10_resnet20;TT_FOIL_DEVICE=${TT_FOIL_DEVICE}")
-set_tests_properties(test_cifar10_resnet20 PROPERTIES RESOURCE_LOCK chip)
-set_tests_properties(test_cifar10_resnet20 PROPERTIES LABELS "hw")
-set_tests_properties(test_cifar10_resnet20 PROPERTIES TIMEOUT 120)
+# Auto-export model data (weights + image + golden) on first build if
+# data/resnet20/manifest.json is missing.  export.py downloads the
+# CIFAR-10 dataset and the akamaster checkpoint automatically (~170 MB
+# one-time, cached in .cache/).  Requires Python 3 + torch.
+set(_resnet20_data_dir "${CMAKE_SOURCE_DIR}/data/resnet20")
+set(_resnet20_data_stamp "${CMAKE_BINARY_DIR}/resnet20_data.stamp")
+add_custom_command(
+    OUTPUT "${_resnet20_data_stamp}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${_resnet20_data_dir}"
+    COMMAND python3 ${CMAKE_SOURCE_DIR}/models/resnet20/export.py
+        --out-dir "${_resnet20_data_dir}"
+        --cache-dir "${CMAKE_SOURCE_DIR}/.cache"
+    COMMAND ${CMAKE_COMMAND} -E touch "${_resnet20_data_stamp}"
+    DEPENDS ${CMAKE_SOURCE_DIR}/models/resnet20/export.py
+    COMMENT "Exporting ResNet-20 weights and CIFAR-10 sample (first-time download)"
+    VERBATIM
+)
+add_custom_target(resnet20_data DEPENDS "${_resnet20_data_stamp}")
+
+add_dependencies(test_resnet20 resnet20_kernels resnet20_data)
+
+add_test(NAME test_resnet20 COMMAND test_resnet20)
+set_tests_properties(test_resnet20 PROPERTIES
+    ENVIRONMENT "TT_FOIL_KERNEL_DIR=${MO}/resnet20/prebuilt;TT_FOIL_DATA_DIR=${_resnet20_data_dir};TT_FOIL_DEVICE=${TT_FOIL_DEVICE}")
+set_tests_properties(test_resnet20 PROPERTIES RESOURCE_LOCK chip)
+set_tests_properties(test_resnet20 PROPERTIES LABELS "hw")
+set_tests_properties(test_resnet20 PROPERTIES TIMEOUT 120)
 
 # NOTE: The Phase B2 step-by-step tests (test_cold_boot, test_firmware_load,
 # test_mailbox_init, test_core_info_init, test_bank_tables_init) were

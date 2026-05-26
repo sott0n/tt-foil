@@ -183,8 +183,8 @@ When OFF (default):
 
 ### Phase 5 — User-facing zones in real ops (0.5 day)
 - Add `TF_DEVICE_ZONE` macros to the conv_3x3 family kernels in
-  models/cifar10_resnet20 (one math zone, one noc-wait zone)
-- Re-run cifar10 profile, examine the breakdown
+  models/resnet20 (one math zone, one noc-wait zone)
+- Re-run resnet20 profile, examine the breakdown
 - Goal: validate the bottleneck-analysis loop end to end on a real
   workload.
 

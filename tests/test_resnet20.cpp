@@ -3,7 +3,7 @@
 //
 // CIFAR-10 ResNet-20 inference end-to-end on a single Tensix core.
 // Loads the pretrained akamaster weights + sample image + golden logits
-// produced by models/cifar10_resnet20/export.py and runs the full
+// produced by models/resnet20/export.py and runs the full
 // forward pass on device. Every multiply/add/ReLU lives on device;
 // layout (im2col, tile/untile, option-A zero-padded skip) stays on
 // host.
@@ -960,7 +960,7 @@ int main() try {
         "dog", "frog", "horse", "ship", "truck",
     };
 
-    std::printf("test_cifar10_resnet20: dev_logits = [");
+    std::printf("test_resnet20: dev_logits = [");
     for (int k = 0; k < kNumClasses; ++k) std::printf(" %.3f", dev_logits[k]);
     std::printf(" ]\n");
     std::printf("                       ref_logits = [");
@@ -969,7 +969,7 @@ int main() try {
     std::printf("                       worst abs = %.4f\n", worst_abs);
 
     bool argmax_match = (argmax_dev == argmax_ref);
-    std::printf("test_cifar10_resnet20: %s  argmax dev=%d (%s) ref=%d (%s)\n",
+    std::printf("test_resnet20: %s  argmax dev=%d (%s) ref=%d (%s)\n",
                 argmax_match ? "PASS" : "FAIL (argmax mismatch)",
                 argmax_dev, kClassNames[argmax_dev],
                 argmax_ref, kClassNames[argmax_ref]);
@@ -977,6 +977,6 @@ int main() try {
     tt::foil::close_device(std::move(dev));
     return argmax_match ? 0 : 1;
 } catch (const std::exception& e) {
-    std::fprintf(stderr, "test_cifar10_resnet20: FAIL — %s\n", e.what());
+    std::fprintf(stderr, "test_resnet20: FAIL — %s\n", e.what());
     return 1;
 }

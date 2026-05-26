@@ -3,8 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 One-time export tool: turn a pre-trained ResNet-20 (CIFAR-10) checkpoint
-into the bf16 binaries that tt-foil's test_cifar10_resnet20 loads at
-runtime.
+into the bf16 binaries that tt-foil's test_resnet20 loads at runtime.
 
 What this script does:
 
@@ -21,20 +20,20 @@ What this script does:
      the device's bias_relu_post stage.
   5. Runs a forward pass in float32 to get reference logits.
   6. Writes:
-       data/cifar10_resnet20/weights.bin   (concatenated bf16 weights)
-       data/cifar10_resnet20/image.bin     (one CIFAR-10 image, bf16)
-       data/cifar10_resnet20/golden.bin    (10 reference logits, bf16)
-       data/cifar10_resnet20/manifest.json (offsets, shapes, label)
+       data/resnet20/weights.bin   (concatenated bf16 weights)
+       data/resnet20/image.bin     (one CIFAR-10 image, bf16)
+       data/resnet20/golden.bin    (10 reference logits, bf16)
+       data/resnet20/manifest.json (offsets, shapes, label)
 
 The C++ test reads manifest.json to find each layer's offset/shape in
 weights.bin; the binary layout itself stays opaque to C++.
 
 Usage:
-  python3 models/cifar10_resnet20/export.py
+  python3 models/resnet20/export.py
 
   --image-index N   pick CIFAR-10 test image N (default 0)
   --cache-dir DIR   where to keep downloads (default .cache/)
-  --out-dir DIR     where to write binaries (default data/cifar10_resnet20/)
+  --out-dir DIR     where to write binaries (default data/resnet20/)
 """
 from __future__ import annotations
 
@@ -246,7 +245,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image-index", type=int, default=0)
     parser.add_argument("--cache-dir", default=".cache")
-    parser.add_argument("--out-dir", default="data/cifar10_resnet20")
+    parser.add_argument("--out-dir", default="data/resnet20")
     args = parser.parse_args()
 
     cache_dir = Path(args.cache_dir)

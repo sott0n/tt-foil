@@ -1,4 +1,4 @@
-# CIFAR-10 ResNet-20 — Performance Report & Improvement Plan
+# ResNet-20 (CIFAR-10) — Performance Report & Improvement Plan
 
 **Workload**: 1-image inference, ResNet-20 (akamaster-flavor, option-A skip),
 input CHW 3×32×32 → 10-way logits.
@@ -263,7 +263,7 @@ to avoid optimising the wrong side of the workload.
 ## 7. Recommended starting point
 
 **Tier 1.1 (round-trip elimination) first.** Single-issue saving of ~70 ms,
-all changes contained to `tests/test_cifar10_resnet20.cpp`, low risk —
+all changes contained to `tests/test_resnet20.cpp`, low risk —
 the kernels themselves don't move. Tier 1.3 (device im2col) is
 independent of 1.1 and can run in parallel.
 
@@ -280,10 +280,10 @@ cmake --build build -j$(nproc)
 # 2. Reset chip + run under profiler wrapper
 ~/tt-venv/bin/tt-smi -r <chip_id>
 TT_FOIL_DEVICE=<chip_id> \
-TT_FOIL_KERNEL_DIR=$PWD/models/cifar10_resnet20/prebuilt \
-TT_FOIL_DATA_DIR=$PWD/data/cifar10_resnet20 \
+TT_FOIL_KERNEL_DIR=$PWD/models/resnet20/prebuilt \
+TT_FOIL_DATA_DIR=$PWD/data/resnet20 \
 python tools/tt_foil_profile.py -o generated/cifar10_run -- \
-    ./build/tests/test_cifar10_resnet20
+    ./build/tests/test_resnet20
 
 # 3. Reports
 cat generated/cifar10_run/reports/tt_foil_perf_results.csv      # host

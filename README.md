@@ -288,22 +288,7 @@ a paired test under [`tests/`](tests/).
 
 | Model | Description | Test |
 | --- | --- | --- |
-| **Mini ResNet** | Random-weight ResNet-shaped classifier: Stem (7×7 conv + bias+ReLU + 3×3 maxpool) → 2× basic_block → Global Avg Pool → FC → 32-way logits. (C=32, image 32×32). Every multiply / add / ReLU runs on device; only layout (im2col, tile, transpose) on host. Verifies device output against a host fp32→bf16 reference; argmax dev/ref match. | [`test_resnet_classifier`](tests/test_resnet_classifier.cpp) |
-| **CIFAR-10 ResNet-20** | Pretrained akamaster checkpoint + one CIFAR-10 test image. Full 19-conv + GAP + FC forward pass on device, BN folded into per-conv biases by [`models/cifar10_resnet20/export.py`](models/cifar10_resnet20/export.py). Worst per-class logit drift 0.14 vs the fp32 reference; dev argmax matches ref argmax = "cat". | [`test_cifar10_resnet20`](tests/test_cifar10_resnet20.cpp) |
-
-### Composable building blocks
-
-The model graphs above are assembled from smaller stage-level pieces,
-each runnable standalone for stage-by-stage verification:
-
-| Stage | Where | Test |
-| --- | --- | --- |
-| Basic block (conv → bias+ReLU → conv → bias → skip-add → ReLU) | [`models/basic_block/`](models/basic_block/) | [`test_basic_block`](tests/test_basic_block.cpp) |
-| Downsample block (3×3 s=2 main + 1×1 s=2 projection skip)      | [`models/downsample_block/`](models/downsample_block/) | [`test_downsample_block`](tests/test_downsample_block.cpp) |
-| Layer (`downsample_block` + `basic_block` chained)             | (no fresh kernels) | [`test_layer`](tests/test_layer.cpp) |
-| Stem (Conv₇ₓ₇ + bias+ReLU + Maxpool₃ₓ₃)                       | [`models/stem/`](models/stem/) | [`test_stem`](tests/test_stem.cpp) |
-| Mini ResNet feature path (stem + 2× basic_block, no head)      | [`models/mini_resnet/`](models/mini_resnet/) | [`test_mini_resnet`](tests/test_mini_resnet.cpp) |
-| Classifier tail (host GAP + device FC + host bias)             | [`models/classifier_tail/`](models/classifier_tail/) | [`test_classifier_tail`](tests/test_classifier_tail.cpp) |
+| **ResNet-20** | Pretrained akamaster checkpoint + one CIFAR-10 test image. Full 19-conv + GAP + FC forward pass on device, BN folded into per-conv biases by [`models/resnet20/export.py`](models/resnet20/export.py). Worst per-class logit drift 0.14 vs the fp32 reference; dev argmax matches ref argmax = "cat". Data generated automatically on first build (requires Python + torch). | [`test_resnet20`](tests/test_resnet20.cpp) |
 
 ### Single-op kernel demos
 
