@@ -433,6 +433,20 @@ int main() try {
     std::shared_ptr<tt::foil::Kernel> k_conv_s1, k_conv_s2, k_add, k_bias,
                                        k_gap, k_fc;
 
+    // ---- Tier 1.1: DevBuf-threaded helpers --------------------------
+    // A DevBuf is a thin handle (buffer ptr + NOC addr + tile-grid
+    // metadata) used to pass activations between consecutive ops without
+    // bouncing them through the host. Reads back to host CHW happen only
+    // when the next op needs im2col (i.e. another conv) or at final
+    // output.
+    struct DevBuf {
+        std::shared_ptr<tt::foil::Buffer> buf;
+        uint64_t noc_addr;
+        int Mt;
+        int Nt;
+        int HW;
+    };
+
     // ---- Helpers ----------------------------------------------------
 
     // Pack a per-channel bias vector (length Mt * 32 = Cpad) into Mt
@@ -455,14 +469,14 @@ int main() try {
     // Run a matmul-shaped conv:
     //   W tiled as (Mt, Kt) at column dim = Kt*32, A tiled as (Kt, Nt)
     //   at column dim = Nt*32. Output tiled as (Mt, Nt) at column dim
-    //   HW = Nt*32. Returns the post-conv activation in CHW layout
-    //   shape (Mt*32, HW_out).
+    //   HW = Nt*32. Leaves the conv output in buf_Y (tiled) and returns
+    //   a DevBuf handle pointing to it — no read_back.
     auto run_conv = [&](tt::foil::Kernel& k_conv,
                         int Mt, int Kt, int Nt,
                         int CinPad, int Hi, int Wi, int Ho, int Wo, int stride,
                         const std::vector<uint16_t>& w_cchw,    // (CoutPad, CinPad, 3, 3)
-                        const std::vector<uint16_t>& x_chw,     // (CinPad, Hi, Wi)
-                        std::vector<uint16_t>& y_chw_out) {
+                        const std::vector<uint16_t>& x_chw      // (CinPad, Hi, Wi)
+                        ) -> DevBuf {
         TT_FOIL_ZONE("run_conv");
         const int CoutPad = Mt * (int)kTileH;
         const int HWout   = Ho * Wo;
@@ -492,26 +506,35 @@ int main() try {
         tt::foil::register_cbs(*dev, k_conv, matmul_cbs);
         tt::foil::execute(*dev, k_conv);
 
-        std::vector<uint16_t> y_tiles(static_cast<size_t>(Mt) * Nt * kTileWords, 0);
-        tt::foil::read_buffer(*dev, *buf_Y, y_tiles.data(), yb, "conv_out");
-        untile_matrix(y_tiles, Mt, Nt, HWout, y_chw_out);
+        return DevBuf{buf_Y, Y_noc, Mt, Nt, HWout};
     };
 
-    // Run bias_relu_post on an (Mt*32, HW)-shaped CHW activation,
-    // returning the result in-place. Uses buf_Y as input staging and
-    // buf_post as output staging. bias_cpad must hold Mt*32 entries
-    // — channel biases for each Mt row of the tile grid.
+    // Read a DevBuf back to host CHW. Only call when the next op needs
+    // host-side data (im2col before a conv, or final logits).
+    auto devbuf_to_chw = [&](const DevBuf& db,
+                             std::vector<uint16_t>& chw_out) {
+        const uint32_t bytes =
+            static_cast<uint32_t>(db.Mt) * db.Nt * kTileBytes;
+        std::vector<uint16_t> tiles(
+            static_cast<size_t>(db.Mt) * db.Nt * kTileWords, 0);
+        tt::foil::read_buffer(*dev, *db.buf, tiles.data(), bytes, "devbuf_read");
+        untile_matrix(tiles, db.Mt, db.Nt, db.HW, chw_out);
+    };
+
+    // Run bias_relu_post on a DevBuf input (tiles already in DRAM at
+    // in.noc_addr). Writes results to out_buf at out_noc and returns a
+    // DevBuf handle pointing there. No host round-trip on either side.
     auto run_bias_relu = [&](tt::foil::Kernel& k,
-                             std::vector<uint16_t>& chw_inout,
-                             int Mt, int Nt, int HW,
+                             const DevBuf& in,
                              const std::vector<uint16_t>& bias_cpad,
-                             uint32_t relu_enable) {
+                             uint32_t relu_enable,
+                             std::shared_ptr<tt::foil::Buffer> out_buf,
+                             uint64_t out_noc) -> DevBuf {
         TT_FOIL_ZONE("run_bias_relu");
+        const int Mt = in.Mt;
+        const int Nt = in.Nt;
         const int n_tiles = Mt * Nt;
         const uint32_t bytes = n_tiles * kTileBytes;
-        std::vector<uint16_t> in_tiles;
-        tile_matrix(chw_inout, Mt, Nt, HW, in_tiles);
-        tt::foil::write_buffer(*dev, *buf_Y, in_tiles.data(), bytes, "bias_relu_in");
 
         std::vector<uint16_t> bt;
         pack_bias_tile(bias_cpad, Mt, bt);
@@ -519,14 +542,14 @@ int main() try {
                                Mt * kTileBytes, "bias_relu_bias");
 
         std::vector<uint8_t> zero(bytes, 0);
-        tt::foil::write_buffer(*dev, *buf_post, zero.data(), bytes, "bias_relu_out_zeroinit");
+        tt::foil::write_buffer(*dev, *out_buf, zero.data(), bytes, "bias_relu_out_zeroinit");
 
         std::array<uint32_t, 6> rab = {
-            lo(Y_noc),      hi(Y_noc),
-            lo(bias_d_noc), hi(bias_d_noc),
+            lo(in.noc_addr), hi(in.noc_addr),
+            lo(bias_d_noc),  hi(bias_d_noc),
             (uint32_t)Mt, (uint32_t)Nt,
         };
-        std::array<uint32_t, 3> ran = { lo(post_noc), hi(post_noc),
+        std::array<uint32_t, 3> ran = { lo(out_noc), hi(out_noc),
                                         (uint32_t)n_tiles };
         std::array<uint32_t, 2> rac = { (uint32_t)n_tiles, relu_enable };
         tt::foil::set_runtime_args(*dev, k, R::RiscId::BRISC,  rab);
@@ -537,41 +560,50 @@ int main() try {
         tt::foil::register_cbs(*dev, k, matmul_cbs);
         tt::foil::execute(*dev, k);
 
-        std::vector<uint16_t> out_tiles(n_tiles * kTileWords, 0);
-        tt::foil::read_buffer(*dev, *buf_post, out_tiles.data(), bytes, "bias_relu_out");
-        untile_matrix(out_tiles, Mt, Nt, HW, chw_inout);
+        return DevBuf{out_buf, out_noc, Mt, Nt, in.HW};
     };
 
-    // Run residual_add: y_chw = a_chw + b_chw on device.
+    // Residual_add on DevBuf inputs. lhs and rhs are tiled DRAM buffers
+    // already laid out by the producing op; output is written to out_buf
+    // (which must NOT alias lhs.buf or rhs.buf).
     auto run_add = [&](tt::foil::Kernel& k,
-                       const std::vector<uint16_t>& a_chw,
-                       const std::vector<uint16_t>& b_chw,
-                       int Mt, int Nt, int HW,
-                       std::vector<uint16_t>& y_chw) {
+                       const DevBuf& lhs,
+                       const DevBuf& rhs,
+                       std::shared_ptr<tt::foil::Buffer> out_buf,
+                       uint64_t out_noc) -> DevBuf {
         TT_FOIL_ZONE("run_add");
+        const int Mt = lhs.Mt;
+        const int Nt = lhs.Nt;
         const int n_tiles = Mt * Nt;
         const uint32_t bytes = n_tiles * kTileBytes;
-        std::vector<uint16_t> a_tiles, b_tiles;
-        tile_matrix(a_chw, Mt, Nt, HW, a_tiles);
-        tile_matrix(b_chw, Mt, Nt, HW, b_tiles);
-        tt::foil::write_buffer(*dev, *buf_Y,    a_tiles.data(), bytes, "add_lhs");
-        tt::foil::write_buffer(*dev, *buf_skip, b_tiles.data(), bytes, "add_rhs_skip");
+
         std::vector<uint8_t> zero(bytes, 0);
-        tt::foil::write_buffer(*dev, *buf_post, zero.data(), bytes, "add_out_zeroinit");
+        tt::foil::write_buffer(*dev, *out_buf, zero.data(), bytes, "add_out_zeroinit");
 
         std::array<uint32_t, 4> rab = {
-            lo(Y_noc),    hi(Y_noc),
-            lo(skip_noc), hi(skip_noc),
+            lo(lhs.noc_addr), hi(lhs.noc_addr),
+            lo(rhs.noc_addr), hi(rhs.noc_addr),
         };
-        std::array<uint32_t, 2> ran = { lo(post_noc), hi(post_noc) };
+        std::array<uint32_t, 2> ran = { lo(out_noc), hi(out_noc) };
         tt::foil::set_runtime_args(*dev, k, R::RiscId::BRISC,  rab);
         tt::foil::set_runtime_args(*dev, k, R::RiscId::NCRISC, ran);
         tt::foil::register_cbs(*dev, k, matmul_cbs);
         tt::foil::execute(*dev, k);
 
-        std::vector<uint16_t> y_tiles(n_tiles * kTileWords, 0);
-        tt::foil::read_buffer(*dev, *buf_post, y_tiles.data(), bytes, "add_out");
-        untile_matrix(y_tiles, Mt, Nt, HW, y_chw);
+        return DevBuf{out_buf, out_noc, Mt, Nt, lhs.HW};
+    };
+
+    // Pack a CHW skip tensor into buf_skip in tiled DRAM layout (used
+    // for the option-A identity / subsample+pad skip path that's
+    // still computed on host).
+    auto write_skip_chw = [&](const std::vector<uint16_t>& skip_chw,
+                              int Mt, int Nt, int HW) -> DevBuf {
+        TT_FOIL_ZONE("write_skip_chw");
+        std::vector<uint16_t> skip_tiles;
+        tile_matrix(skip_chw, Mt, Nt, HW, skip_tiles);
+        const uint32_t bytes = static_cast<uint32_t>(Mt) * Nt * kTileBytes;
+        tt::foil::write_buffer(*dev, *buf_skip, skip_tiles.data(), bytes, "add_rhs_skip");
+        return DevBuf{buf_skip, skip_noc, Mt, Nt, HW};
     };
 
     // One basic block (or downsample block with option-A skip): two
@@ -595,50 +627,54 @@ int main() try {
         TT_FOIL_ZONE("run_block");
         const int HWout = Ho * Wo;
 
-        // Stage 1: conv1 + bias + ReLU
-        std::vector<uint16_t> t1;
-        run_conv(conv1_k,
-                 Mt_out, Kt1, Nt_out,
-                 CinPad, Hi, Wi, Ho, Wo, stride_first,
-                 w1_padded, act, t1);
-        run_bias_relu(bias_k, t1, Mt_out, Nt_out, HWout, b1_padded, 1);
+        // Stage 1: conv1 → buf_Y, then bias_relu1(relu=1) → buf_post.
+        // Only one read_back: buf_post must come back to host as t1_chw
+        // because conv2 needs host im2col (eliminated in Tier 1.3).
+        DevBuf t1_devY = run_conv(conv1_k,
+                                  Mt_out, Kt1, Nt_out,
+                                  CinPad, Hi, Wi, Ho, Wo, stride_first,
+                                  w1_padded, act);
+        DevBuf t1_devP = run_bias_relu(bias_k, t1_devY, b1_padded, 1,
+                                       buf_post, post_noc);
+        std::vector<uint16_t> t1_chw;
+        devbuf_to_chw(t1_devP, t1_chw);
 
-        // Stage 2: conv2 + bias (no ReLU yet)
-        std::vector<uint16_t> t2;
-        run_conv(conv2_k,
-                 Mt_out, Kt2, Nt_out,
-                 CoutPad, Ho, Wo, Ho, Wo, /*stride=*/1,
-                 w2_padded, t1, t2);
-        run_bias_relu(bias_k, t2, Mt_out, Nt_out, HWout, b2_padded, 0);
+        // Stage 2: conv2 → buf_Y, then bias_relu2(relu=0) → buf_post.
+        // No read_back — t2 stays in buf_post for the add.
+        DevBuf t2_devY = run_conv(conv2_k,
+                                  Mt_out, Kt2, Nt_out,
+                                  CoutPad, Ho, Wo, Ho, Wo, /*stride=*/1,
+                                  w2_padded, t1_chw);
+        DevBuf t2_devP = run_bias_relu(bias_k, t2_devY, b2_padded, 0,
+                                       buf_post, post_noc);
 
-        // Stage 3: prep skip path
-        std::vector<uint16_t> skip;
+        // Stage 3: prep skip path on host, stage to buf_skip.
+        std::vector<uint16_t> skip_chw;
         if (!downsample) {
-            // Identity skip = act (the original block input).
-            skip = act;
+            skip_chw = act;  // identity skip
         } else {
             // Option A (akamaster): subsample stride-2 in spatial, then
-            // option-A channel pad with `pad_each = (Cout_real-Cin_real)/2`
-            // zeros on each side of the real channels. Real channels land
-            // at indices [pad_each, pad_each + Cin_real); the rest of
-            // the (CoutPad, Ho, Wo) layout stays zero.
+            // option-A channel pad with pad_each = (Cout_real-Cin_real)/2
+            // zeros on each side of the real channels.
             std::vector<uint16_t> sub;
             subsample_stride2_chw(act, CinPad, Hi, Wi, sub);
             int pad_each = (Cout_real - Cin_real) / 2;
             pad_channels_centered(sub, Cin_real, Ho, Wo,
-                                  pad_each, CoutPad, skip);
+                                  pad_each, CoutPad, skip_chw);
         }
+        DevBuf skip_dev = write_skip_chw(skip_chw, Mt_out, Nt_out, HWout);
 
-        // Stage 4: residual add (t2 + skip) → buf_post
-        std::vector<uint16_t> y;
-        run_add(add_k, t2, skip, Mt_out, Nt_out, HWout, y);
+        // Stage 4: add(t2_post + skip) → buf_Y (free again now that
+        // bias_relu2 has consumed conv2's output).
+        DevBuf add_devY = run_add(add_k, t2_devP, skip_dev, buf_Y, Y_noc);
 
-        // Stage 5: ReLU (bias=0, relu=1)
+        // Stage 5: final ReLU (bias=0, relu=1) → buf_post.
         std::vector<uint16_t> zero_bias(Mt_out * kTileH, 0);
-        run_bias_relu(bias_k, y, Mt_out, Nt_out, HWout, zero_bias, 1);
+        DevBuf y_devP = run_bias_relu(bias_k, add_devY, zero_bias, 1,
+                                      buf_post, post_noc);
 
-        // Update current activation.
-        act   = std::move(y);
+        // Read back for next block's conv1 host im2col.
+        devbuf_to_chw(y_devP, act);
         act_C = CoutPad;
         act_H = Ho;
         act_W = Wo;
@@ -662,13 +698,13 @@ int main() try {
                         /*CoutPad=*/kPadC16, /*CinPad=*/kPadC16, w_p);
         pad_bias(b_raw, 16, kPadC16, b_p);
 
-        std::vector<uint16_t> y;
-        run_conv(*k_conv_s1, /*Mt=*/1, /*Kt=*/9, /*Nt=*/32,
-                 /*CinPad=*/kPadC16, /*Hi=*/32, /*Wi=*/32,
-                 /*Ho=*/32, /*Wo=*/32, /*stride=*/1,
-                 w_p, act, y);
-        run_bias_relu(*k_bias, y, /*Mt=*/1, /*Nt=*/32, /*HW=*/1024, b_p, 1);
-        act   = std::move(y);
+        DevBuf stem_y = run_conv(*k_conv_s1, /*Mt=*/1, /*Kt=*/9, /*Nt=*/32,
+                                 /*CinPad=*/kPadC16, /*Hi=*/32, /*Wi=*/32,
+                                 /*Ho=*/32, /*Wo=*/32, /*stride=*/1,
+                                 w_p, act);
+        DevBuf stem_post = run_bias_relu(*k_bias, stem_y, b_p, 1,
+                                         buf_post, post_noc);
+        devbuf_to_chw(stem_post, act);
         act_C = kPadC16;
         act_H = 32;
         act_W = 32;
