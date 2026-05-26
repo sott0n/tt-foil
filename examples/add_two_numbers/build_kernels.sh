@@ -42,6 +42,14 @@ BUILD="${BUILD:-/tmp/tt_foil_build}"
 PREBUILT="$HERE/prebuilt"
 mkdir -p "$BUILD" "$PREBUILT"
 
+# Skip rebuild if kernels are still in sync with firmware + sources +
+# TT_FOIL_PROFILE_KERNEL setting.
+. "$HERE/../../scripts/kernel_build_helpers.sh"
+if kernels_up_to_date "$PREBUILT" "$TT_METAL_PRECOMPILED" "$HERE/kernels"; then
+    echo "build_kernels: $PREBUILT up-to-date with firmware, skipping"
+    exit 0
+fi
+
 # Optional: device profiler. When TT_FOIL_PROFILE_KERNEL is set,
 # kernel_profiler.hpp activates and the kernel writes cycle markers to
 # the per-core profiler L1 region. Default off → DeviceZoneScopedN
@@ -121,3 +129,5 @@ build_one() {
 
 build_one brisc  0 "$HERE/kernels/add_brisc.cpp"  add_brisc
 build_one ncrisc 1 "$HERE/kernels/add_ncrisc.cpp" add_ncrisc
+
+stamp_kernel_build "$PREBUILT"

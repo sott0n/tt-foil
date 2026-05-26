@@ -70,6 +70,16 @@ BUILD="${BUILD:-/tmp/tt_foil_build}"
 PREBUILT="${PREBUILT_DIR:-$HERE/prebuilt}"
 mkdir -p "$BUILD" "$PREBUILT"
 
+# Skip rebuild if kernels are still in sync with firmware + sources +
+# TT_FOIL_PROFILE_KERNEL setting. Avoids the manual `rm -rf prebuilt/`
+# step when toggling profiler ON/OFF (CLAUDE.md "cb_reserve_back hangs"
+# invariant — kernel ELF must match the firmware it'll run against).
+. "$HERE/../../scripts/kernel_build_helpers.sh"
+if kernels_up_to_date "$PREBUILT" "$TT_METAL_PRECOMPILED" "$HERE/kernels"; then
+    echo "build_kernels: $PREBUILT up-to-date with firmware, skipping"
+    exit 0
+fi
+
 # Common preprocessor + include flags shared by both RISC compiles.
 COMMON_CFLAGS=(
     -std=c++17 -fno-exceptions -fno-use-cxa-atexit
@@ -290,3 +300,5 @@ EOF
 build_one brisc  0 "$HERE/kernels/reader.cpp" reader.brisc
 build_one ncrisc 1 "$HERE/kernels/writer.cpp" writer.ncrisc
 build_compute "$HERE/kernels/compute.cpp" compute
+
+stamp_kernel_build "$PREBUILT"

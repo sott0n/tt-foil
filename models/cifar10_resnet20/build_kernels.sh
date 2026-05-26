@@ -35,13 +35,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREBUILT="$HERE/prebuilt"
 mkdir -p "$PREBUILT"
 
-# ---- Make sure the underlying examples are built (for the symlinks). --
-if [[ ! -d "$HERE/../../examples/bias_relu_post/prebuilt" ]]; then
-    bash "$HERE/../../examples/bias_relu_post/build_kernels.sh"
-fi
-if [[ ! -d "$HERE/../../examples/global_avg_pool/prebuilt" ]]; then
-    bash "$HERE/../../examples/global_avg_pool/build_kernels.sh"
-fi
+# ---- Build the underlying examples (the helpers in those scripts will
+# self-skip if their prebuilt/ is already in sync with firmware + sources,
+# so calling them unconditionally is cheap when nothing has changed but
+# correctly picks up a firmware rebuild that would otherwise leave stale
+# kernel ELFs).
+bash "$HERE/../../examples/bias_relu_post/build_kernels.sh"
+bash "$HERE/../../examples/global_avg_pool/build_kernels.sh"
 
 # ---- conv_3x3 stride-1 variants ---------------------------------------
 # Builder delegates to examples/conv_3x3/build_kernels.sh which already

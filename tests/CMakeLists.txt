@@ -43,6 +43,34 @@ function(tt_foil_hw_test name src kernel_dir)
     if(ARGN)
         target_compile_definitions(${name} PRIVATE ${ARGN})
     endif()
+    # If the kernel_dir resolves to <something>/prebuilt under examples/
+    # or models/, hook in the matching build_kernels.sh so the test
+    # auto-rebuilds when tt_foil_firmware is rebuilt (e.g. toggling
+    # TT_FOIL_DEVICE_PROFILER). Skip silently when no build_kernels.sh
+    # is present — covers pre-staged data fixtures.
+    get_filename_component(_kd_parent "${kernel_dir}" DIRECTORY)
+    set(_build_script "${_kd_parent}/build_kernels.sh")
+    if(EXISTS "${_build_script}")
+        set(_stamp "${CMAKE_BINARY_DIR}/kernel_stamps/${name}.stamp")
+        set(_profile_env "")
+        if(TT_FOIL_DEVICE_PROFILER)
+            set(_profile_env "TT_FOIL_PROFILE_KERNEL=${TT_FOIL_PROFILE_KERNEL_BITMASK}")
+        endif()
+        add_custom_command(
+            OUTPUT "${_stamp}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/kernel_stamps"
+            COMMAND ${CMAKE_COMMAND} -E env
+                TT_METAL_ROOT=${TT_METAL_ROOT}
+                ${_profile_env}
+                bash "${_build_script}"
+            COMMAND ${CMAKE_COMMAND} -E touch "${_stamp}"
+            DEPENDS tt_foil_firmware "${_build_script}"
+            COMMENT "Auto-building kernels for ${name}"
+            VERBATIM
+        )
+        add_custom_target(${name}_kernels DEPENDS "${_stamp}")
+        add_dependencies(${name} ${name}_kernels)
+    endif()
     add_test(NAME ${name} COMMAND ${name})
     # set_tests_properties splits the ENVIRONMENT value on semicolons
     # for its own list parsing; pass it as a single quoted string and
@@ -369,6 +397,33 @@ set_tests_properties(test_qwen3_decode PROPERTIES TIMEOUT 3600)
 add_executable(test_cifar10_resnet20 test_cifar10_resnet20.cpp)
 target_include_directories(test_cifar10_resnet20 PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(test_cifar10_resnet20 PRIVATE TT::Foil tt_foil_llrt)
+
+# Auto-build the cifar10 kernel set whenever firmware changes (or on
+# first build). Stamp file gates re-runs; each example's build_kernels.sh
+# additionally self-skips when its own outputs are still in sync with
+# firmware + sources. This makes profiler ON/OFF switches hands-free —
+# `cmake --build build` propagates from firmware → kernels → test.
+set(_cifar10_kernels_stamp "${CMAKE_BINARY_DIR}/cifar10_kernels.stamp")
+set(_cifar10_profile_env "")
+if(TT_FOIL_DEVICE_PROFILER)
+    set(_cifar10_profile_env "TT_FOIL_PROFILE_KERNEL=${TT_FOIL_PROFILE_KERNEL_BITMASK}")
+endif()
+add_custom_command(
+    OUTPUT "${_cifar10_kernels_stamp}"
+    COMMAND ${CMAKE_COMMAND} -E env
+        TT_METAL_ROOT=${TT_METAL_ROOT}
+        ${_cifar10_profile_env}
+        bash ${CMAKE_SOURCE_DIR}/models/cifar10_resnet20/build_kernels.sh
+    COMMAND ${CMAKE_COMMAND} -E touch "${_cifar10_kernels_stamp}"
+    DEPENDS
+        tt_foil_firmware
+        ${CMAKE_SOURCE_DIR}/models/cifar10_resnet20/build_kernels.sh
+    COMMENT "Building cifar10_resnet20 prebuilt kernels"
+    VERBATIM
+)
+add_custom_target(cifar10_kernels DEPENDS "${_cifar10_kernels_stamp}")
+add_dependencies(test_cifar10_resnet20 cifar10_kernels)
+
 add_test(NAME test_cifar10_resnet20 COMMAND test_cifar10_resnet20)
 set_tests_properties(test_cifar10_resnet20 PROPERTIES
     ENVIRONMENT "TT_FOIL_KERNEL_DIR=${MO}/cifar10_resnet20/prebuilt;TT_FOIL_DATA_DIR=${CMAKE_SOURCE_DIR}/data/cifar10_resnet20;TT_FOIL_DEVICE=${TT_FOIL_DEVICE}")
