@@ -121,6 +121,15 @@ endif()
 if(TT_FOIL_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+
+    # Model-specific integration tests (Qwen3-VL-2B, etc.) live under models/
+    # and need exported weights/fixtures not in the repo. Off by default so
+    # the runtime regression sweep (`ctest`) stays green on a fresh checkout.
+    # Enable with -DTT_FOIL_MODEL_TESTS=ON and run via `ctest -L model`.
+    option(TT_FOIL_MODEL_TESTS "Build model-specific integration tests" OFF)
+    if(TT_FOIL_MODEL_TESTS)
+        add_subdirectory(models)
+    endif()
 endif()
 
 if(TT_FOIL_BUILD_EXAMPLES)

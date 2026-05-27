@@ -234,15 +234,47 @@ Optional Tracy-based profiling for Performance + Memory Reports:
 test, so HW integration tests run end-to-end through `ctest`:
 
 ```bash
-tt-smi -r 3                    # one-shot, ensures clean chip state
-ctest --test-dir build         # all tests, serialised on chip
-ctest --test-dir build -L unit # host-only unit tests
-ctest --test-dir build -L hw   # Blackhole integration tests
+tt-smi -r 3                       # one-shot, ensures clean chip state
+ctest --test-dir build            # runtime regression sweep (default)
+ctest --test-dir build -L unit    # host-only unit tests
+ctest --test-dir build -L hw      # Blackhole integration tests
+ctest --test-dir build -LE model  # everything except model tests
 ```
+
+The default `ctest` invocation is the **runtime regression sweep** —
+it must stay 100% green. It covers core runtime, examples, ops, and
+op_lib integration tests. Model-specific integration tests live under
+`models/` and are opt-in (see below) because they need exported model
+weights/fixtures that aren't in the repo.
 
 HW tests share `RESOURCE_LOCK chip` so they never run concurrently
 within a ctest invocation. `TT_FOIL_DEVICE` falls back to the env var
 if unset on the CMake line, and to `0` otherwise.
+
+### Running model integration tests
+
+Model-specific tests (Qwen3-VL-2B, etc.) live in
+`models/<model>/tests/` and are gated by the `TT_FOIL_MODEL_TESTS`
+CMake option. They depend on real-weight binaries produced by the
+per-model export script (e.g. `scripts/qwen3_export_weights.sh`),
+which aren't in the repo:
+
+```bash
+# 1. Export weights (one-time, ~5 min, needs HF cache)
+scripts/qwen3_export_weights.sh
+
+# 2. Re-configure with model tests enabled
+cmake -B build -DTT_FOIL_HW_TESTS=ON -DTT_FOIL_MODEL_TESTS=ON
+cmake --build build -j$(nproc)
+
+# 3. Run just the model tests (label "model")
+tt-smi -r 3
+ctest --test-dir build -L model
+```
+
+Without `-DTT_FOIL_MODEL_TESTS=ON`, the model tests aren't even
+built, so a fresh checkout's runtime regression stays green on
+machines that haven't materialised the weights.
 
 ### Runtime env vars
 

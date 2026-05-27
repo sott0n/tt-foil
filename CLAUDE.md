@@ -340,12 +340,33 @@ Then run tests via ctest (preferred — `TT_FOIL_KERNEL_DIR` is wired per
 test by the CMake test-helper functions, no manual env juggling):
 
 ```bash
-tt-smi -r 0                        # one-shot, ensures clean chip state
-ctest --test-dir build             # all tests, serialised on chip
-ctest --test-dir build -L unit     # only host-side unit tests
-ctest --test-dir build -L hw       # only Blackhole integration tests
-ctest --test-dir build -R matmul   # by name regex
+tt-smi -r 0                          # one-shot, ensures clean chip state
+ctest --test-dir build               # runtime regression sweep (default, must be 100% green)
+ctest --test-dir build -L unit       # only host-side unit tests
+ctest --test-dir build -L hw         # only Blackhole integration tests
+ctest --test-dir build -R matmul     # by name regex
 ```
+
+Default `ctest` is the **runtime regression sweep** — every test
+under `tests/` must pass. Model-specific integration tests (Qwen3-VL,
+etc.) live under `models/<model>/tests/` and are NOT part of the
+default sweep — they need exported weight fixtures and are opt-in
+via `-DTT_FOIL_MODEL_TESTS=ON`. To run them:
+
+```bash
+scripts/qwen3_export_weights.sh       # one-time, materialises data/qwen3_vl_2b/
+cmake -B build -DTT_FOIL_HW_TESTS=ON -DTT_FOIL_MODEL_TESTS=ON
+cmake --build build -j$(nproc)
+ctest --test-dir build -L model       # only model tests
+```
+
+When adding a new test:
+- Runtime / op / example coverage → goes in `tests/`, registered with
+  `tt_foil_hw_test()` or `tt_foil_unit_test()`. Part of the default
+  ctest sweep, must always pass.
+- Model-specific integration (needs exported weights / per-model
+  fixtures) → goes in `models/<model>/tests/`, registered there with
+  `LABELS "model;hw"`.
 
 All HW tests share `RESOURCE_LOCK chip` so they never run in parallel
 within one ctest invocation. If a kernel crashes the chip, `ctest`

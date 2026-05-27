@@ -38,7 +38,9 @@ endfunction()
 # ---------------------------------------------------------------------------
 function(tt_foil_hw_test name src kernel_dir)
     add_executable(${name} ${src})
-    target_include_directories(${name} PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_include_directories(${name} PRIVATE
+        "${CMAKE_SOURCE_DIR}/src"
+        "${CMAKE_SOURCE_DIR}/tests")
     target_link_libraries(${name} PRIVATE TT::Foil tt_foil_llrt)
     if(ARGN)
         target_compile_definitions(${name} PRIVATE ${ARGN})
@@ -107,7 +109,7 @@ function(tt_foil_hw_test name src kernel_dir)
     # set each property in its own call so list-ish values don't get
     # split into argument-count errors.
     set_tests_properties(${name} PROPERTIES
-        ENVIRONMENT "TT_FOIL_KERNEL_DIR=${kernel_dir};TT_FOIL_DEVICE=${TT_FOIL_DEVICE}")
+        ENVIRONMENT "TT_FOIL_KERNEL_DIR=${kernel_dir};TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_OPS_DIR=${CMAKE_SOURCE_DIR}/ops")
     set_tests_properties(${name} PROPERTIES RESOURCE_LOCK chip)
     set_tests_properties(${name} PROPERTIES LABELS "hw")
     set_tests_properties(${name} PROPERTIES TIMEOUT 90)
@@ -309,71 +311,9 @@ tt_foil_hw_test(test_transformer_block test_transformer_block.cpp "${OPS}")
 set_tests_properties(test_transformer_block PROPERTIES
     ENVIRONMENT "TT_FOIL_OPS_DIR=${OPS};TT_FOIL_DEVICE=${TT_FOIL_DEVICE}")
 set_tests_properties(test_transformer_block PROPERTIES TIMEOUT 180)
-# Real-weights smoke test: Qwen3-0.6B layer-0 MLP half.
-# Needs data/qwen3_06b/layer0/ populated by models/qwen3_vl_2b/export_qwen3_layer.py +
-# models/qwen3_vl_2b/golden/qwen3_mlp_golden.py.
-tt_foil_hw_test(test_qwen3_mlp test_qwen3_mlp.cpp "${OPS}")
-set_tests_properties(test_qwen3_mlp PROPERTIES
-    ENVIRONMENT "TT_FOIL_OPS_DIR=${OPS};TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_QWEN3_DATA=${CMAKE_SOURCE_DIR}/data/qwen3_06b/layer0")
-set_tests_properties(test_qwen3_mlp PROPERTIES TIMEOUT 300)
-# Real-weights attention test: Qwen3-VL-2B layer-0 attention block.
-# Needs data/qwen3_vl_2b/layer0/ populated by models/qwen3_vl_2b/export_qwen3_layer.py +
-# models/qwen3_vl_2b/golden/qwen3_attn_golden.py.
-tt_foil_hw_test(test_qwen3_attn test_qwen3_attn.cpp "${OPS}")
-set_tests_properties(test_qwen3_attn PROPERTIES
-    ENVIRONMENT "TT_FOIL_OPS_DIR=${OPS};TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_QWEN3_DATA=${CMAKE_SOURCE_DIR}/data/qwen3_vl_2b/layer0")
-set_tests_properties(test_qwen3_attn PROPERTIES TIMEOUT 600)
-# Real-weights full-layer test: Qwen3-VL-2B layer-0 attention + MLP + 2 residuals.
-# Needs data/qwen3_vl_2b/layer0/ populated by models/qwen3_vl_2b/export_qwen3_layer.py +
-# models/qwen3_vl_2b/golden/qwen3_layer_golden.py.
-tt_foil_hw_test(test_qwen3_layer test_qwen3_layer.cpp "${OPS}")
-set_tests_properties(test_qwen3_layer PROPERTIES
-    ENVIRONMENT "TT_FOIL_OPS_DIR=${OPS};TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_QWEN3_DATA=${CMAKE_SOURCE_DIR}/data/qwen3_vl_2b/layer0")
-set_tests_properties(test_qwen3_layer PROPERTIES TIMEOUT 900)
-# Multi-layer chain: stacks N full layers (default 3). Needs
-# data/qwen3_vl_2b/{layer0..layer<N-1>}/ + chain<N>/ from
-# models/qwen3_vl_2b/golden/qwen3_multilayer_golden.py.
-_tt_default(CHAIN_NUM_LAYERS 3)
-tt_foil_hw_test(test_qwen3_multilayer test_qwen3_multilayer.cpp "${OPS}"
-    "CHAIN_NUM_LAYERS=${CHAIN_NUM_LAYERS}")
-set_tests_properties(test_qwen3_multilayer PROPERTIES
-    ENVIRONMENT "TT_FOIL_OPS_DIR=${OPS};TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_QWEN3_DATA=${CMAKE_SOURCE_DIR}/data/qwen3_vl_2b")
-set_tests_properties(test_qwen3_multilayer PROPERTIES TIMEOUT 1800)
-# Real-weights embedding lookup test on Qwen3-VL-2B.
-# Needs data/qwen3_vl_2b/model/embed_tokens.bin from
-# models/qwen3_vl_2b/export_qwen3_layer.py --model-tensors.
-tt_foil_hw_test(test_qwen3_embed test_qwen3_embed.cpp "${OPS}/embedding/prebuilt")
-set_tests_properties(test_qwen3_embed PROPERTIES
-    ENVIRONMENT "TT_FOIL_KERNEL_DIR=${OPS}/embedding/prebuilt;TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_QWEN3_DATA=${CMAKE_SOURCE_DIR}/data/qwen3_vl_2b")
-set_tests_properties(test_qwen3_embed PROPERTIES TIMEOUT 120)
-# lm_head matmul on real (tied) embed weights. Needs the pre-tiled
-# lm_head_tiled.bin + hidden / golden binaries from
-# models/qwen3_vl_2b/golden/qwen3_lm_head_golden.py. Nt=4748 is much larger than any other
-# matmul in tt-foil so the timeout is generous.
-tt_foil_hw_test(test_qwen3_lm_head test_qwen3_lm_head.cpp "${OPS}/matmul/prebuilt")
-set_tests_properties(test_qwen3_lm_head PROPERTIES
-    ENVIRONMENT "TT_FOIL_KERNEL_DIR=${OPS}/matmul/prebuilt;TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_QWEN3_DATA=${CMAKE_SOURCE_DIR}/data/qwen3_vl_2b")
-set_tests_properties(test_qwen3_lm_head PROPERTIES TIMEOUT 1800)
-# Full prefill forward pass: embed → N layers → final norm → lm_head → argmax.
-# Default INF_NUM_LAYERS=3 (matches data/qwen3_vl_2b/chain3/ produced by
-# models/qwen3_vl_2b/golden/qwen3_inference_golden.py).
-_tt_default(INF_NUM_LAYERS 3)
-tt_foil_hw_test(test_qwen3_inference test_qwen3_inference.cpp "${OPS}"
-    "INF_NUM_LAYERS=${INF_NUM_LAYERS}")
-set_tests_properties(test_qwen3_inference PROPERTIES
-    ENVIRONMENT "TT_FOIL_OPS_DIR=${OPS};TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_QWEN3_DATA=${CMAKE_SOURCE_DIR}/data/qwen3_vl_2b")
-set_tests_properties(test_qwen3_inference PROPERTIES TIMEOUT 3600)
-
-# Prefill + 1-step decode w/ KV cache. Default DEC_NUM_LAYERS=3
-# (matches chain3/, produced by models/qwen3_vl_2b/golden/qwen3_inference_golden.py which
-# now also emits decode_input.bin / decode_top1.bin / decode_cos.bin /
-# decode_sin.bin alongside the prefill golden).
-_tt_default(DEC_NUM_LAYERS 3)
-tt_foil_hw_test(test_qwen3_decode test_qwen3_decode.cpp "${OPS}"
-    "DEC_NUM_LAYERS=${DEC_NUM_LAYERS}")
-set_tests_properties(test_qwen3_decode PROPERTIES
-    ENVIRONMENT "TT_FOIL_OPS_DIR=${OPS};TT_FOIL_DEVICE=${TT_FOIL_DEVICE};TT_FOIL_QWEN3_DATA=${CMAKE_SOURCE_DIR}/data/qwen3_vl_2b")
-set_tests_properties(test_qwen3_decode PROPERTIES TIMEOUT 3600)
+# Model-specific integration tests (Qwen3-VL-2B, etc.) live under models/
+# and are opt-in via -DTT_FOIL_MODEL_TESTS=ON because they need exported
+# weights/fixtures that aren't in the repo.
 
 # ---- v10.2: CIFAR-10 ResNet-20 end-to-end inference ----
 # Reads pretrained weights + sample image + golden logits from

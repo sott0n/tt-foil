@@ -146,3 +146,31 @@ Key ops (all under `ops/`): `embedding`, `rmsnorm`, `rmsnorm_rope`,
 | `TT_FOIL_DEVICE` | no (default 0) | PCIe chip index |
 | `TT_FOIL_FAST_DISPATCH` | no | `1` to enable on-chip dispatcher (R5). Recommended for perf. |
 | `TT_FOIL_FIRMWARE_DIR` | no | Override firmware path; auto-resolves to `build/firmware/` otherwise |
+
+## Integration tests
+
+Per-layer / multi-layer / full-inference tests live under
+[`tests/`](tests/) and are opt-in via the `TT_FOIL_MODEL_TESTS` CMake
+option (they aren't part of the default `ctest` runtime regression
+because they need the exported fixtures above).
+
+```bash
+# After steps 2 & 3 above (ops built, weights exported):
+cmake -B build -DTT_FOIL_HW_TESTS=ON -DTT_FOIL_MODEL_TESTS=ON
+cmake --build build -j$(nproc)
+
+tt-smi -r 0
+ctest --test-dir build -L model        # all qwen3 tests
+ctest --test-dir build -R test_qwen3_layer   # one specific test
+```
+
+| Test | Fixture root | What it covers |
+|------|--------------|----------------|
+| `test_qwen3_mlp` | `data/qwen3_06b/layer0/` | Qwen3-0.6B MLP smoke |
+| `test_qwen3_attn` | `data/qwen3_vl_2b/layer0/` | Layer-0 attention block |
+| `test_qwen3_layer` | `data/qwen3_vl_2b/layer0/` | Layer-0 attn + MLP + residuals |
+| `test_qwen3_multilayer` | `data/qwen3_vl_2b/{layer0..N-1, chainN}/` | N-layer chain (default N=3) |
+| `test_qwen3_embed` | `data/qwen3_vl_2b/model/` | Embedding lookup |
+| `test_qwen3_lm_head` | `data/qwen3_vl_2b/model/` | lm_head matmul (Nt=4748) |
+| `test_qwen3_inference` | `data/qwen3_vl_2b/chain3/` | Full prefill forward |
+| `test_qwen3_decode` | `data/qwen3_vl_2b/chain3/` | Prefill + 1-step decode w/ KV cache |
