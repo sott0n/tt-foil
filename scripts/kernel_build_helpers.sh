@@ -81,3 +81,85 @@ stamp_kernel_build() {
     local prebuilt="$1"
     echo "profile=${TT_FOIL_PROFILE_KERNEL:-}" > "$prebuilt/.build_stamp"
 }
+
+# write_kernel_manifest PREBUILT FW_DIR SRC_DIR [extra_files...]
+#   PREBUILT       directory the ELFs (and the manifest) live in
+#   FW_DIR         firmware directory containing <risc>/<risc>_weakened.elf
+#   SRC_DIR        directory containing kernel .cpp/.h/.hpp sources
+#   extra_files... additional source files to hash (e.g. the build script)
+#
+# Writes PREBUILT/manifest.txt in a flat key=value format:
+#     version=1
+#     built_at=<iso8601>
+#     git_sha=<short>
+#     git_dirty=0|1
+#     firmware_dir=<abs path>
+#     fw:<basename>=<sha256_hex>
+#     src:<relpath>=<sha256_hex>
+#     elf:<basename>=<sha256_hex>
+#     env:TT_FOIL_PROFILE_KERNEL=<value>
+#
+# Read by src/kernel_manifest.cpp at kernel_load time to detect ELFs
+# whose firmware reference or source no longer matches the chip's current
+# firmware / repo state — preventing the "ELF linked against old
+# firmware -> cb_reserve_back hang" class of bug.
+write_kernel_manifest() {
+    local prebuilt="$1"
+    local fw_dir="$2"
+    local src_dir="$3"
+    shift 3
+    local extra=("$@")
+
+    local manifest="$prebuilt/manifest.txt"
+    local repo_root
+    repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+    {
+        echo "version=1"
+        echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        if git -C "$repo_root" rev-parse --short HEAD >/dev/null 2>&1; then
+            echo "git_sha=$(git -C "$repo_root" rev-parse --short HEAD)"
+            if [[ -n "$(git -C "$repo_root" status --porcelain 2>/dev/null)" ]]; then
+                echo "git_dirty=1"
+            else
+                echo "git_dirty=0"
+            fi
+        fi
+        echo "firmware_dir=$fw_dir"
+
+        # Firmware weakened ELFs (only the ones that exist — TRISCs may
+        # not be present for BRISC/NCRISC-only kernels).
+        for risc in brisc ncrisc trisc0 trisc1 trisc2; do
+            local fwelf="$fw_dir/$risc/${risc}_weakened.elf"
+            if [[ -e "$fwelf" ]]; then
+                echo "fw:${risc}_weakened.elf=$(sha256sum "$fwelf" | awk '{print $1}')"
+            fi
+        done
+
+        # Kernel sources.
+        if [[ -d "$src_dir" ]]; then
+            for src in "$src_dir"/*.cpp "$src_dir"/*.cc "$src_dir"/*.h "$src_dir"/*.hpp; do
+                [[ -e "$src" ]] || continue
+                local rel
+                rel="$(realpath --relative-to="$prebuilt" "$src")"
+                echo "src:${rel}=$(sha256sum "$src" | awk '{print $1}')"
+            done
+        fi
+
+        # Extra files (typically the build script itself).
+        for f in "${extra[@]}"; do
+            [[ -e "$f" ]] || continue
+            local rel
+            rel="$(realpath --relative-to="$prebuilt" "$f")"
+            echo "src:${rel}=$(sha256sum "$f" | awk '{print $1}')"
+        done
+
+        # Output ELFs.
+        for elf in "$prebuilt"/*.elf; do
+            [[ -e "$elf" ]] || continue
+            echo "elf:$(basename "$elf")=$(sha256sum "$elf" | awk '{print $1}')"
+        done
+
+        echo "env:TT_FOIL_PROFILE_KERNEL=${TT_FOIL_PROFILE_KERNEL:-}"
+    } > "$manifest"
+}
