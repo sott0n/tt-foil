@@ -183,6 +183,11 @@ tt_foil_hw_test(test_multi_kernel     test_multi_kernel.cpp     "${EX}/add_two_n
 tt_foil_hw_test(test_noc_passthrough  test_noc_passthrough.cpp  "${EX}/noc_passthrough/prebuilt")
 tt_foil_hw_test(test_cb_config        test_cb_config.cpp        "${EX}/add_two_numbers/prebuilt")
 tt_foil_hw_test(test_tile_copy        test_tile_copy.cpp        "${EX}/tile_copy/prebuilt")
+# eltwise_sfpu: first end-to-end test of a tt-metal kernel running
+# unchanged on tt-foil. Reader/writer use the modern TensorAccessor /
+# experimental::Noc API which depends on the populated DRAM bank
+# table from src/bank_tables_init.cpp.
+tt_foil_hw_test(test_eltwise_sfpu     test_eltwise_sfpu.cpp     "${EX}/eltwise_sfpu/prebuilt")
 
 # ---- v5: matmul + ReLU + add + bias ----
 tt_foil_hw_test(test_matmul_1tile     test_matmul_1tile.cpp     "${EX}/matmul_1tile/prebuilt")
