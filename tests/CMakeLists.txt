@@ -72,6 +72,17 @@ function(tt_foil_hw_test name src kernel_dir)
         # one test would otherwise collide with another's link). The
         # default in build_kernels.sh is /tmp/tt_foil_build.
         set(_kbuild "${CMAKE_BINARY_DIR}/kernel_obj/${name}")
+        # Source-level DEPENDS: glob the kernels/ subdir so touching a
+        # kernel .cpp triggers a ctest rebuild. Previously only the build
+        # script + firmware were dep-tracked, so a stale ELF could be
+        # picked up after editing a kernel source. CONFIGURE_DEPENDS makes
+        # cmake notice new files added to kernels/ without a manual reconfigure.
+        file(GLOB _kernel_srcs CONFIGURE_DEPENDS
+            "${_kd_parent}/kernels/*.cpp"
+            "${_kd_parent}/kernels/*.cc"
+            "${_kd_parent}/kernels/*.h"
+            "${_kd_parent}/kernels/*.hpp"
+        )
         add_custom_command(
             OUTPUT "${_stamp}"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/kernel_stamps"
@@ -83,7 +94,7 @@ function(tt_foil_hw_test name src kernel_dir)
                 ${_extra_env}
                 bash "${_build_script}"
             COMMAND ${CMAKE_COMMAND} -E touch "${_stamp}"
-            DEPENDS tt_foil_firmware "${_build_script}"
+            DEPENDS tt_foil_firmware "${_build_script}" ${_kernel_srcs}
             COMMENT "Auto-building kernels for ${name}"
             VERBATIM
         )
