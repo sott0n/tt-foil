@@ -3,6 +3,7 @@
 
 #include "kernel.hpp"
 #include "device.hpp"
+#include "kernel_manifest.hpp"
 #include "profiling.hpp"
 
 #include <filesystem>
@@ -40,6 +41,10 @@ Kernel* kernel_load(
     if (binaries.empty()) {
         throw std::runtime_error("tt-foil: no binaries provided to load_kernel");
     }
+
+    // Stale-ELF guard. No-op unless TT_FOIL_VERIFY_MANIFEST=1; cached per
+    // kernel dir so repeat loads are O(1). See src/kernel_manifest.cpp.
+    check_kernel_manifest(binaries, dev.firmware);
 
     auto* kernel       = new Kernel{};
     kernel->core       = logical_core;

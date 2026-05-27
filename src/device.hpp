@@ -14,6 +14,8 @@
 #include <umd/device/types/xy_pair.hpp>
 #include <umd/device/types/core_coordinates.hpp>
 
+#include "firmware_paths.hpp"
+
 // Forward declarations — complete types provided in device.cpp
 namespace tt {
 namespace umd {
@@ -79,6 +81,11 @@ struct Device {
     // Cached at device_open so write_dram/read_dram don't need tt::Cluster.
     tt::umd::CoreCoord          dram0_core{};
     uint64_t                    dram0_offset{0};
+
+    // Firmware ELF paths resolved at device_open. Cached so the runtime
+    // manifest check in kernel_load() can compare kernel ELFs against the
+    // firmware they were linked against. See src/kernel_manifest.cpp.
+    FirmwarePaths               firmware{};
 
     // Per-core L1 bump allocators, keyed by (x,y)
     std::unordered_map<uint64_t, L1Allocator> l1_allocs;

@@ -36,11 +36,15 @@ set(TT_FOIL_PROFILE_KERNEL_BITMASK "9" CACHE STRING
 # Pull in tt-metal submodule components (UMD, HAL, llrt subset)
 include(cmake/tt_metal_deps.cmake)
 
+# Helper for registering kernel-ELF build steps as CMake dependencies.
+include(cmake/tt_foil_kernels.cmake)
+
 # ---- tt_foil library ----
 add_library(tt_foil STATIC
     src/device.cpp
     src/buffer.cpp
     src/kernel.cpp
+    src/kernel_manifest.cpp
     src/dispatch.cpp
     src/firmware_paths.cpp
     src/firmware_load.cpp

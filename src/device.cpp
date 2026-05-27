@@ -220,6 +220,7 @@ std::unique_ptr<Device> device_open(
             if (const char* p = std::getenv("TT_METAL_RUNTIME_ROOT")) return p;
             return "/home/kyamaguchi/tt-metal";
         }());
+    dev->firmware = fw;
 
     // Park every Tensix RISC on this chip in soft-reset before we touch L1.
     //
