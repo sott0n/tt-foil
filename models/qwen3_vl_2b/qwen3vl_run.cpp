@@ -206,22 +206,6 @@ std::vector<uint16_t> gamma_to_tiles(const std::vector<uint16_t>& g, uint32_t D)
     return tile2d(rm, kTileH, D);
 }
 
-// Convert block-major KT tiles to slot-major for KV cache write.
-// tile2d(KT_rm, kTotalNk, kS) produces tiles indexed [block * kSt + slot].
-// gqa_decode / kv_append expect [slot * kNkDt + block] (slot-major).
-std::vector<uint16_t> kt_to_slot_major(
-        const std::vector<uint16_t>& block_major,
-        uint32_t kNkDt_val, uint32_t kSt_val) {
-    std::vector<uint16_t> slot_major(static_cast<size_t>(kNkDt_val) * kSt_val * kTileWords);
-    for (uint32_t c = 0; c < kNkDt_val; ++c)
-        for (uint32_t s = 0; s < kSt_val; ++s)
-            std::copy(
-                block_major.begin() + static_cast<size_t>(c * kSt_val + s) * kTileWords,
-                block_major.begin() + static_cast<size_t>(c * kSt_val + s + 1) * kTileWords,
-                slot_major.begin()  + static_cast<size_t>(s * kNkDt_val + c) * kTileWords);
-    return slot_major;
-}
-
 // ---------------------------------------------------------------------------
 // Layer weights
 // ---------------------------------------------------------------------------
@@ -356,7 +340,6 @@ int main(int argc, char** argv) try {
                                  std::to_string(kS));
     const uint32_t kSt         = kS / kTileH;
     const uint32_t kStKvDec    = kSt + kDecodeSlots;  // prefill + extra decode slots
-    const uint32_t kTotalNk    = kNumKv * kDt * kTileW;  // = kNumKv * kHeadDim = 1024
 
     if (kNumDecode > kDecodeSlots * kTileH)
         throw std::runtime_error("num_decode > decode capacity (" +
@@ -503,6 +486,7 @@ int main(int argc, char** argv) try {
     const tt::foil::CoreCoord kPreTransposeCore {2, 5};
     const tt::foil::CoreCoord kPreGqaCore       {2, 6};
     const tt::foil::CoreCoord kPreAddCore       {2, 7};
+    const tt::foil::CoreCoord kPreKvSnapCore    {1, 6};
     boot_cores.push_back(kPreRmsCore);
     boot_cores.push_back(kPreRopeQCore);
     boot_cores.push_back(kPreRopeKCore);
@@ -511,6 +495,7 @@ int main(int argc, char** argv) try {
     boot_cores.push_back(kPreTransposeCore);
     boot_cores.push_back(kPreGqaCore);
     boot_cores.push_back(kPreAddCore);
+    boot_cores.push_back(kPreKvSnapCore);
 
     auto dev = tt::foil::open_device(pcie_index, "", boot_cores);
     tt::foil::CoreCoord core{0, 0};
@@ -616,10 +601,9 @@ int main(int argc, char** argv) try {
         T_Kt_cache[li] = ol::allocate_tensor_dram(*dev, kStKvDec * kNkDt);  // slot-major [StKv, Nk]
         T_V_cache[li]  = ol::allocate_tensor_dram(*dev, kStKvDec * kNkDt);  // slot-major [StKv, Nk]
     }
-    // Zero out the decode slots (gqa_decode masks after exp(), garbage → NaN).
-    const std::size_t kPrefillBytes = static_cast<std::size_t>(kSt) * kNkDt * kTileBytes;
-    const std::size_t kDecodeBytes  = static_cast<std::size_t>(kDecodeSlots) * kNkDt * kTileBytes;
-    // (Prefill slots will be overwritten during the prefill snapshot loop.)
+    // gqa_decode masks decode slots after exp() so garbage rows in K^T / V
+    // would become NaN; pre:kv_snapshot writes prefill slots AND zeros the
+    // decode slots in one dispatch per layer.
 
     // -----------------------------------------------------------------------
     // Dispatch helpers.
@@ -761,51 +745,16 @@ int main(int argc, char** argv) try {
             return ol::make_transpose_2d(*dev, T_Kr_pre, T_Kt_pre, kSt, kNkDt, kPreTransposeCore);
         });
 
-        // KV cache snapshot — convert KT from block-major to slot-major.
-        {
-            TIMED("pre:kv_cache_snapshot(host)");
-            const size_t Kr_bytes = static_cast<size_t>(kSt) * kNkDt * kTileBytes;
-            const size_t V_bytes  = static_cast<size_t>(kSt) * kNkDt * kTileBytes;
-            std::vector<uint16_t> Kr_tiles(Kr_bytes / 2);
-            std::vector<uint16_t> V_tiles (V_bytes  / 2);
-            tt::foil::read_buffer(*dev, *T_Kr_pre.buf, Kr_tiles.data(), Kr_bytes);
-            tt::foil::read_buffer(*dev, *T_V_pre.buf,  V_tiles.data(),  V_bytes);
-
-            // Kr_tiles: tile2d(Kr_rm, kS, kTotalNk) = (kSt, kNkDt) block-major.
-            // For the KV cache we need slot-major (kSt, kNkDt) → (slot, block):
-            //   T_Kt_cache: [kStKvDec, kNkDt] — KT^T per-slot.
-            //     tile(slot, block) = slot * kNkDt + block
-            //   tile2d(Kr_rm, kS, kTotalNk) gives tiles[rt * kNkDt + ct]
-            //     where rt=slot, ct=block → already slot-major for V/K (rows=seq, cols=Nk). ✓
-            //   For KT, tile2d(KT_rm, kTotalNk, kS) = (kNkDt, kSt) gives tiles[c * kSt + s]
-            //     (block-major). Must convert to slot-major: tile[s * kNkDt + c].
-            auto Kr_rm  = untile2d(Kr_tiles, kS, kTotalNk);
-            auto V_rm   = untile2d(V_tiles,  kS, kTotalNk);
-
-            // Build KT (transpose of K): [kTotalNk, kS] row-major → tile2d → (kNkDt, kSt) block-major.
-            std::vector<uint16_t> KT_rm(static_cast<size_t>(kTotalNk) * kS, 0);
-            for (uint32_t r = 0; r < kS; ++r)
-                for (uint32_t c = 0; c < kTotalNk; ++c)
-                    KT_rm[c * kS + r] = Kr_rm[r * kTotalNk + c];
-            auto KT_block = tile2d(KT_rm, kTotalNk, kS);  // (kNkDt, kSt) block-major
-
-            // Convert to slot-major for the cache.
-            auto KT_slot = kt_to_slot_major(KT_block, kNkDt, kSt);
-
-            // V: tile2d(V_rm, kS, kTotalNk) = (kSt, kNkDt) — already slot-major. ✓
-            auto V_slot = tile2d(V_rm, kS, kTotalNk);
-
-            // Write prefill slots (offset 0) then zero the decode slots.
-            tt::foil::write_buffer(*dev, *T_Kt_cache[li].buf, 0,
-                                   KT_slot.data(), KT_slot.size() * 2);
-            tt::foil::write_buffer(*dev, *T_V_cache[li].buf,  0,
-                                   V_slot.data(),  V_slot.size()  * 2);
-            std::vector<uint16_t> dec_zeros(kDecodeBytes / 2, 0);
-            tt::foil::write_buffer(*dev, *T_Kt_cache[li].buf, kPrefillBytes,
-                                   dec_zeros.data(), kDecodeBytes);
-            tt::foil::write_buffer(*dev, *T_V_cache[li].buf,  kPrefillBytes,
-                                   dec_zeros.data(), kDecodeBytes);
-        }
+        // KV cache snapshot — re-position the prefill K^T (block-major from
+        // pre:transpose) and V (already slot-major) into the per-layer
+        // slot-major caches, then zero the decode slots. Done entirely on
+        // device (28 layers × 1 dispatch) replacing 28 layers × 8 small
+        // host PCIe transactions per layer.
+        run1_on("pre:kv_snapshot", kPreKvSnapCore, [&] {
+            return ol::make_kv_snapshot(*dev, T_Kt_pre, T_V_pre,
+                                        T_Kt_cache[li], T_V_cache[li],
+                                        kSt, kNkDt, kStKvDec, kPreKvSnapCore);
+        });
 
         // Fused GQA attention.
         run1_on("pre:gqa_fused", kPreGqaCore, [&] {

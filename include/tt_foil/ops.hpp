@@ -448,6 +448,31 @@ void set_kv_append_args(tt::foil::Device& dev, KvAppendOp& op,
 void execute(tt::foil::Device& dev, KvAppendOp& op);
 
 // =====================================================================
+// KvSnapshot — device-side prefill KV-cache snapshot (BRISC only).
+//   Replaces the host-side `pre:kv_cache_snapshot` step in qwen3vl_run:
+//   reads block-major K^T (output of pre:transpose) and slot-major V
+//   from L1-resident DRAM, writes both out in slot-major layout into
+//   the per-layer K^T / V caches, and zero-fills the decode slots.
+// =====================================================================
+struct KvSnapshotOp {
+    std::shared_ptr<tt::foil::Kernel> kernel;
+    std::shared_ptr<tt::foil::Buffer> l1_scratch;
+};
+KvSnapshotOp make_kv_snapshot(tt::foil::Device& dev,
+                              const TensorDesc& kt_pre,
+                              const TensorDesc& v_pre,
+                              const TensorDesc& kt_cache,
+                              const TensorDesc& v_cache,
+                              uint32_t kSt, uint32_t kNkDt, uint32_t kStKv,
+                              tt::foil::CoreCoord core = {},
+                              const std::string& kernel_dir = "");
+void set_kv_snapshot_args(tt::foil::Device& dev, KvSnapshotOp& op,
+                          const TensorDesc& kt_pre, const TensorDesc& v_pre,
+                          const TensorDesc& kt_cache, const TensorDesc& v_cache,
+                          uint32_t kSt, uint32_t kNkDt, uint32_t kStKv);
+void execute(tt::foil::Device& dev, KvSnapshotOp& op);
+
+// =====================================================================
 // RoPE (Rotary Position Embedding)
 //   Applies RoPE in-place to a packed multi-head Q or K buffer.
 //
