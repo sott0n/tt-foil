@@ -91,7 +91,7 @@ void prep_core(tt::umd::Cluster& driver, const Hal& hal, uint32_t chip,
     tt::foil::load_tensix_firmware(driver, hal, chip, core, tt::foil::firmware_elf(fw, FR::TRISC0), tt::foil::kTrisc0);
     tt::foil::load_tensix_firmware(driver, hal, chip, core, tt::foil::firmware_elf(fw, FR::TRISC1), tt::foil::kTrisc1);
     tt::foil::load_tensix_firmware(driver, hal, chip, core, tt::foil::firmware_elf(fw, FR::TRISC2), tt::foil::kTrisc2);
-    tt::foil::zero_fill_bank_tables(driver, hal, chip, core);
+    tt::foil::init_bank_tables(driver, hal, chip, core);
     tt::foil::init_tensix_core_info_minimal(driver, hal, chip, core, lx, ly);
     tt::foil::init_tensix_mailboxes(driver, hal, chip, core);
 }

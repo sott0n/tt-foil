@@ -1,25 +1,35 @@
 // SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
 // SPDX-License-Identifier: Apache-2.0
 //
-// Phase B2 (step 5): zero-fill the two bank-routing L1 scratch regions.
+// Boot-time initializer for the two L1 scratch regions that firmware
+// copies into local-memory bank/coord arrays at startup.
 //
 // At boot, BRISC and NCRISC firmware unconditionally copy
-//   - BANK_TO_NOC_SCRATCH        -> dram/l1_bank_to_noc_xy + offset maps
+//   - BANK_TO_NOC_SCRATCH        -> dram_bank_to_noc_xy[NUM_NOCS][NUM_DRAM_BANKS]
+//                                   l1_bank_to_noc_xy [NUM_NOCS][NUM_L1_BANKS]
+//                                   bank_to_dram_offset[NUM_DRAM_BANKS]
+//                                   bank_to_l1_offset [NUM_L1_BANKS]
 //   - LOGICAL_TO_VIRTUAL_SCRATCH -> worker_logical_{col,row}_to_virtual_*
-// via l1_to_local_mem_copy (see firmware_common.h::noc_bank_table_init and
-// noc_worker_logical_to_virtual_map_init, called from brisc.cc:360-361 /
-// ncrisc.cc:115-116).
+// via l1_to_local_mem_copy (see firmware_common.h::noc_bank_table_init
+// and noc_worker_logical_to_virtual_map_init).
 //
-// The copy targets are then consulted by *user kernels* via the dataflow_api
-// (interleaved buffer addressing, get_noc_addr_from_logical_xy, etc). For
-// tt-foil's slow-dispatch embedded use case kernels pass explicit L1
-// addresses through runtime args and never touch the bank/virtual maps, so
-// the contents don't matter for correctness — but we still have to write
-// *something*, otherwise firmware copies whatever garbage was in L1.
+// These arrays back the modern `TensorAccessor` / `experimental::Noc`
+// kernel API for DRAM-interleaved buffers, which resolves a page_id to
+// `dram_bank_to_noc_xy[noc][page_id % NUM_DRAM_BANKS]`. Zero-fill makes
+// every page resolve to NOC (0, 0), so kernels using that API silently
+// read from the wrong endpoint.
 //
-// Zero-fill is the simplest valid initialization. If a future kernel needs
-// interleaved buffer addressing, the corresponding writer needs to be
-// upgraded to mirror tt-metal's risc_firmware_initializer logic.
+// tt-foil's existing kernels still bypass this — they pack the full
+// NOC address host-side via `make_noc_dram_addr` and pass it through
+// RTA — so the previous zero-fill was correctness-safe for the
+// legacy path. The real DRAM table is purely additive: it unlocks
+// tt-metal's modern dataflow API for DRAM-interleaved reads while
+// leaving the legacy host-RTA path untouched.
+//
+// L1-interleaved buffers and `get_noc_addr_from_logical_xy()` are
+// still unused in tt-foil, so `l1_bank_to_noc_xy`,
+// `bank_to_{dram,l1}_offset`, and the logical-to-virtual scratch
+// remain zero. Wire them up the same way as DRAM when needed.
 
 #pragma once
 
@@ -37,10 +47,9 @@ class Hal;
 
 namespace tt::foil {
 
-// Zero-fill the two scratch regions on one Tensix core.
-//
-// Like the other boot-time writers, must be called while RISCs are in reset.
-void zero_fill_bank_tables(
+// Populate the two scratch regions on one Tensix core. Like the other
+// boot-time writers, must be called while RISCs are in reset.
+void init_bank_tables(
     tt::umd::Cluster& driver,
     const tt::tt_metal::Hal& hal,
     uint32_t chip_id,

@@ -285,7 +285,7 @@ std::unique_ptr<Device> device_open(
         load_tensix_firmware(*dev->umd_driver, *dev->hal, dev->chip_id, core, fw.trisc1, kTrisc1);
         load_tensix_firmware(*dev->umd_driver, *dev->hal, dev->chip_id, core, fw.trisc2, kTrisc2);
 
-        zero_fill_bank_tables        (*dev->umd_driver, *dev->hal, dev->chip_id, core);
+        init_bank_tables             (*dev->umd_driver, *dev->hal, dev->chip_id, core);
         init_tensix_core_info_minimal(*dev->umd_driver, *dev->hal, dev->chip_id, core, logical.x, logical.y);
         init_tensix_mailboxes        (*dev->umd_driver, *dev->hal, dev->chip_id, core);
 
