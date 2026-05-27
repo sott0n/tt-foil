@@ -33,6 +33,20 @@ endif()
 set(TT_FOIL_PROFILE_KERNEL_BITMASK "9" CACHE STRING
     "PROFILE_KERNEL bitmask when TT_FOIL_DEVICE_PROFILER=ON")
 
+# Minimize binary footprint for embedding/edge deployment.
+# Enables per-function/data sections + --gc-sections (propagated to downstream
+# executables), visibility=hidden, and LTO.  Pair with
+# -DCMAKE_BUILD_TYPE=MinSizeRel for -Os on top.
+# Incompatible with TT_FOIL_DEVICE_PROFILER (profiler hooks require default
+# visibility to be resolvable by Tracy at link time).
+option(TT_FOIL_MINIMIZE_SIZE
+    "Minimize binary footprint: gc-sections, visibility=hidden, LTO" OFF)
+if(TT_FOIL_MINIMIZE_SIZE AND TT_FOIL_DEVICE_PROFILER)
+    message(FATAL_ERROR
+        "TT_FOIL_MINIMIZE_SIZE and TT_FOIL_DEVICE_PROFILER cannot both be ON: "
+        "profiler zone hooks require default symbol visibility.")
+endif()
+
 # Pull in tt-metal submodule components (UMD, HAL, llrt subset)
 include(cmake/tt_metal_deps.cmake)
 
@@ -116,6 +130,30 @@ if(TT_FOIL_DEVICE_PROFILER)
     # kernel-side counterpart is PROFILE_KERNEL in the firmware/kernel
     # SFPI build (see scripts/build_firmware.sh).
     target_compile_definitions(tt_foil PRIVATE TT_FOIL_DEVICE_PROFILER_ENABLED=1)
+endif()
+
+if(TT_FOIL_MINIMIZE_SIZE)
+    include(CheckIPOSupported)
+    # Per-function/data sections on both the runtime lib and the HAL static lib.
+    # --gc-sections is propagated INTERFACE so every downstream executable
+    # (tests, examples, user apps) automatically dead-strips unused functions.
+    foreach(_tgt tt_foil tt_foil_hal_local)
+        target_compile_options(${_tgt} PRIVATE
+            -ffunction-sections
+            -fdata-sections
+            -fvisibility=hidden
+            -fvisibility-inlines-hidden
+        )
+    endforeach()
+    target_link_options(tt_foil INTERFACE -Wl,--gc-sections)
+    check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_err)
+    if(_ipo_ok)
+        set_target_properties(tt_foil tt_foil_hal_local
+            PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+    else()
+        message(WARNING "TT_FOIL_MINIMIZE_SIZE: LTO not available — ${_ipo_err}")
+    endif()
+    message(STATUS "tt-foil: TT_FOIL_MINIMIZE_SIZE=ON (gc-sections, visibility=hidden, LTO)")
 endif()
 
 if(TT_FOIL_BUILD_TESTS)

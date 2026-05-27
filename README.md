@@ -140,6 +140,47 @@ and `libfmt.so`.
 Source-line count: ~3.1K lines of own core runtime + ~2.4K lines op-lib
 + ~1.4K lines vendored from tt-metal (`tt_memory.cpp`, `tt_elffile.cpp`).
 
+### Size-minimized builds
+
+For embedding scenarios — edge deployment, container images, or applications that
+bundle multiple large binaries — enable the size-minimized build mode:
+
+```bash
+cmake -B build \
+  -DTT_FOIL_MINIMIZE_SIZE=ON \
+  -DCMAKE_BUILD_TYPE=MinSizeRel \
+  -DTT_FOIL_HW_TESTS=ON          # optional
+```
+
+`TT_FOIL_MINIMIZE_SIZE=ON` applies the following to `libtt_foil.a` and
+`libtt_foil_hal_local.a`, and propagates `--gc-sections` to every downstream
+executable that links `TT::Foil`:
+
+| Technique | What it does |
+| --------- | ------------ |
+| `-ffunction-sections` + `-fdata-sections` | One ELF section per function/variable |
+| `-Wl,--gc-sections` (propagated) | Linker discards every unreachable section |
+| `-fvisibility=hidden` + `-fvisibility-inlines-hidden` | Internal symbols hidden; aids GC, shrinks export table |
+| LTO (`INTERPROCEDURAL_OPTIMIZATION`) | Cross-TU dead code elimination and inlining (graceful fallback if unavailable) |
+
+`MinSizeRel` adds `-Os -DNDEBUG` on top for code-size-optimised codegen.
+
+**Hard floor:** `libtt-umd.so` (4.4 MB) is a runtime dynamic dependency and
+cannot be reduced from the tt-foil side. Strip the final binary to drop debug
+info (~3.5 MB unstripped → ~600 KB stripped):
+
+```bash
+strip --strip-unneeded build/my_app
+```
+
+**Incompatibility:** `TT_FOIL_MINIMIZE_SIZE` and `TT_FOIL_DEVICE_PROFILER`
+cannot both be ON — Tracy profiler zone hooks require default symbol visibility.
+CMake will error if both flags are set.
+
+**Build time:** LTO significantly increases link time on large translation units
+(especially the HAL sources). Expect a 2–4× longer link step vs. a standard
+Release build.
+
 ## Requirements
 
 - CMake 3.21+
