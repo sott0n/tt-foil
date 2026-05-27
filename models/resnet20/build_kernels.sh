@@ -99,3 +99,8 @@ ln -sfn "$HERE/../../examples/global_avg_pool/prebuilt" "$PREBUILT/global_avg_po
 echo
 echo "resnet20 prebuilt root: $PREBUILT"
 ls -la "$PREBUILT"
+
+# Stale-ELF guard: each child build_kernels.sh invoked above writes its
+# own prebuilt/<variant>/manifest.txt. This meta-script doesn't need a
+# top-level manifest since kernel_load() reads the per-variant directory
+# the caller passes in.

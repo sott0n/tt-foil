@@ -223,3 +223,9 @@ build_dataflow ncrisc 1 "$HERE/writer.cpp" writer.ncrisc
 
 
 build_compute "$HERE/compute.cpp" transpose_2d
+
+# Stale-ELF guard: record firmware + source sha256s for the runtime check.
+# See scripts/kernel_build_helpers.sh::write_kernel_manifest and
+# src/kernel_manifest.cpp (TT_FOIL_VERIFY_MANIFEST=1).
+bash "$HERE/../../scripts/write_manifest.sh" "$PREBUILT" \
+    "$TT_METAL_PRECOMPILED" "$HERE" "${BASH_SOURCE[0]}"

@@ -114,6 +114,49 @@ read_buffer(*dev, *l1_cb_buffer, l1_buf.data(), kTileBytes);
 // dump l1_buf[0..7] — if all zero, the host→DRAM or reader→L1 path failed
 ```
 
+### Stale-ELF guard (manifest mechanism)
+
+The "kernel ELF linked against an older firmware → cb_reserve_back hang"
+class of bug is now caught in two ways:
+
+1. **Build-time** — `cmake/tt_foil_kernels.cmake::tt_foil_add_kernels()` and
+   the auto-build path in `tests/CMakeLists.txt::tt_foil_hw_test()` register
+   kernel ELFs as proper CMake outputs with `DEPENDS` on the kernel
+   `.cpp/.cc/.h/.hpp` sources, the `build_kernels.sh` script,
+   `scripts/kernel_build_helpers.sh`, and the `tt_foil_firmware` target.
+   Touching any of those triggers a kernel rebuild on the next
+   `cmake --build`.
+
+2. **Runtime (off by default)** — every `build_kernels.sh` / `ops/*/build.sh`
+   ends with `bash scripts/write_manifest.sh ...`, which writes
+   `prebuilt/manifest.txt` recording sha256 of every firmware
+   `*_weakened.elf` linked against, every kernel source compiled, and every
+   output ELF. `src/kernel_manifest.cpp::check_kernel_manifest()` runs from
+   `kernel_load()` and verifies those hashes against the runtime-resolved
+   firmware tree + on-disk ELFs.
+   - Enable: `TT_FOIL_VERIFY_MANIFEST=1`
+   - Bypass (even with verify on): `TT_FOIL_SKIP_MANIFEST_CHECK=1`
+   - On mismatch: throws with manifest dir, firmware path, expected vs
+     actual hash, and a rebuild instruction.
+   - Manifest absent: warns once per dir and continues (migration path).
+
+Cost: ~0.4 ms per `kernel_load` uncached; firmware hashes cache
+per-process and per-manifest-dir verification is memoised, so repeat
+loads from the same dir are O(1).
+
+When adding a new example/op:
+- `build_kernels.sh` (or `build.sh`): append at the end, using
+  `$HERE/kernels` for the examples/ layout or `$HERE` for the ops/ flat
+  layout:
+  ```bash
+  bash "$HERE/../../scripts/write_manifest.sh" "$PREBUILT" \
+      "$TT_METAL_PRECOMPILED" "$HERE/kernels" "${BASH_SOURCE[0]}"
+  ```
+- For examples/ with a CMakeLists.txt, call `tt_foil_add_kernels(...)` to
+  register CMake deps (see `examples/add_two_numbers/CMakeLists.txt`). For
+  kernel-only examples, the dep wiring in `tt_foil_hw_test()` covers it
+  automatically.
+
 ### `CbConfig.fifo_size` must equal `num_pages * page_size`
 The CB ring buffer wraps at `fifo_size`. For a depth-N CB, passing
 `fifo_size = page_size` (one tile worth) instead of `N * page_size`

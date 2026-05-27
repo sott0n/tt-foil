@@ -282,3 +282,9 @@ EOF
 build_one brisc  0 "$HERE/kernels/reader.cpp" reader.brisc
 build_one ncrisc 1 "$HERE/kernels/writer.cpp" writer.ncrisc
 build_compute "$HERE/kernels/compute.cpp" compute
+
+# Stale-ELF guard: record firmware + source sha256s for the runtime check.
+# See scripts/kernel_build_helpers.sh::write_kernel_manifest and
+# src/kernel_manifest.cpp (TT_FOIL_VERIFY_MANIFEST=1).
+bash "$HERE/../../scripts/write_manifest.sh" "$PREBUILT" \
+    "$TT_METAL_PRECOMPILED" "$HERE/kernels" "${BASH_SOURCE[0]}"

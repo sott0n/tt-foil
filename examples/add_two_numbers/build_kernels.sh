@@ -131,3 +131,9 @@ build_one brisc  0 "$HERE/kernels/add_brisc.cpp"  add_brisc
 build_one ncrisc 1 "$HERE/kernels/add_ncrisc.cpp" add_ncrisc
 
 stamp_kernel_build "$PREBUILT"
+
+# Stale-ELF guard: record firmware + source sha256s for the runtime check.
+# See scripts/kernel_build_helpers.sh::write_kernel_manifest and
+# src/kernel_manifest.cpp (TT_FOIL_VERIFY_MANIFEST=1).
+bash "$HERE/../../scripts/write_manifest.sh" "$PREBUILT" \
+    "$TT_METAL_PRECOMPILED" "$HERE/kernels" "${BASH_SOURCE[0]}"
