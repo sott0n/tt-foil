@@ -857,29 +857,18 @@ int main(int argc, char** argv) try {
     });
     run_matmul_lmhead("pre:lm_head", T_normed_last, T_W_lm, T_logits, kStDec, kHt, kVt);
 
-    // Prefill argmax: the prediction point is the LAST sequence row
-    // (= row 31 within the last tile-row of T_normed), matching qwen3_run's
-    // `argmax_row(kS - 1)` semantics. argmax_row0 only reads row 0 of the
-    // tile, which would pick position (kSt-1)*32 — wrong by 31 rows.
-    // Read back T_logits (1 tile-row × kVt) and do host argmax on row 31.
+    // Prefill argmax: the prediction point is the LAST sequence row of
+    // T_logits, matching qwen3_run's `argmax_row(kS - 1)` semantics.
+    // lm_head ran with Mt=kStDec=1 (one tile-row), so the last sequence
+    // row is row 31 within the single output tile. Device argmax handles
+    // the row offset directly — replaces a 9.4 MB tile readback +
+    // host-side argmax over kV = 151,936 BF16 elements.
     uint32_t cur_token = 0;
-    {
-        TIMED("pre:logits_readback+argmax(host)");
-        std::vector<uint16_t> logits_tiles(static_cast<size_t>(kVt) * kTileWords);
-        tt::foil::read_buffer(*dev, *T_logits.buf, logits_tiles.data(),
-                              logits_tiles.size() * 2);
-        // Untile [1 tile-row × kVt tiles] → row-major [32 rows × kV cols].
-        auto logits_rm = untile2d(logits_tiles, kTileH, kVt * kTileW);
-        const uint32_t row = kTileH - 1;  // last row within the tile = sequence pos kS-1
-        float best = -1e30f;
-        uint32_t best_idx = 0;
-        for (uint32_t v = 0; v < kV; ++v) {
-            float lv = bf16_to_f32(
-                logits_rm[static_cast<size_t>(row) * (kVt * kTileW) + v]);
-            if (lv > best) { best = lv; best_idx = v; }
-        }
-        cur_token = best_idx;
-    }
+    run1("pre:argmax", [&] {
+        return ol::make_argmax_row0(*dev, T_logits, kVt, T_argmax, core,
+                                    /*kernel_dir=*/"", /*row_in_tile=*/kTileH - 1);
+    });
+    tt::foil::read_buffer(*dev, *T_argmax.buf, &cur_token, 4);
     std::fprintf(stderr, "  first generated token = %u\n", cur_token);
     std::printf("%u\n", cur_token);
     std::fflush(stdout);

@@ -1,23 +1,28 @@
 // SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
 // SPDX-License-Identifier: Apache-2.0
 //
-// BRISC reader for ArgmaxRow0. Scans row 0 of every column-tile of a
+// BRISC reader for ArgmaxRow0. Scans one row of every column-tile of a
 // BF16 tile-format buffer with shape [Mt=1, Vt], finds the index of the
 // maximum BF16 value, and stages a 4-byte uint32_t into cb_out (CB 16)
 // for NCRISC to drain to DRAM.
 //
-// Tile layout (32×32 BF16, 4 faces of 16×16): row 0 of the tile spans
-//   - face 0 row 0: bytes [0..31]    (cols 0..15)
-//   - face 1 row 0: bytes [512..543] (cols 16..31)
-// Faces 2/3 are rows 16..31; we ignore them for row-0 argmax.
+// Tile layout (32×32 BF16, 4 faces of 16×16, row-major within each face):
+//   - face 0: rows 0..15, cols 0..15  → base 0
+//   - face 1: rows 0..15, cols 16..31 → base 512
+//   - face 2: rows 16..31, cols 0..15 → base 1024
+//   - face 3: rows 16..31, cols 16..31→ base 1536
+// For tile-internal row r the two face bases are
+//   faceA = (r < 16 ? 0    : 1024),   faceB = (r < 16 ? 512  : 1536)
+// and the row offset within each face is (r % 16) * 32 bytes.
 //
 // We read the full 2048-byte tile per iteration (one NOC transaction) and
-// index into face0/face1's row 0 in L1. Simpler than two 32-byte reads
-// and avoids any per-read pipelining concerns.
+// index into the two face rows in L1. Simpler than two 32-byte reads and
+// avoids any per-read pipelining concerns.
 //
 // Runtime args:
 //   arg[0..1] = logits_dram NOC (lo, hi)
-//   arg[2]    = Vt   (number of column tiles)
+//   arg[2]    = Vt              (number of column tiles)
+//   arg[3]    = row_in_tile     (0..31; selects which row of the tile)
 
 #include <cstdint>
 #include "dataflow_api.h"
@@ -38,11 +43,18 @@ static inline bool bf16_gt(uint16_t a, uint16_t b) {
 void kernel_main() {
     const uint64_t logits_noc = join64(get_arg_val<uint32_t>(0),
                                        get_arg_val<uint32_t>(1));
-    const uint32_t Vt = get_arg_val<uint32_t>(2);
+    const uint32_t Vt          = get_arg_val<uint32_t>(2);
+    const uint32_t row_in_tile = get_arg_val<uint32_t>(3);
 
-    constexpr uint32_t cb_out         = 16;
-    constexpr uint32_t kTileBytes     = 2048;
-    constexpr uint32_t kFaceBytes     = 512;
+    constexpr uint32_t cb_out     = 16;
+    constexpr uint32_t kTileBytes = 2048;
+
+    // Face bases for the requested row.
+    const uint32_t faceA_base = (row_in_tile < 16) ? 0u    : 1024u;
+    const uint32_t faceB_base = (row_in_tile < 16) ? 512u  : 1536u;
+    const uint32_t row_off    = (row_in_tile & 15u) * 32u;
+    const uint32_t faceA_off  = faceA_base + row_off;
+    const uint32_t faceB_off  = faceB_base + row_off;
 
     // Reserve one page in cb_out. The page is sized to hold a full tile
     // (see make_argmax_row0). We reuse the first 4 bytes for the final
@@ -59,21 +71,19 @@ void kernel_main() {
                        l1_scratch, kTileBytes);
         noc_async_read_barrier();
 
-        // face 0 row 0 → first 16 BF16 of face0 region (offset 0)
-        // face 1 row 0 → first 16 BF16 of face1 region (offset kFaceBytes)
-        volatile uint16_t* face0 =
-            reinterpret_cast<volatile uint16_t*>(l1_scratch);
-        volatile uint16_t* face1 =
-            reinterpret_cast<volatile uint16_t*>(l1_scratch + kFaceBytes);
+        volatile uint16_t* faceA =
+            reinterpret_cast<volatile uint16_t*>(l1_scratch + faceA_off);
+        volatile uint16_t* faceB =
+            reinterpret_cast<volatile uint16_t*>(l1_scratch + faceB_off);
         for (uint32_t j = 0; j < 16; ++j) {
-            const uint16_t v = face0[j];
+            const uint16_t v = faceA[j];
             if (bf16_gt(v, best_val)) {
                 best_val = v;
                 best_idx = t * 32 + j;
             }
         }
         for (uint32_t j = 0; j < 16; ++j) {
-            const uint16_t v = face1[j];
+            const uint16_t v = faceB[j];
             if (bf16_gt(v, best_val)) {
                 best_val = v;
                 best_idx = t * 32 + 16 + j;

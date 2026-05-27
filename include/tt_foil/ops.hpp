@@ -407,15 +407,20 @@ struct ArgmaxRow0Op {
     std::shared_ptr<tt::foil::Kernel> kernel;
     std::shared_ptr<tt::foil::Buffer> l1_out;
 };
+// `row_in_tile` selects which row (0..31) of the [Mt=1, Vt] tile to scan.
+// Default 0 keeps the original behaviour; prefill uses 31 to pick the
+// last-position logits when the prediction point sits at the end of a tile.
 ArgmaxRow0Op make_argmax_row0(tt::foil::Device& dev,
                               const TensorDesc& logits,
                               uint32_t Vt,
                               TensorDesc& out,
                               tt::foil::CoreCoord core = {},
-                              const std::string& kernel_dir = "");
+                              const std::string& kernel_dir = "",
+                              uint32_t row_in_tile = 0);
 void set_argmax_row0_args(tt::foil::Device& dev, ArgmaxRow0Op& op,
                           const TensorDesc& logits, uint32_t Vt,
-                          const TensorDesc& out);
+                          const TensorDesc& out,
+                          uint32_t row_in_tile = 0);
 void execute(tt::foil::Device& dev, ArgmaxRow0Op& op);
 
 // =====================================================================

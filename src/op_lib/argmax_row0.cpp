@@ -26,11 +26,14 @@ ArgmaxRow0Op make_argmax_row0(tt::foil::Device& dev,
                               uint32_t Vt,
                               TensorDesc& out,
                               tt::foil::CoreCoord core,
-                              const std::string& kernel_dir) {
+                              const std::string& kernel_dir,
+                              uint32_t row_in_tile) {
     if (!logits.buf)
         throw std::runtime_error("op_lib::make_argmax_row0: logits.buf is null");
     if (Vt == 0)
         throw std::runtime_error("op_lib::make_argmax_row0: Vt must be > 0");
+    if (row_in_tile >= 32)
+        throw std::runtime_error("op_lib::make_argmax_row0: row_in_tile must be < 32");
 
     if (!out.buf) {
         out.buf = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::DRAM, 4);
@@ -57,21 +60,23 @@ ArgmaxRow0Op make_argmax_row0(tt::foil::Device& dev,
     }};
     tt::foil::register_cbs(dev, *op.kernel, cbs);
 
-    set_argmax_row0_args(dev, op, logits, Vt, out);
+    set_argmax_row0_args(dev, op, logits, Vt, out, row_in_tile);
     return op;
 }
 
 void set_argmax_row0_args(tt::foil::Device& dev, ArgmaxRow0Op& op,
                           const TensorDesc& logits, uint32_t Vt,
-                          const TensorDesc& out) {
+                          const TensorDesc& out,
+                          uint32_t row_in_tile) {
     using R = tt::foil::RiscBinary;
     const uint64_t src_noc = tt::foil::make_noc_dram_addr(dev, logits.buf->device_addr);
     const uint64_t dst_noc = tt::foil::make_noc_dram_addr(dev, out.buf->device_addr);
 
-    std::array<uint32_t, 3> ra_brisc = {
+    std::array<uint32_t, 4> ra_brisc = {
         static_cast<uint32_t>(src_noc),
         static_cast<uint32_t>(src_noc >> 32),
         Vt,
+        row_in_tile,
     };
     std::array<uint32_t, 2> ra_ncrisc = {
         static_cast<uint32_t>(dst_noc),
