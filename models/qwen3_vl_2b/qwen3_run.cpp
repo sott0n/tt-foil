@@ -365,29 +365,35 @@ int main(int argc, char** argv) try {
     // -----------------------------------------------------------------
     // Open device, upload static tensors.
     // -----------------------------------------------------------------
-    // Boot a 1×8 grid. Most matmul shapes in qwen3 are Mt=1 with modest
-    // Kt/Nt, where per-core dispatch overhead (sequential ELF NOC writes
-    // in dispatch_stage_setup) dominates over per-core compute. Adding
-    // cores beyond 4 strictly regresses those (see iter11 lesson in
-    // bench/HISTORY.md). lm_head is the exception — Nt=4748 with kVt
-    // tiles of compute amortizes the dispatch cost, so it benefits from
-    // 8-way sharding (113 → 64 ms/call on decode).
+    // Persistent matmul grids (matmul OpCache).
     //
-    // kMatmulGrid (4 cores) used for qkv/o/ffn matmuls and other ops.
-    // kLmHeadGrid (8 cores) used only for lm_head (Vt=4748 ragged shards).
-    //   matmul_qkv  Nt=128  →  32 tile/core  (clean, 4-way)
-    //   matmul_o    Nt=64   →  16 tile/core  (clean, 4-way)
-    //   ffn_gateup  Nt=384  →  96 tile/core  (clean, 4-way)
-    //   ffn_down    Nt=64   →  16 tile/core  (clean, 4-way)
-    //   lm_head     Nt=4748 → 4×594 + 4×593  (ragged 8-way)
-    const std::vector<tt::foil::CoreCoord> kMatmulGrid = {
-        {0, 0}, {0, 1}, {0, 2}, {0, 3},
+    // L1 CB layout depends only on Kt. Mt/Nt are RTAs. So all Kt=64
+    // matmuls (qkv, o, ffn_gate+up) share one persistent kernel on
+    // kMatmulKt64Grid; ffn_down (Kt=192) gets a separate L1 layout on
+    // kMatmulKt192Grid; the 8-core lm_head shape gets a third pinned
+    // grid. All three grids are on disjoint cores so each pin's L1
+    // footprint stays isolated.
+    //
+    // Per-core L1 (within 855 KB user arena):
+    //   kMatmulKt64Grid   Kt=64,  cb_b depth 2*Kt → ~386 KB
+    //   kMatmulKt192Grid  Kt=192, cb_b depth Kt   → ~770 KB
+    //   kLmHeadGrid       Kt=64,  cb_b depth 2*Kt → ~386 KB
+    const std::vector<tt::foil::CoreCoord> kMatmulKt64Grid = {
+        {2, 0}, {2, 1}, {2, 2}, {2, 3},
+    };
+    const std::vector<tt::foil::CoreCoord> kMatmulKt192Grid = {
+        {3, 0}, {3, 1}, {3, 2}, {3, 3},
     };
     const std::vector<tt::foil::CoreCoord> kLmHeadGrid = {
-        {0, 0}, {0, 1}, {0, 2}, {0, 3},
-        {0, 4}, {0, 5}, {0, 6}, {0, 7},
+        {4, 0}, {4, 1}, {4, 2}, {4, 3},
+        {4, 4}, {4, 5}, {4, 6}, {4, 7},
     };
-    std::vector<tt::foil::CoreCoord> boot_cores = kLmHeadGrid;
+    // (0,0) is the default transient core for embed/argmax/etc. (`core` below)
+    // + where rmsnorm_rope is pinned. Must be booted.
+    std::vector<tt::foil::CoreCoord> boot_cores = { {0, 0} };
+    for (const auto& c : kMatmulKt64Grid)  boot_cores.push_back(c);
+    for (const auto& c : kMatmulKt192Grid) boot_cores.push_back(c);
+    for (const auto& c : kLmHeadGrid)      boot_cores.push_back(c);
     const bool use_fd = std::getenv("TT_FOIL_FAST_DISPATCH") != nullptr;
     const tt::foil::CoreCoord fd_dispatcher_core{1, 0};
     if (use_fd) {
@@ -536,10 +542,11 @@ int main(int argc, char** argv) try {
         tt::foil::release_kernels(*dev, core); tt::foil::reset_l1(*dev, core);
         g_prof.add(tag, std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
     };
-    // Multi-core matmul: builds an N-core MatMulGridOp, dispatches via
-    // dispatch_execute_multi, then releases per-core kernel-config +
-    // L1 across the whole grid so the next caller starts from clean
-    // L1 on every core.
+    // Multi-core matmul: cached per (Kt, n_cores, first_core). First
+    // call on a given key invokes the full make_matmul_grid + pins each
+    // per-core kernel; subsequent calls are pure RTA refresh + dispatch.
+    // NO release_kernels / reset_l1 — those would rewind the L1 past the
+    // pinned watermark and unpin the kernel.
     auto run_matmul_on = [&](const char* tag,
                              const std::vector<tt::foil::CoreCoord>& grid,
                              const ol::TensorDesc& a,
@@ -547,20 +554,21 @@ int main(int argc, char** argv) try {
                              ol::TensorDesc& out,
                              uint32_t Mt, uint32_t Kt, uint32_t Nt) {
         auto t0 = Clock::now();
-        auto op = ol::make_matmul_grid(*dev, a, b, out, Mt, Kt, Nt, grid);
+        auto op = ol::make_matmul_grid_cached(*dev, a, b, out, Mt, Kt, Nt, grid);
         ol::execute(*dev, op);
-        for (const auto& c : grid) {
-            tt::foil::release_kernels(*dev, c);
-            tt::foil::reset_l1(*dev, c);
-        }
+        // NO release_kernels / reset_l1 — matmul is pinned. Rewinding
+        // would invalidate the cached kernel.
         g_prof.add(tag, std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
     };
+    // Kt=64 matmuls (qkv, o, ffn_gate+up) → one shared cache entry on
+    // kMatmulKt64Grid. Kt=192 (ffn_down) → kMatmulKt192Grid.
     auto run_matmul_grid = [&](const char* tag,
                                const ol::TensorDesc& a,
                                const ol::TensorDesc& b,
                                ol::TensorDesc& out,
                                uint32_t Mt, uint32_t Kt, uint32_t Nt) {
-        run_matmul_on(tag, kMatmulGrid, a, b, out, Mt, Kt, Nt);
+        const auto& grid = (Kt == kHt) ? kMatmulKt64Grid : kMatmulKt192Grid;
+        run_matmul_on(tag, grid, a, b, out, Mt, Kt, Nt);
     };
     auto run_matmul_lmhead = [&](const char* tag,
                                  const ol::TensorDesc& a,

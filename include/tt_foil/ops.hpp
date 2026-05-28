@@ -126,6 +126,27 @@ void set_matmul_grid_args(tt::foil::Device& dev, MatMulGridOp& op,
                           const std::vector<tt::foil::CoreCoord>& cores);
 void execute(tt::foil::Device& dev, MatMulGridOp& op);
 
+// Shape-keyed persistent matmul grid. Cache key is (Kt, n_cores, first_core),
+// so all callers that share those three values reuse the same pinned
+// kernel + L1 CB-backing buffers. Mt/Nt are runtime args, so different
+// logical matmuls (qkv, o, ffn_gate+up, lm_head) all collapse onto one
+// cache entry as long as their Kt + grid match. ffn_down (Kt=192) needs
+// a different L1 layout, so it lives on a separate grid.
+//
+// First call: full make_matmul_grid + pin_persistent on every (kernel,
+// core) pair, then set_matmul_grid_args. Subsequent calls: pure RTA
+// refresh.
+//
+// Contract: cores list MUST be identical across calls with the same
+// cache key. Callers MUST NOT call release_kernels / reset_l1 on the
+// pinned cores (use disjoint grids for transient ops).
+MatMulGridOp make_matmul_grid_cached(tt::foil::Device& dev,
+                                     const TensorDesc& a, const TensorDesc& b,
+                                     TensorDesc& out,
+                                     uint32_t Mt, uint32_t Kt, uint32_t Nt,
+                                     const std::vector<tt::foil::CoreCoord>& cores,
+                                     const std::string& kernel_dir = "");
+
 // =====================================================================
 // ElementwiseMul
 //   y = x * z   (elementwise, per-tile)

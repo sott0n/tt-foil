@@ -9,7 +9,9 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
+#include <unordered_map>
 
 #include <span>
 
@@ -239,6 +241,64 @@ void execute(tt::foil::Device& dev, MatMulGridOp& op) {
     ptrs.reserve(op.kernels.size());
     for (auto& k : op.kernels) ptrs.push_back(k.get());
     tt::foil::dispatch_execute_multi(dev, std::span<tt::foil::Kernel* const>(ptrs.data(), ptrs.size()));
+}
+
+// ---------------------------------------------------------------------------
+// make_matmul_grid_cached — persistent variant.
+// ---------------------------------------------------------------------------
+
+MatMulGridOp make_matmul_grid_cached(tt::foil::Device& dev,
+                                     const TensorDesc& a, const TensorDesc& b,
+                                     TensorDesc& out,
+                                     uint32_t Mt, uint32_t Kt, uint32_t Nt,
+                                     const std::vector<tt::foil::CoreCoord>& cores,
+                                     const std::string& kernel_dir) {
+    if (cores.empty())
+        throw std::runtime_error("op_lib::make_matmul_grid_cached: cores must be non-empty");
+
+    // Cache key: (Kt, n_cores, first_core). Kt determines L1 CB layout;
+    // n_cores + first_core distinguishes disjoint grids. Mt/Nt are RTAs
+    // so the same entry serves many logical matmul shapes.
+    struct Key {
+        uint32_t Kt;
+        uint32_t n_cores;
+        uint32_t x0;
+        uint32_t y0;
+        bool operator==(const Key& o) const noexcept {
+            return Kt == o.Kt && n_cores == o.n_cores && x0 == o.x0 && y0 == o.y0;
+        }
+    };
+    struct KeyHash {
+        std::size_t operator()(const Key& k) const noexcept {
+            std::size_t h = k.Kt;
+            h = h * 1315423911u + k.n_cores;
+            h = h * 1315423911u + k.x0;
+            h = h * 1315423911u + k.y0;
+            return h;
+        }
+    };
+    static thread_local std::unordered_map<Key, std::unique_ptr<MatMulGridOp>, KeyHash> g_cache;
+
+    if (out.num_tiles == 0)
+        out = allocate_tensor_dram(dev, Mt * Nt);
+
+    Key key{Kt, static_cast<uint32_t>(cores.size()), cores[0].x, cores[0].y};
+    auto it = g_cache.find(key);
+    if (it == g_cache.end()) {
+        auto op_ptr = std::make_unique<MatMulGridOp>(
+            make_matmul_grid(dev, a, b, out, Mt, Kt, Nt, cores, kernel_dir));
+        // Pin every per-core kernel so release_kernels / reset_l1 from
+        // surrounding transient ops on the same core doesn't disturb this
+        // grid. Watermark on each pinned core freezes the L1 + kernel_config
+        // high marks past our cb_a + cb_b + cb_out + kernel_text allocations.
+        for (std::size_t i = 0; i < cores.size(); ++i) {
+            tt::foil::pin_persistent(dev, *op_ptr->kernels[i], cores[i]);
+        }
+        it = g_cache.emplace(key, std::move(op_ptr)).first;
+    }
+    // RTA refresh — Mt/Nt/buffer addresses may have changed since last call.
+    set_matmul_grid_args(dev, *it->second, a, b, out, Mt, Kt, Nt, cores);
+    return *it->second;
 }
 
 }  // namespace tt::foil::op_lib
