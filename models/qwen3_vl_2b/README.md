@@ -78,7 +78,7 @@ bench/bench.sh <tag>           # uses the canonical "What is the capital of Toky
                                # writes profile dump to bench/runs/<timestamp>-<tag>.txt
 ```
 
-History of every measured iteration lives in [`bench/HISTORY.md`](../../bench/HISTORY.md).
+History of every measured iteration (text + VL) lives in [`bench/PERF_HISTORY.md`](bench/PERF_HISTORY.md).
 
 ## Current performance
 

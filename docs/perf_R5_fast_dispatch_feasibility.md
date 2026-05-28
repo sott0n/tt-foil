@@ -406,4 +406,4 @@ Sign-off on the staged approach:
 - Land R3-α (persistent decode-core extension) first — modest gain, low risk.
 - Branch `r5-fast-dispatch` and pursue Gates 1 → 2 → 3.
 - Abort at any gate that fails per its criteria; record finding in
-  `bench/HISTORY.md` and `docs/`.
+  `models/qwen3_vl_2b/bench/PERF_HISTORY.md` and `docs/`.

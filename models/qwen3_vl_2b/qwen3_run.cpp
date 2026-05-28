@@ -893,7 +893,7 @@ int main(int argc, char** argv) try {
     // profile TOTAL above is a sum of ScopedTimer entries that
     // double-counts nested ranges; this line is the single source of
     // truth for "how long did the run actually take". bench/bench.sh
-    // greps this line into HISTORY.md.
+    // greps this line into PERF_HISTORY.md.
     const double wall_ms = std::chrono::duration<double, std::milli>(
         Clock::now() - wall_t0).count();
     std::fprintf(stderr, "\n=== real_wall ===\n  wall_ms %.1f  (= %.2f s)\n",
