@@ -462,3 +462,48 @@ insensitive to this noise (the deciding ratio is ~1000:1).
 Bottom line for future perf work: do not add dispatch stages. Spend effort on
 (C) reduction and on EXEC_TRACE so the host enqueues a whole decode step ahead
 of the dispatcher in one shot.
+
+## 12. Addendum (2026-06-02): EXEC_TRACE ceiling measured — worthwhile
+
+Before implementing EXEC_TRACE (trace record/replay) we measured the host
+overhead it can actually remove. Key structural fact: the **current FD only
+offloads fire+wait** — `src/dispatch.cpp:442-461` still runs per-op
+`send_reset` + `setup` + `fence` on the host over PCIe (writing launch_msg +
+RTAs to each worker's L1). EXEC_TRACE records a whole step's command stream into
+DRAM once and replays it, so those per-op host writes happen on-chip from the
+recorded trace and the host pays them only once per step. The eliminable
+overhead is therefore exactly `reset + setup + fence` per dispatch (the
+`fire+wait` column is mostly worker device exec and is **not** eliminable).
+
+**Measurement** (`qwen3_run`, text model, `TT_FOIL_FAST_DISPATCH=1
+TT_FOIL_DISPATCH_TRACE=1`, Blackhole device 0). Decode-marginal isolated by
+diffing N=8 against N=4 runs (÷4); tokens bit-identical to the slow-dispatch
+oracle `2303,220,220,16,13` in both, so FD is correct.
+
+Per-dispatch host overhead (reset+setup+fence), steady across runs:
+| kind | reset | setup | fence | eliminable/call | fire+wait (not elim.) |
+|---|---|---|---|---|---|
+| single-kernel | 18.4 µs | 4.7 µs | 12.6 µs | **35.6 µs** | 278–292 µs |
+| multi-kernel (≈4 cores) | 64.0 µs | 18.1 µs | 54.5 µs | **136.6 µs** | 935–937 µs |
+
+Decode-marginal per token: 200 single + 113 multi dispatches, decode time
+193 ms/token. Eliminable host overhead:
+- single: 200 × 35.6 µs = 7.1 ms
+- multi: 113 × 136.6 µs = 15.4 ms
+- **total ≈ 22.6 ms/token ≈ 11.7% of decode** (multi-kernel/matmul host
+  overhead dominates).
+
+**Verdict: EXEC_TRACE is worth building** — ~12% of decode is a real target,
+~40× the prefetcher's 0.1–0.3% ceiling. Caveat: the figure is an *upper bound*;
+per-step-varying RTAs (rope cos/sin, kv slot, gqa mask, embedding token) must
+still be host-patched into the DRAM trace before each replay, so the realised
+gain is `~22.6 ms − (patch writes for the few pos/token-dependent ops)`. Note
+this is much smaller than the doc's original 3–5× projection because that
+assumed a *slow-dispatch* baseline (3.3 ms/op firmware floor); the already-
+shipped FD collapsed that floor (reset/setup are now tens of µs, not ms), so
+EXEC_TRACE's remaining headroom is the per-op host PCIe writes, not the firmware
+init path.
+
+Implementation staged: the EXEC_TRACE primitive + smoke test land first (proves
+the DRAM-replay mechanism); the qwen-decode integration with RTA patching is
+deferred and justified by this measurement.

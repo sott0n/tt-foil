@@ -253,6 +253,8 @@ tt_foil_hw_test(test_noop_dispatch_loop test_noop_dispatch_loop.cpp "${OPS}/noop
 tt_foil_hw_test(test_fast_dispatch_smoke test_fast_dispatch_smoke.cpp "${OPS}/noop/prebuilt")
 # Prefetch-hypothesis decomposition: (A) host push vs (C) worker exec
 tt_foil_hw_test(test_dispatch_decomp test_dispatch_decomp.cpp "${OPS}/noop/prebuilt")
+# EXEC_TRACE (trace replay) smoke test
+tt_foil_hw_test(test_exec_trace_smoke test_exec_trace_smoke.cpp "${OPS}/noop/prebuilt")
 _tt_default(SILU_NT 8)
 tt_foil_hw_test(test_silu        test_silu.cpp        "${OPS}/eltwise_unary/prebuilt"
     "SILU_NT=${SILU_NT}")

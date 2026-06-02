@@ -42,14 +42,14 @@ tt::umd::CoreCoord tensix_translated_local(const Device& dev, const CoreCoord& c
 FastDispatch::FastDispatch(Device& dev_in, CoreCoord core)
     : dev(dev_in), dispatcher_core(core) {
     // Allocate L1 state buffer on the dispatcher core. Layout:
-    //   0x00..0x1F  mailboxes (host_wptr, rdptr, completion, phase, pads)
+    //   0x00..0x1F   mailboxes (host_wptr, rdptr, completion, phase, pads)
     //   0x20..0x101F cmd_ring (4 KB)
-    //   0x1020..    go_msg scratch (kernel reuses one 4 B slot for poll)
-    // We allocate kStateBytes + 64 B = 4 KB + 96 B, rounded up.
-    state_buf = allocate_buffer(dev, BufferLocation::L1, kStateBytes + 64, core);
+    //   kGoMsgScratchOffset  go_msg scratch (kernel reuses one 4 B slot for poll)
+    //   kTraceScratchOffset  one 128-B slot to stage a trace cmd read from DRAM
+    state_buf = allocate_buffer(dev, BufferLocation::L1, kStateTotalBytes, core);
 
     // Zero-fill the state region so wptr/rdptr/counter start at 0.
-    std::vector<uint8_t> zeros(kStateBytes + 64, 0);
+    std::vector<uint8_t> zeros(kStateTotalBytes, 0);
     write_buffer(dev, *state_buf, zeros.data(), zeros.size());
 
     // Load dispatcher kernel ELF. The kernel ELF dir is resolved the same
@@ -78,6 +78,60 @@ void FastDispatch::start() {
     // Fire-and-forget launch the dispatcher kernel. It runs an infinite loop
     // until we push CMD_TERMINATE.
     dispatch_launch_async(dev, *dispatcher_kernel);
+}
+
+void FastDispatch::emit_or_record(const void* cmd_buf) {
+    if (recording_) {
+        const uint8_t* p = static_cast<const uint8_t*>(cmd_buf);
+        record_buf_.insert(record_buf_.end(), p, p + kCmdSlotBytes);
+        return;
+    }
+    const uint32_t slot = host_wptr_local % kCmdSlotCount;
+    const uint64_t slot_addr =
+        state_buf->device_addr + kCmdRingOffset + slot * kCmdSlotBytes;
+    write_l1(dev, dispatcher_core, slot_addr, cmd_buf, kCmdSlotBytes);
+    host_wptr_local += 1;
+    write_l1(dev, dispatcher_core,
+             state_buf->device_addr + kHostWptrOffset,
+             &host_wptr_local, sizeof(uint32_t));
+}
+
+void FastDispatch::begin_record() {
+    recording_ = true;
+    record_buf_.clear();
+}
+
+FastDispatch::TraceHandle FastDispatch::end_record() {
+    recording_ = false;
+    TraceHandle h;
+    h.num_cmds = static_cast<uint32_t>(record_buf_.size() / kCmdSlotBytes);
+    if (record_buf_.empty()) return h;  // empty trace
+    h.dram = allocate_buffer(dev, BufferLocation::DRAM, record_buf_.size());
+    write_buffer(dev, *h.dram, record_buf_.data(), record_buf_.size());
+    return h;
+}
+
+void FastDispatch::exec_trace(const TraceHandle& trace) {
+    if (trace.num_cmds == 0 || !trace.dram) return;
+    const uint64_t dram_noc = make_noc_dram_addr(dev, trace.dram->device_addr);
+
+    alignas(16) uint8_t cmd_buf[kCmdSlotBytes];
+    std::memset(cmd_buf, 0, kCmdSlotBytes);
+    ExecTraceCmd* cmd = reinterpret_cast<ExecTraceCmd*>(cmd_buf);
+    cmd->op          = CMD_EXEC_TRACE;
+    cmd->num_cmds    = trace.num_cmds;
+    cmd->dram_noc_lo = static_cast<uint32_t>(dram_noc & 0xFFFFFFFFu);
+    cmd->dram_noc_hi = static_cast<uint32_t>(dram_noc >> 32);
+
+    // EXEC_TRACE is a control cmd — always goes to the ring, never recorded.
+    const uint32_t slot = host_wptr_local % kCmdSlotCount;
+    const uint64_t slot_addr =
+        state_buf->device_addr + kCmdRingOffset + slot * kCmdSlotBytes;
+    write_l1(dev, dispatcher_core, slot_addr, cmd_buf, kCmdSlotBytes);
+    host_wptr_local += 1;
+    write_l1(dev, dispatcher_core,
+             state_buf->device_addr + kHostWptrOffset,
+             &host_wptr_local, sizeof(uint32_t));
 }
 
 void FastDispatch::push_launch(CoreCoord worker,
@@ -115,15 +169,7 @@ void FastDispatch::push_launch(CoreCoord worker,
         std::memcpy(cmd->launch_msg, launch_msg_bytes, launch_msg_size);
     }
 
-    const uint32_t slot = host_wptr_local % kCmdSlotCount;
-    const uint64_t slot_addr = state_buf->device_addr + kCmdRingOffset + slot * kCmdSlotBytes;
-    write_l1(dev, dispatcher_core, slot_addr, cmd_buf, kCmdSlotBytes);
-
-    // Advance host wptr.
-    host_wptr_local += 1;
-    write_l1(dev, dispatcher_core,
-             state_buf->device_addr + kHostWptrOffset,
-             &host_wptr_local, sizeof(uint32_t));
+    emit_or_record(cmd_buf);
 }
 
 void FastDispatch::push_launch_batch(std::span<const CoreCoord> workers,
@@ -150,13 +196,7 @@ void FastDispatch::push_launch_batch(std::span<const CoreCoord> workers,
         cmd->go_noc[i].hi = static_cast<uint32_t>(noc >> 32);
     }
 
-    const uint32_t slot = host_wptr_local % kCmdSlotCount;
-    const uint64_t slot_addr = state_buf->device_addr + kCmdRingOffset + slot * kCmdSlotBytes;
-    write_l1(dev, dispatcher_core, slot_addr, cmd_buf, kCmdSlotBytes);
-    host_wptr_local += 1;
-    write_l1(dev, dispatcher_core,
-             state_buf->device_addr + kHostWptrOffset,
-             &host_wptr_local, sizeof(uint32_t));
+    emit_or_record(cmd_buf);
 }
 
 void FastDispatch::push_notify() {

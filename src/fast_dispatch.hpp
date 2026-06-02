@@ -56,12 +56,20 @@ constexpr uint32_t kStateBytes           = kCmdRingOffset + kCmdRingBytes;
 constexpr uint32_t kCmdSlotBytes = 128;
 constexpr uint32_t kCmdSlotCount = kCmdRingBytes / kCmdSlotBytes;  // 32
 
+// Dispatcher-private L1 scratch past the ring. kGoMsgScratchOffset matches the
+// kernel's `kCmdRingOffset + kCmdSlotBytes * kCmdSlotCount`. kTraceScratchOffset
+// stages one trace cmd read back from DRAM during CMD_EXEC_TRACE replay.
+constexpr uint32_t kGoMsgScratchOffset   = kCmdRingOffset + kCmdSlotBytes * kCmdSlotCount;  // == kStateBytes
+constexpr uint32_t kTraceScratchOffset   = kGoMsgScratchOffset + 64;
+constexpr uint32_t kStateTotalBytes      = kTraceScratchOffset + kCmdSlotBytes;
+
 enum CmdOp : uint32_t {
     CMD_NOOP         = 0,
     CMD_LAUNCH       = 1,
     CMD_NOTIFY_HOST  = 2,  // bump completion_counter
     CMD_TERMINATE    = 3,  // dispatcher exits its main loop (test teardown)
     CMD_LAUNCH_BATCH = 4,  // fire N workers' GO_MSGs then poll all DONE
+    CMD_EXEC_TRACE   = 5,  // replay N cmds from a DRAM trace buffer
 };
 
 // LAUNCH command layout (128 B total = 32 × uint32_t words):
@@ -120,6 +128,24 @@ struct LaunchBatchCmd {
 static_assert(sizeof(LaunchBatchCmd) == kCmdSlotBytes, "LaunchBatchCmd must fill slot");
 constexpr uint32_t kMaxBatchWorkers = 14;
 
+// EXEC_TRACE: replay a pre-recorded command sub-stream from DRAM. The host
+// records a sequence of 128-B cmds (LAUNCH / LAUNCH_BATCH / NOTIFY) into a DRAM
+// buffer once, then pushes a single EXEC_TRACE into the ring. The dispatcher
+// reads each trace cmd from DRAM into L1 scratch and processes it through the
+// same path as a ring cmd. Nested EXEC_TRACE is not supported (dispatcher skips).
+//   word[0]  op (= CMD_EXEC_TRACE)
+//   word[1]  num_cmds
+//   word[2]  dram_noc_lo  (make_noc_dram_addr(trace base), low 32 b)
+//   word[3]  dram_noc_hi  (   "      "        "   "    " , high 32 b)
+struct ExecTraceCmd {
+    uint32_t op;
+    uint32_t num_cmds;
+    uint32_t dram_noc_lo;
+    uint32_t dram_noc_hi;
+    uint32_t reserved[28];
+};
+static_assert(sizeof(ExecTraceCmd) == kCmdSlotBytes, "ExecTraceCmd must fill slot");
+
 }  // namespace fast_dispatch_layout
 
 // ---- Host API --------------------------------------------------------------
@@ -133,6 +159,11 @@ struct FastDispatch {
     std::shared_ptr<Kernel> dispatcher_kernel;
     uint32_t host_wptr_local = 0;     // host-side mirror of wptr
     uint32_t expected_completion = 0; // counter target
+
+    // Trace recording state. When recording_, the push_* methods append the
+    // composed 128-B cmd to record_buf_ instead of writing the ring + wptr.
+    bool recording_ = false;
+    std::vector<uint8_t> record_buf_;
 
     FastDispatch(Device& dev, CoreCoord core);
 
@@ -170,6 +201,33 @@ struct FastDispatch {
 
     // Start the dispatcher kernel on its core asynchronously.
     void start();
+
+    // ---- Trace record/replay (EXEC_TRACE) --------------------------------
+    // A recorded trace is a DRAM-resident command sub-stream that the
+    // dispatcher replays on-chip, so the host pays its per-op cmd-compose +
+    // PCIe cost once instead of once per replay.
+    struct TraceHandle {
+        std::shared_ptr<Buffer> dram;  // owns the DRAM trace bytes
+        uint32_t num_cmds = 0;
+    };
+
+    // Begin recording: subsequent push_launch / push_launch_batch / push_notify
+    // append to an internal buffer instead of writing to the ring.
+    void begin_record();
+
+    // End recording: copy the recorded bytes into a fresh DRAM buffer and
+    // return a handle. push_terminate / exec_trace are never recorded.
+    TraceHandle end_record();
+
+    // Push a single EXEC_TRACE referencing a recorded trace. The dispatcher
+    // reads each cmd from DRAM and processes it as if pushed to the ring.
+    void exec_trace(const TraceHandle& trace);
+
+   private:
+    // Write a composed 128-B cmd to the ring + bump host_wptr, OR (when
+    // recording_) append it to record_buf_ instead. Used by push_launch /
+    // push_launch_batch so recording is transparent to callers.
+    void emit_or_record(const void* cmd_buf);
 };
 
 }  // namespace tt::foil
