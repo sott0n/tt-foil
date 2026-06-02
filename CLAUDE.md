@@ -429,17 +429,33 @@ over PCIe; the dispatcher polls the wptr, then issues `launch_msg`+GO_MSG to
 worker cores over NOC and polls each worker's GO_MSG for DONE, bumping a
 `completion_count` the host reads. Commands: `CMD_LAUNCH`, `CMD_LAUNCH_BATCH`
 (fire N workers' GOs then poll all — for multi-core ops), `CMD_NOTIFY_HOST`,
-`CMD_TERMINATE`. BRISC peer writes use NOC 1 (see the NOC-1 invariant).
+`CMD_TERMINATE`, `CMD_EXEC_TRACE`. BRISC peer writes use NOC 1 (see the NOC-1
+invariant).
 
-**Deliberately NOT a port of tt-metal's command queue.** No prefetcher stage,
-no hugepage rings, no EXEC_TRACE/trace-replay yet. The prefetcher is omitted by
-measurement, not omission: `tests/test_dispatch_decomp.cpp` shows host
-`push_launch` is 0.9 µs vs 300–1100 µs real-op worker exec, so a prefetch stage
-has a 0.1–0.3% ceiling. The host-push overlap a prefetcher would give is
-already delivered by the existing 32-slot ring (per-op 4.2 → 1.6 µs when the
-host runs ahead). **Do not add dispatch stages** — spend effort on worker-exec
-reduction and, if pursued, EXEC_TRACE. Full rationale + numbers in
-`docs/perf_fast_dispatch_feasibility.md` (§11).
+`CMD_EXEC_TRACE` (trace replay): the host records a command sub-stream into a
+DRAM buffer via `begin_record()` / `push_*` / `end_record()` → `TraceHandle`,
+then `exec_trace(handle)` pushes one ring cmd; the dispatcher reads each 128-B
+cmd from DRAM (`process_cmd()` is shared with the ring loop) and replays it, so
+the host pays its per-op compose+PCIe cost once. Smoke test
+`tests/test_exec_trace_smoke.cpp` shows 3.72 → 0.65 µs/op (5.8×) for a noop
+worker. **Primitive only so far** — the qwen-decode integration (recording the
+launch_msg inline + per-step RTA patching for rope/kv/mask/token) is deferred;
+§12 of the feasibility doc sizes that win at ~11.7% of decode.
+
+**Deliberately NOT a full port of tt-metal's command queue.** No prefetcher
+stage, no hugepage rings. The prefetcher is omitted by measurement, not
+omission: `tests/test_dispatch_decomp.cpp` shows host `push_launch` is 0.9 µs vs
+300–1100 µs real-op worker exec, so a prefetch stage has a 0.1–0.3% ceiling. The
+host-push overlap a prefetcher would give is already delivered by the existing
+32-slot ring (per-op 4.2 → 1.6 µs when the host runs ahead). **Do not add
+dispatch stages** — spend effort on worker-exec reduction and on EXEC_TRACE
+trace replay. Full rationale + numbers in
+`docs/perf_fast_dispatch_feasibility.md` (§11 prefetcher, §12 EXEC_TRACE).
+
+Note: `ops/cq_dispatch/prebuilt/` is gitignored; after editing
+`ops/cq_dispatch/dispatch.cpp` rebuild the ELF with
+`TT_METAL_ROOT=third_party/tt-metal bash ops/cq_dispatch/build.sh` (must link
+against the same firmware tree the runtime resolves — `build/firmware/`).
 
 ## Cold boot summary (single core)
 
