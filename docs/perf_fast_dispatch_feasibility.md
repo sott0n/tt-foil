@@ -432,6 +432,11 @@ Blackhole device 0, 2000 iters; numbers stable, p50≈mean):
 | (R) serial round-trip / op (GO issue + DONE poll + completion readback) | 4.2 µs |
 | pipelined per-op (host fills 32-slot ring, waits once, N=16) | 1.6 µs |
 
+Reproduced via `ctest -R dispatch_decomp` on a fresh `tt-smi -r 0`:
+(A) 0.7 µs / (R) 3.8 µs / pipelined 1.4 µs — sub-µs run-to-run jitter,
+immaterial against the 300–1100 µs worker exec. The conclusion is
+insensitive to this noise (the deciding ratio is ~1000:1).
+
 **Verdict: the prefetcher stage is not worth building.**
 
 1. Prefetch's per-op ceiling is (A) = 0.9 µs. Real-op worker exec is
