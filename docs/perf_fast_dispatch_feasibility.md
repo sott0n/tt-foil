@@ -407,3 +407,53 @@ Sign-off on the staged approach:
 - Branch `r5-fast-dispatch` and pursue Gates 1 → 2 → 3.
 - Abort at any gate that fails per its criteria; record finding in
   `models/qwen3_vl_2b/bench/PERF_HISTORY.md` and `docs/`.
+
+## 11. Addendum (2026-06-02): prefetcher-stage hypothesis measured & rejected
+
+Question raised post-implementation: tt-foil's dispatcher is single-core and
+blocks in the DONE-poll while a worker executes. If a command's worker exec
+(C) is long, would adding a tt-metal-style **prefetcher stage** (a second core
+that pre-stages commands so the dispatcher never stalls on fetch) recover that
+idle time?
+
+**Decomposition.** A prefetcher can only remove the *command-fetch* cost from
+the dispatcher's critical path. In tt-foil's push model that cost equals the
+host's `push_launch` PCIe traffic (write cmd slot + bump wptr) — call it (A).
+The dispatcher itself reads commands from its own local L1 (≈free), so the
+quantity that decides the question is how big (A) is relative to worker exec
+(C).
+
+**Measurement** (`tests/test_dispatch_decomp.cpp`, noop worker so C≈0,
+Blackhole device 0, 2000 iters; numbers stable, p50≈mean):
+
+| quantity | p50 |
+|---|---|
+| (A) `push_launch` (PCIe write ×2) | **0.9 µs** |
+| (R) serial round-trip / op (GO issue + DONE poll + completion readback) | 4.2 µs |
+| pipelined per-op (host fills 32-slot ring, waits once, N=16) | 1.6 µs |
+
+**Verdict: the prefetcher stage is not worth building.**
+
+1. Prefetch's per-op ceiling is (A) = 0.9 µs. Real-op worker exec is
+   300–1100 µs (matmul, per the VL/text iteration logs), so the upper bound on
+   any prefetch gain is **(A)/(A+C) ≈ 0.1–0.3%**.
+2. The hypothesis is backwards: a *longer* C makes prefetch *less* valuable,
+   not more. The dispatcher's DONE-poll idle time is pure worker-exec wait,
+   which no dispatch-side change (prefetch or extra stages) can recover — only
+   making the op faster (kernel/grid/OpCache) or overlapping *independent* ops
+   (the existing `LAUNCH_BATCH`) touches it.
+3. The 4.2 µs round-trip floor confirms there is no large fetch latency to
+   hide: tt-metal's prefetcher exists to stream multi-KB program data from host
+   hugepage, a cost tt-foil does not pay (binaries are resident in worker L1,
+   commands are 128 B inline). §3's "drop the prefetcher" decision is vindicated
+   by measurement.
+4. The one real benefit one might want from a prefetcher — overlapping
+   host-push with dispatcher work so the dispatcher never starves — is *already*
+   delivered by the existing 32-slot ring with **zero extra cores**: letting the
+   host run ahead drops per-op from 4.2 µs (serial) to 1.6 µs (pipelined). The
+   constructive path to exploit this fully is trace record/replay (EXEC_TRACE,
+   Gate 3), not a second core.
+
+Bottom line for future perf work: do not add dispatch stages. Spend effort on
+(C) reduction and on EXEC_TRACE so the host enqueues a whole decode step ahead
+of the dispatcher in one shot.

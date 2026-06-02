@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // tt-foil fast dispatch (R5). Minimal subset of tt-metal's CQ targeted at
-// Qwen3-VL-2B decode. See docs/perf_R5_fast_dispatch_feasibility.md and
+// Qwen3-VL-2B decode. See docs/perf_fast_dispatch_feasibility.md and
 // /home/kyamaguchi/.claude/plans/qwen-benchmark-tt-metal-runtime-research-frolicking-simon.md
 // for the rationale and design context.
 //
