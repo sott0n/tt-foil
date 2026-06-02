@@ -8,8 +8,12 @@ Standalone — does NOT link `libtt_metal.so`. Owns its own `umd::Cluster` and
 static lib from the tt-metal source tree.
 
 **Scope:** single chip, multi Tensix core, BRISC + NCRISC + TRISC0/1/2 (full
-5-RISC), slow-dispatch, NOC unicast L1↔L1 between cores, Circular Buffers.
-**Not** in scope: DRAM interleaved, fast dispatch, mesh, Wormhole/Quasar.
+5-RISC), slow-dispatch (default), a minimal single-core fast-dispatch,
+NOC unicast L1↔L1 between cores, Circular Buffers.
+**Not** in scope: DRAM interleaved, mesh, Wormhole/Quasar, and the full
+tt-metal command-queue stack (multi-stage prefetch/dispatch, hugepage
+rings, EXEC_TRACE) — see fast-dispatch note below for what we deliberately
+keep out.
 
 ## Repository layout
 
@@ -30,6 +34,7 @@ src/
   noc_addr.{hpp,cpp}                   # NOC unicast 64-bit address packing
   umd_boot.{hpp,cpp}                   # umd::Cluster open helper (used by test_umd_open)
   runtime_impl.cpp                     # Thin delegation from public API
+  fast_dispatch.{hpp,cpp}              # Minimal single-core fast-dispatch (opt-in; see Fast dispatch §)
   llrt_local/                          # Vendored from tt_metal/llrt; ll_api → tt::foil::ll_api
     tt_memory.{cpp,h}                    (MetalContext::instance() call patched out; getenv)
     tt_elffile.{cpp,hpp}                 (unchanged except namespace)
@@ -409,6 +414,32 @@ dispatch_execute_multi:
 All GOs are fired before any DONE check — producer/consumer kernels need
 that. Polling is sequential per kernel but device-side execution is concurrent,
 so wall time is `max(per-kernel run time)`.
+
+## Fast dispatch (single-core, opt-in)
+
+Slow-dispatch (above) is the default and the path every test/example uses.
+There is also a **minimal single-core fast-dispatch** in
+`src/fast_dispatch.{hpp,cpp}` + the `ops/cq_dispatch/dispatch.cpp` dispatcher
+kernel, used opt-in by `models/qwen3_vl_2b/qwen3*_run.cpp` (gated, dispatcher
+pinned to core `{1,0}` BRISC).
+
+How it works: a dispatcher kernel runs persistently on one core. The host
+writes 128-B commands into a 4 KB ring in that core's L1 and bumps `host_wptr`
+over PCIe; the dispatcher polls the wptr, then issues `launch_msg`+GO_MSG to
+worker cores over NOC and polls each worker's GO_MSG for DONE, bumping a
+`completion_count` the host reads. Commands: `CMD_LAUNCH`, `CMD_LAUNCH_BATCH`
+(fire N workers' GOs then poll all — for multi-core ops), `CMD_NOTIFY_HOST`,
+`CMD_TERMINATE`. BRISC peer writes use NOC 1 (see the NOC-1 invariant).
+
+**Deliberately NOT a port of tt-metal's command queue.** No prefetcher stage,
+no hugepage rings, no EXEC_TRACE/trace-replay yet. The prefetcher is omitted by
+measurement, not omission: `tests/test_dispatch_decomp.cpp` shows host
+`push_launch` is 0.9 µs vs 300–1100 µs real-op worker exec, so a prefetch stage
+has a 0.1–0.3% ceiling. The host-push overlap a prefetcher would give is
+already delivered by the existing 32-slot ring (per-op 4.2 → 1.6 µs when the
+host runs ahead). **Do not add dispatch stages** — spend effort on worker-exec
+reduction and, if pursued, EXEC_TRACE. Full rationale + numbers in
+`docs/perf_fast_dispatch_feasibility.md` (§11).
 
 ## Cold boot summary (single core)
 
