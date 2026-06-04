@@ -85,6 +85,9 @@ function(tt_foil_hw_test name src kernel_dir)
             "${_kd_parent}/kernels/*.h"
             "${_kd_parent}/kernels/*.hpp"
         )
+        # Firmware output files (not the target) so a firmware rebuild retriggers
+        # this test's kernels — see the GLOBAL TT_FOIL_FW_OUTPUTS property.
+        get_property(_hw_test_fw_outputs GLOBAL PROPERTY TT_FOIL_FW_OUTPUTS)
         add_custom_command(
             OUTPUT "${_stamp}"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/kernel_stamps"
@@ -96,7 +99,10 @@ function(tt_foil_hw_test name src kernel_dir)
                 ${_extra_env}
                 bash "${_build_script}"
             COMMAND ${CMAKE_COMMAND} -E touch "${_stamp}"
-            DEPENDS tt_foil_firmware "${_build_script}" ${_kernel_srcs}
+            # DEPENDS on firmware output FILES (via GLOBAL property), not the
+            # tt_foil_firmware target — the target is only an ordering edge and
+            # does not retrigger a rebuild when firmware files change.
+            DEPENDS ${_hw_test_fw_outputs} "${_build_script}" ${_kernel_srcs}
             COMMENT "Auto-building kernels for ${name}"
             VERBATIM
         )
@@ -342,6 +348,10 @@ set(_resnet20_profile_env "")
 if(TT_FOIL_DEVICE_PROFILER)
     set(_resnet20_profile_env "TT_FOIL_PROFILE_KERNEL=${TT_FOIL_PROFILE_KERNEL_BITMASK}")
 endif()
+# DEPENDS on the firmware output FILES (not the tt_foil_firmware target) so a
+# firmware rebuild retriggers the resnet20 kernels — depending on the target is
+# only an ordering edge and left stale kernels linked against old firmware.
+get_property(_resnet20_fw_outputs GLOBAL PROPERTY TT_FOIL_FW_OUTPUTS)
 add_custom_command(
     OUTPUT "${_resnet20_kernels_stamp}"
     COMMAND ${CMAKE_COMMAND} -E env
@@ -350,7 +360,7 @@ add_custom_command(
         bash ${CMAKE_SOURCE_DIR}/models/resnet20/build_kernels.sh
     COMMAND ${CMAKE_COMMAND} -E touch "${_resnet20_kernels_stamp}"
     DEPENDS
-        tt_foil_firmware
+        ${_resnet20_fw_outputs}
         ${CMAKE_SOURCE_DIR}/models/resnet20/build_kernels.sh
     COMMENT "Building resnet20 prebuilt kernels"
     VERBATIM

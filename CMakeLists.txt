@@ -156,6 +156,33 @@ if(TT_FOIL_MINIMIZE_SIZE)
     message(STATUS "tt-foil: TT_FOIL_MINIMIZE_SIZE=ON (gc-sections, visibility=hidden, LTO)")
 endif()
 
+# ---- Firmware output ELF paths (defined early, used as kernel deps) ----
+# Kernel build rules (tt_foil_add_kernels, and the per-model rules under tests/)
+# must DEPENDS on these firmware *files* so that rebuilding firmware retriggers
+# a kernel rebuild. Depending on the tt_foil_firmware *target* only adds an
+# ordering edge — and that target isn't even defined until AFTER the
+# add_subdirectory() calls below — so it never triggered staleness. That let
+# stale *_weakened.elf kernels silently keep linking old firmware and hang
+# cb_reserve_back (the resnet20 failure during the umd v0.9.6 bump). Define the
+# (static) path list here, before any add_subdirectory(), and stash it in a
+# GLOBAL property; the add_custom_command that actually produces them is below.
+set(_tt_foil_fw_outputs "")
+if(TT_FOIL_BUILD_FIRMWARE)
+    set(_tt_foil_fw_outputs
+        "${CMAKE_BINARY_DIR}/firmware/brisc/brisc.elf"
+        "${CMAKE_BINARY_DIR}/firmware/brisc/brisc_weakened.elf"
+        "${CMAKE_BINARY_DIR}/firmware/ncrisc/ncrisc.elf"
+        "${CMAKE_BINARY_DIR}/firmware/ncrisc/ncrisc_weakened.elf"
+        "${CMAKE_BINARY_DIR}/firmware/trisc0/trisc0.elf"
+        "${CMAKE_BINARY_DIR}/firmware/trisc0/trisc0_weakened.elf"
+        "${CMAKE_BINARY_DIR}/firmware/trisc1/trisc1.elf"
+        "${CMAKE_BINARY_DIR}/firmware/trisc1/trisc1_weakened.elf"
+        "${CMAKE_BINARY_DIR}/firmware/trisc2/trisc2.elf"
+        "${CMAKE_BINARY_DIR}/firmware/trisc2/trisc2_weakened.elf"
+    )
+endif()
+set_property(GLOBAL PROPERTY TT_FOIL_FW_OUTPUTS "${_tt_foil_fw_outputs}")
+
 if(TT_FOIL_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
@@ -228,18 +255,9 @@ if(TT_FOIL_BUILD_FIRMWARE)
     target_compile_definitions(tt_foil PRIVATE
         TT_FOIL_FIRMWARE_BUILD_DIR="${CMAKE_BINARY_DIR}/firmware"
     )
-    set(_tt_foil_fw_outputs
-        "${CMAKE_BINARY_DIR}/firmware/brisc/brisc.elf"
-        "${CMAKE_BINARY_DIR}/firmware/brisc/brisc_weakened.elf"
-        "${CMAKE_BINARY_DIR}/firmware/ncrisc/ncrisc.elf"
-        "${CMAKE_BINARY_DIR}/firmware/ncrisc/ncrisc_weakened.elf"
-        "${CMAKE_BINARY_DIR}/firmware/trisc0/trisc0.elf"
-        "${CMAKE_BINARY_DIR}/firmware/trisc0/trisc0_weakened.elf"
-        "${CMAKE_BINARY_DIR}/firmware/trisc1/trisc1.elf"
-        "${CMAKE_BINARY_DIR}/firmware/trisc1/trisc1_weakened.elf"
-        "${CMAKE_BINARY_DIR}/firmware/trisc2/trisc2.elf"
-        "${CMAKE_BINARY_DIR}/firmware/trisc2/trisc2_weakened.elf"
-    )
+    # _tt_foil_fw_outputs was defined earlier (before add_subdirectory) and
+    # stashed in the GLOBAL TT_FOIL_FW_OUTPUTS property so kernel rules can
+    # depend on these files. It is still in scope here.
     # When the device profiler is enabled, pass the bitmask through to
     # build_firmware.sh so SFPI g++ compiles brisc.cc / ncrisc.cc / trisc.cc
     # with -DPROFILE_KERNEL=<bitmask>.

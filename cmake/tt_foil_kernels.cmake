@@ -85,13 +85,14 @@ function(tt_foil_add_kernels)
         list(APPEND _env_args "${e}")
     endforeach()
 
-    # tt_foil_firmware is the custom target whose outputs are the
-    # *_weakened.elf files build_kernels.sh links against. Adding it as a
-    # DEPENDS makes kernel ELFs rebuild whenever firmware does.
-    set(_fw_dep)
-    if(TARGET tt_foil_firmware)
-        set(_fw_dep tt_foil_firmware)
-    endif()
+    # Kernel ELFs must rebuild whenever firmware does. DEPENDS on the firmware
+    # output FILES (the *_weakened.elf build_kernels.sh links against), exposed
+    # via the GLOBAL TT_FOIL_FW_OUTPUTS property set in the top-level
+    # CMakeLists. Depending on the tt_foil_firmware *target* instead only adds
+    # an ordering edge — it does not trigger a timestamp-based rebuild when the
+    # firmware files change but the kernel sources do not, which is exactly how
+    # stale kernels end up linked against old firmware (cb_reserve_back hang).
+    get_property(_fw_dep GLOBAL PROPERTY TT_FOIL_FW_OUTPUTS)
 
     # kernel_build_helpers.sh is sourced by every build_kernels.sh; changes
     # to it (e.g. the manifest format) should retrigger every kernel build.
