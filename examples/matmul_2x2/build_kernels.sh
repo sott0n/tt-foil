@@ -75,11 +75,11 @@ COMMON_CFLAGS=(
     -DPCIE_NOC_X=0 -DPCIE_NOC_Y=3
     -I"$BUILD"
     -I"$TT" -I"$TT/tt_metal" -I"$TT/tt_metal/hw/inc"
-    -I"$TT/tt_metal/hw/inc/api" -I"$TT/tt_metal/hw/inc/api/dataflow"
     -I"$TT/tt_metal/hw/inc/internal" -I"$TT/tt_metal/hw/inc/internal/tt-1xx"
     -I"$TT/tt_metal/hw/inc/internal/tt-1xx/blackhole"
     -I"$TT/tt_metal/hw/inc/internal/tt-1xx/blackhole/blackhole_defines"
     -I"$TT/tt_metal/hw/inc/internal/tt-1xx/blackhole/noc"
+    -I"$TT/tt_metal/hw/inc/api" -I"$TT/tt_metal/hw/inc/api/dataflow"
     -I"$TT/tt_metal/hw/ckernels/blackhole/metal/common"
     -I"$TT/tt_metal/hw/ckernels/blackhole/metal/llk_io"
     -I"$TT/tt_metal/hw/ckernels/blackhole/metal/llk_api"

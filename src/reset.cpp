@@ -13,17 +13,36 @@
 #include "hal/generated/dev_msgs.hpp"
 
 #include <umd/device/cluster.hpp>
+#include <umd/device/tt_device/tt_device.hpp>
 #include <umd/device/types/core_coordinates.hpp>
 #include <umd/device/types/risc_type.hpp>
 
 namespace tt::foil {
 
+namespace {
+// Absolute soft-reset register value that parks every Tensix RISC in reset.
+// Bit positions come from umd's (now-removed) TensixSoftResetOptions:
+//   BRISC=11, TRISC0=12, TRISC1=13, TRISC2=14, NCRISC=18.
+// This equals the old TENSIX_ASSERT_SOFT_RESET (no STAGGERED_START bit 31).
+constexpr uint32_t kAllTensixAssert =
+    (1u << 11) | (1u << 12) | (1u << 13) | (1u << 14) | (1u << 18);
+}  // namespace
+
 void assert_tensix_reset(
     tt::umd::Cluster& driver,
     uint32_t chip_id,
     const tt::umd::CoreCoord& core) {
-    // Default mask asserts ALL Tensix RISCs (BRISC + NCRISC + TRISC0/1/2).
-    driver.assert_risc_reset_at_core(chip_id, core);
+    // Do an ABSOLUTE soft-reset write, not Cluster::assert_risc_reset().
+    //
+    // umd v0.9.6 removed assert_risc_reset_at_core() (which mapped to
+    // send_tensix_risc_reset → a single absolute `set_risc_reset_state(core,
+    // mask)` with no read). Its replacement Cluster::assert_risc_reset() is
+    // read-modify-write: it first READS the soft-reset reg from the core, then
+    // ORs in the bits. That read is over NOC and is unreliable for exactly the
+    // mid-NOC-transaction cores this per-core unicast assert exists to force
+    // into reset — producing intermittent incomplete resets and flaky
+    // cross-test hangs. Restore the deterministic absolute write via TTDevice.
+    driver.get_tt_device(chip_id)->set_risc_reset_state(core, kAllTensixAssert);
 }
 
 void deassert_brisc_reset(

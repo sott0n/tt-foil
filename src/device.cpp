@@ -234,7 +234,7 @@ std::unique_ptr<Device> device_open(
     // the broadcast — subsequent L1 clear then races a still-running BRISC.
     //
     // Per-core unicast writes use a different NOC path and do land, so we
-    // issue one per Tensix translated coord. The default RISC mask asserts
+    // issue one per Tensix translated coord. RiscType::ALL_TENSIX asserts
     // ALL Tensix RISCs (BRISC + NCRISC + TRISC0/1/2), which also takes care
     // of subordinates left running by a previous dispatch.
     {
@@ -245,7 +245,7 @@ std::unique_ptr<Device> device_open(
         // forced router state to flush.
         for (int attempt = 0; attempt < 2; ++attempt) {
             for (const auto& t : all_tensix) {
-                dev->umd_driver->assert_risc_reset_at_core(dev->chip_id, t);
+                assert_tensix_reset(*dev->umd_driver, dev->chip_id, t);
             }
             dev->umd_driver->l1_membar(dev->chip_id);
         }
@@ -319,7 +319,7 @@ void device_close(Device& dev) {
             auto all_tensix = soc_desc.get_cores(
                 tt::CoreType::TENSIX, tt::CoordSystem::TRANSLATED);
             for (const auto& t : all_tensix) {
-                dev.umd_driver->assert_risc_reset_at_core(dev.chip_id, t);
+                assert_tensix_reset(*dev.umd_driver, dev.chip_id, t);
             }
             dev.umd_driver->l1_membar(dev.chip_id);
         } catch (...) {

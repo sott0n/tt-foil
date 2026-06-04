@@ -4,9 +4,13 @@
 
 #include <cstdint>
 
-#include "experimental/noc.h"
-#include "experimental/circular_buffer.h"
-#include "experimental/tensor.h"
+// tt-metal promoted the experimental/ kernel API into api/ (the experimental/
+// {noc,circular_buffer,tensor}.h headers were removed around the umd v0.9.6 bump).
+#include "api/dataflow/noc.h"
+#include "api/dataflow/circular_buffer.h"
+#include "api/tensor/tensor_accessor.h"
+#include "api/tensor/tensor_accessor_args.h"
+#include "api/tensor/noc_traits.h"  // noc_traits_t<TensorAccessor> (was in experimental/tensor.h)
 
 void kernel_main() {
     // Read parameters from the kernel arguments
@@ -30,8 +34,8 @@ void kernel_main() {
     const auto in0 = TensorAccessor(in0_args, in0_addr);
 
     // Create Device 2.0 experimental Noc and CircularBuffer objects
-    experimental::Noc noc;
-    experimental::CircularBuffer cb_in0_buf(cb_in0);
+    Noc noc;
+    CircularBuffer cb_in0_buf(cb_in0);
 
     // Loop over all the tiles and read them into the circular buffers
     for (uint32_t i = 0; i < n_tiles; i++) {

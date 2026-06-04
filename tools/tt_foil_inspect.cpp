@@ -15,6 +15,7 @@
 #include <unordered_set>
 
 #include <umd/device/cluster.hpp>
+#include <umd/device/tt_device/tt_device.hpp>
 #include <umd/device/types/core_coordinates.hpp>
 #include <umd/device/types/risc_type.hpp>
 
@@ -44,7 +45,10 @@ int main() try {
                 try {
                     tt::umd::CoreCoord lc{x, y, tt::CoreType::TENSIX, tt::CoordSystem::LOGICAL};
                     auto t = soc.translate_coord_to(lc, tt::CoordSystem::TRANSLATED);
-                    cluster.assert_risc_reset_at_core(chip, t);
+                    // Absolute soft-reset write (BRISC|NCRISC|TRISC0/1/2),
+                    // not the RMW Cluster::assert_risc_reset — see reset.cpp.
+                    cluster.get_tt_device(chip)->set_risc_reset_state(
+                        t, (1u << 11) | (1u << 12) | (1u << 13) | (1u << 14) | (1u << 18));
                 } catch (...) {}
             }
         }
