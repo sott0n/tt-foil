@@ -263,6 +263,52 @@ void set_matmul_grid_args(tt::foil::Device& dev, MatMulGridOp& op,
     }
 }
 
+void set_matmul_grid_args_sharded(tt::foil::Device& dev, MatMulGridOp& op,
+                                  const TensorDesc& a, const TensorDesc& b,
+                                  const TensorDesc& out,
+                                  uint32_t Mt, uint32_t Kt, uint32_t Nt,
+                                  const std::vector<tt::foil::CoreCoord>& cores,
+                                  uint32_t n_channels) {
+    using R = tt::foil::RiscBinary;
+    const uint32_t n_cores      = static_cast<uint32_t>(cores.size());
+    const uint32_t base         = Nt / n_cores;
+    const uint32_t rem          = Nt % n_cores;
+    const uint64_t a_dev_base   = a.buf->device_addr;
+    const uint64_t b_dev_base   = b.buf->device_addr;
+    const uint64_t out_dev_base = out.buf->device_addr;
+    const uint32_t Mb = matmul_mb(*op.l1_bufs[0], Kt, Mt);
+
+    uint32_t col_off_tiles = 0;
+    for (uint32_t c = 0; c < n_cores; ++c) {
+        const uint32_t Nt_per_core = base + (c < rem ? 1u : 0u);
+        const uint64_t col_off_bytes =
+            static_cast<uint64_t>(col_off_tiles) * kTileBytes;
+        // B from this core's channel; A + out stay on channel 0.
+        const uint64_t a_noc   = tt::foil::make_noc_dram_addr(dev, a_dev_base);
+        const uint64_t b_noc   = tt::foil::make_noc_dram_addr_channel(
+            dev, c % n_channels, b_dev_base + col_off_bytes);
+        const uint64_t dst_noc = tt::foil::make_noc_dram_addr(dev, out_dev_base + col_off_bytes);
+
+        std::array<uint32_t, 9> ra_brisc = {
+            (uint32_t)a_noc, (uint32_t)(a_noc >> 32),
+            (uint32_t)b_noc, (uint32_t)(b_noc >> 32),
+            Mt, Kt, Nt_per_core, /*Nt_stride=*/Nt, Mb,
+        };
+        std::array<uint32_t, 4> ra_trisc = {Mt, Kt, Nt_per_core, Mb};
+        std::array<uint32_t, 6> ra_ncrisc = {
+            (uint32_t)dst_noc, (uint32_t)(dst_noc >> 32),
+            Mt, Nt_per_core, /*Nt_stride=*/Nt, Mb,
+        };
+        col_off_tiles += Nt_per_core;
+        auto& k = *op.kernels[c];
+        tt::foil::set_runtime_args(dev, k, R::RiscId::BRISC,  ra_brisc);
+        tt::foil::set_runtime_args(dev, k, R::RiscId::TRISC0, ra_trisc);
+        tt::foil::set_runtime_args(dev, k, R::RiscId::TRISC1, ra_trisc);
+        tt::foil::set_runtime_args(dev, k, R::RiscId::TRISC2, ra_trisc);
+        tt::foil::set_runtime_args(dev, k, R::RiscId::NCRISC, ra_ncrisc);
+    }
+}
+
 void execute(tt::foil::Device& dev, MatMulGridOp& op) {
     std::vector<tt::foil::Kernel*> ptrs;
     ptrs.reserve(op.kernels.size());

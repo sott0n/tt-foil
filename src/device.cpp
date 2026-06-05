@@ -199,6 +199,21 @@ std::unique_ptr<Device> device_open(
         tt::CoordSystem::TRANSLATED);
     dev->dram0_offset = kBhDramCh0AddressOffset;
 
+    // Resolve every DRAM channel's NOC0 preferred-worker endpoint for
+    // multi-channel weight sharding. The NOC0 subchannel per channel comes
+    // from blackhole_140_arch.yaml `dram_views[*].worker_endpoint[0]`
+    // (ch0,4-7 → 2, ch1-3 → 0); address_offset is 0 for all channels.
+    {
+        static constexpr uint32_t kBhDramNoc0Subch[8] = {2, 0, 0, 0, 2, 2, 2, 2};
+        const int n_ch = soc_desc.get_num_dram_channels();
+        for (int k = 0; k < n_ch; ++k) {
+            const uint32_t sub = (k < 8) ? kBhDramNoc0Subch[k] : 0;
+            dev->dram_cores.push_back(soc_desc.get_dram_core_for_channel(
+                /*dram_chan=*/k, /*subchannel=*/sub, tt::CoordSystem::TRANSLATED));
+            dev->dram_offsets.push_back(0);
+        }
+    }
+
     // Init DRAM bump allocator from HAL.
     uint64_t dram_base = dev->hal->get_dev_addr(tt_metal::HalDramMemAddrType::UNRESERVED);
     uint64_t dram_size = dev->hal->get_dev_size(tt_metal::HalDramMemAddrType::UNRESERVED);
@@ -362,6 +377,24 @@ void write_dram(Device& dev, uint64_t addr, const void* src, std::size_t size) {
 
 void read_dram(Device& dev, uint64_t addr, void* dst, std::size_t size) {
     dev.umd_driver->read_from_device(dst, dev.chip_id, dev.dram0_core, addr + dev.dram0_offset, size);
+}
+
+uint32_t num_dram_channels(const Device& dev) {
+    return static_cast<uint32_t>(dev.dram_cores.size());
+}
+
+void write_dram_channel(Device& dev, uint32_t channel, uint64_t addr,
+                        const void* src, std::size_t size) {
+    dev.umd_driver->write_to_device(src, size, dev.chip_id,
+                                    dev.dram_cores.at(channel),
+                                    addr + dev.dram_offsets.at(channel));
+}
+
+void read_dram_channel(Device& dev, uint32_t channel, uint64_t addr,
+                       void* dst, std::size_t size) {
+    dev.umd_driver->read_from_device(dst, dev.chip_id,
+                                     dev.dram_cores.at(channel),
+                                     addr + dev.dram_offsets.at(channel), size);
 }
 
 }  // namespace tt::foil

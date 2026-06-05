@@ -205,4 +205,11 @@ uint64_t make_noc_dram_addr(Device& device, uint64_t dram_offset) {
                                  dram_offset + device.dram0_offset);
 }
 
+uint64_t make_noc_dram_addr_channel(Device& device, uint32_t channel, uint64_t dram_offset) {
+    // Same packing as make_noc_dram_addr but targeting an arbitrary DRAM
+    // channel's preferred-worker core (resolved at device_open).
+    return make_noc_unicast_addr(device.dram_cores.at(channel),
+                                 dram_offset + device.dram_offsets.at(channel));
+}
+
 }  // namespace tt::foil

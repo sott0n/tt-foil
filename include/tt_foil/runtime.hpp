@@ -217,4 +217,18 @@ uint64_t make_noc_unicast_addr(
 // noc_async_read / noc_async_write.
 uint64_t make_noc_dram_addr(Device& device, uint64_t dram_offset);
 
+// Multi-channel DRAM (decode weight-bandwidth sharding). Blackhole has 8
+// independent DRAM channels; the default allocator/addressing path uses only
+// channel 0. These let a caller place + address data on a specific channel so
+// multiple reader cores hit different channels concurrently.
+//   - num_dram_channels: how many channels device_open resolved (8 on BH).
+//   - make_noc_dram_addr_channel: like make_noc_dram_addr but for `channel`.
+//   - write/read_dram_channel: host I/O to a specific channel's address space.
+uint32_t num_dram_channels(const Device& device);
+uint64_t make_noc_dram_addr_channel(Device& device, uint32_t channel, uint64_t dram_offset);
+void write_dram_channel(Device& device, uint32_t channel, uint64_t addr,
+                        const void* src, std::size_t size);
+void read_dram_channel(Device& device, uint32_t channel, uint64_t addr,
+                       void* dst, std::size_t size);
+
 }  // namespace tt::foil

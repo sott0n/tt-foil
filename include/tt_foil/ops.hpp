@@ -130,6 +130,19 @@ void set_matmul_grid_args(tt::foil::Device& dev, MatMulGridOp& op,
                           const TensorDesc& out,
                           uint32_t Mt, uint32_t Kt, uint32_t Nt,
                           const std::vector<tt::foil::CoreCoord>& cores);
+// Multi-channel-B variant: identical to set_matmul_grid_args except core c
+// reads its B column-slab from DRAM channel (c % n_channels) instead of
+// channel 0, so n_channels reader cores stream weights from distinct DRAM
+// channels concurrently. A (replicated) and out stay on channel 0. The B
+// tensor must be present at b.buf->device_addr on every channel 0..n_channels-1
+// (caller's responsibility — see write_dram_channel). Used to measure /
+// exploit the per-channel decode read-bandwidth ceiling.
+void set_matmul_grid_args_sharded(tt::foil::Device& dev, MatMulGridOp& op,
+                                  const TensorDesc& a, const TensorDesc& b,
+                                  const TensorDesc& out,
+                                  uint32_t Mt, uint32_t Kt, uint32_t Nt,
+                                  const std::vector<tt::foil::CoreCoord>& cores,
+                                  uint32_t n_channels);
 void execute(tt::foil::Device& dev, MatMulGridOp& op);
 
 // Shape-keyed persistent matmul grid. Cache key is (Kt, n_cores, first_core),

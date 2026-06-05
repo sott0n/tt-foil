@@ -82,6 +82,13 @@ struct Device {
     tt::umd::CoreCoord          dram0_core{};
     uint64_t                    dram0_offset{0};
 
+    // All DRAM channels' preferred-worker cores (TRANSLATED) + address
+    // offsets, resolved at device_open. dram_cores[0] == dram0_core.
+    // Blackhole has 8 independent channels; used for multi-channel weight
+    // sharding to lift the single-channel decode read-bandwidth ceiling.
+    std::vector<tt::umd::CoreCoord> dram_cores;
+    std::vector<uint64_t>           dram_offsets;
+
     // Firmware ELF paths resolved at device_open. Cached so the runtime
     // manifest check in kernel_load() can compare kernel ELFs against the
     // firmware they were linked against. See src/kernel_manifest.cpp.
