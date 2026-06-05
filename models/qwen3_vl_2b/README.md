@@ -99,13 +99,29 @@ Blackhole chip (`TT_FOIL_DEVICE=0`), fast dispatch on, fresh `tt-smi -r`.
 
 Tokens emitted (must stay bit-identical across optimisations): `2303, 220, 220, 16, 13`.
 
-The seq=32 standing bench above is unaffected by the recent **flash-attention
-gqa** (`flash-attention-gqa`) and **WS matmul L1 budget** (`matmul-ws-budget`)
-work — both target the `qwen3vl_run` variable-length prefill path (seq≥64,
-`Mt>1`), which seq=32 (`Mt=1`) doesn't exercise. Their effect shows at longer
-prefills: e.g. **seq=512 prefill 1136→867 ms (-24%)**, seq=1024 2384→1872 ms
-(-21%), all bit-identical. See [`bench/PERF_HISTORY.md`](bench/PERF_HISTORY.md)
-for the full per-op breakdown.
+### Variable-length prefill (`qwen3vl_run`)
+
+The standing bench above is the fixed-length `qwen3_run` text path (seq=32,
+`Mt=1`, decode-dominated). Long prompts run through `qwen3vl_run`, whose
+**prefill** is where the recent **flash-attention gqa** (`flash-attention-gqa`)
+and **WS matmul L1 budget** (`matmul-ws-budget`, 2026-06-05) work lands.
+`prefill:total` (28 layers, `num_decode=0`), paired same-session runs on
+`TT_FOIL_DEVICE=0`:
+
+| seq | kSt | before | after | Δ |
+|-----|-----|--------|-------|---|
+| 32   | 1  | 166 ms  | 167 ms  | ~0 (Mt=1, no WS blocking) |
+| 128  | 4  | 301 ms  | 259 ms  | **-14%** |
+| 512  | 16 | 1105 ms | 867 ms  | **-22%** |
+| 1024 | 32 | 2355 ms | 1872 ms | **-20%** |
+
+`before` = WS A-row budget at 427 tiles; `after` = 700 tiles (real arena is
+713) — this lifts `mb_max` to 8 (Kt=64) / 2 (Kt=192 ffn_down), halving the
+ffn_down weight re-reads. All outputs bit-identical (same fp32 K-loop). The
+benefit grows with sequence length because WS blocking only helps `Mt>1`
+(seq≥64); seq=32 is byte-identical. seq=1024 end-to-end is itself unlocked by
+the flash-attention rework (St-independent L1). Full per-op breakdown in
+[`bench/PERF_HISTORY.md`](bench/PERF_HISTORY.md).
 
 ### Trajectory (selected iterations)
 
