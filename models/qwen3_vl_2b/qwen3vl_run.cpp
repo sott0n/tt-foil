@@ -1016,13 +1016,38 @@ int main(int argc, char** argv) try {
                  generated_tokens, decode_tokens_emitted);
     std::fprintf(stderr, "  ttft_cold_ms       %.1f\n", ttft_cold_ms);
     std::fprintf(stderr, "  ttft_warm_ms       %.1f\n", ttft_warm_ms);
+    double itl_ms = 0.0, decode_tps = 0.0;
     if (decode_tokens_emitted > 0) {
-        const double tpot_ms = decode_loop_ms / decode_tokens_emitted;
+        itl_ms     = decode_loop_ms / decode_tokens_emitted;  // inter-token latency
+        decode_tps = 1000.0 / itl_ms;
         std::fprintf(stderr, "  decode_loop_ms     %.1f  (%u tokens)\n",
                      decode_loop_ms, decode_tokens_emitted);
-        std::fprintf(stderr, "  tpot_ms            %.2f\n", tpot_ms);
-        std::fprintf(stderr, "  tokens_per_sec     %.2f\n", 1000.0 / tpot_ms);
+        std::fprintf(stderr, "  tpot_ms            %.2f\n", itl_ms);
+        std::fprintf(stderr, "  tokens_per_sec     %.2f\n", decode_tps);
     }
+
+    // -----------------------------------------------------------------
+    // perf_metrics: the six headline numbers mirrored in README.md.
+    // Prefill throughput uses the warm window (prefill start → first
+    // token) over the kS prompt tokens — this is the variable-length
+    // path, so it scales with prompt size. Cores utilization is the
+    // static footprint vs the Blackhole 14x10 = 140 Tensix worker grid.
+    // -----------------------------------------------------------------
+    constexpr uint32_t kWorkerGrid = 14 * 10;  // Blackhole functional workers
+    const double prefill_tps =
+        ttft_warm_ms > 0.0 ? (double)kS / (ttft_warm_ms / 1000.0) : 0.0;
+    const double core_util = 100.0 * (double)boot_cores.size() / (double)kWorkerGrid;
+    std::fprintf(stderr, "\n=== perf_metrics ===\n");
+    std::fprintf(stderr, "  prefill_tokens_per_sec   %8.1f  (%u tokens / %.1f ms)\n",
+                 prefill_tps, kS, ttft_warm_ms);
+    std::fprintf(stderr, "  decode_tokens_per_sec    %8.2f\n", decode_tps);
+    std::fprintf(stderr, "  ttft_ms                  %8.1f warm / %.1f cold\n",
+                 ttft_warm_ms, ttft_cold_ms);
+    std::fprintf(stderr, "  end_to_end_latency_ms    %8.1f  (= %.2f s)\n",
+                 wall_ms, wall_ms / 1000.0);
+    std::fprintf(stderr, "  inter_token_latency_ms   %8.2f\n", itl_ms);
+    std::fprintf(stderr, "  cores_utilization        %7.1f%%  (%zu booted / %u worker grid; matmul 4-8 active)\n",
+                 core_util, boot_cores.size(), kWorkerGrid);
     return 0;
 } catch (const std::exception& e) {
     std::fprintf(stderr, "qwen3vl_run: FAIL — %s\n", e.what());
