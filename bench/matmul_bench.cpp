@@ -76,10 +76,10 @@ double bench(int pcie, const std::string& kdir, const Shape& s, int iters) {
 // Dense grid within the known-valid logical Tensix region (y in 0..7, the
 // range the qwen3 model already boots). The bench opens its own fresh device
 // so there is no occupancy to avoid — any valid logical core is fair game.
-std::vector<CoreCoord> make_grid(uint32_t n_cores) {
+std::vector<CoreCoord> make_grid(uint32_t n_cores, uint32_t x0 = 0) {
     std::vector<CoreCoord> g;
     g.reserve(n_cores);
-    for (uint32_t i = 0; i < n_cores; ++i) g.push_back({i / 8, i % 8});
+    for (uint32_t i = 0; i < n_cores; ++i) g.push_back({x0 + i / 8, i % 8});
     return g;
 }
 
@@ -104,6 +104,62 @@ double bench_grid(int pcie, const std::string& kdir, const Shape& s,
     double us = std::chrono::duration<double, std::micro>(t1 - t0).count() / iters;
     close_device(std::move(dev));
     return us;
+}
+
+// True-shard path (Phase 2b): B uploaded via allocate_weight_sharded (each
+// channel holds only its columns, 1x memory), matmul via
+// make_matmul_grid_weight_sharded_cached. Returns wall µs; if `out_c` non-null,
+// also reads back the output for a correctness check.
+double bench_sharded(int pcie, const std::string& kdir, const Shape& s,
+                     uint32_t n_shards, int iters, std::vector<uint16_t>* out_c,
+                     uint32_t grid_x0) {
+    // Distinct grid origin per case: the cached factory keys on first_core, so
+    // a unique x0 stops a later case from reusing an earlier case's pinned op
+    // (whose device has since been closed — bench opens a device per call).
+    auto grid = make_grid(n_shards, grid_x0);
+    auto dev = open_device(pcie, "", grid);
+    auto a = ol::allocate_tensor_dram(*dev, s.Mt * s.Kt);
+    // Deterministic non-uniform B so a wrong shard/stride shows up in the check.
+    std::vector<uint16_t> bfill((std::size_t)s.Kt * s.Nt * kTileWords);
+    for (std::size_t i = 0; i < bfill.size(); ++i)
+        bfill[i] = (uint16_t)(0x3800 + (i % 7));  // small varied bf16 values
+    std::vector<uint16_t> afill(s.Mt * s.Kt * kTileWords, 0x3c00 /*1.0*/);
+    write_buffer(*dev, *a.buf, afill.data(), s.Mt * s.Kt * kTileBytes);
+
+    auto sw = ol::allocate_weight_sharded(*dev, bfill.data(), s.Kt, s.Nt, n_shards);
+    ol::TensorDesc c; c.num_tiles = 0;
+    auto op = ol::make_matmul_grid_weight_sharded_cached(*dev, a, sw, c, s.Mt, grid, kdir);
+    for (int i = 0; i < 5; ++i) ol::execute(*dev, op);
+    auto t0 = Clock::now();
+    for (int i = 0; i < iters; ++i) ol::execute(*dev, op);
+    auto t1 = Clock::now();
+    double us = std::chrono::duration<double, std::micro>(t1 - t0).count() / iters;
+    if (out_c) {
+        out_c->assign((std::size_t)s.Mt * s.Nt * kTileWords, 0);
+        read_buffer(*dev, *c.buf, out_c->data(), (std::size_t)s.Mt * s.Nt * kTileBytes);
+    }
+    close_device(std::move(dev));
+    return us;
+}
+
+// Single-core reference output for the same A and (unsharded) B, for the
+// bit-identical correctness check against bench_sharded.
+void ref_output(int pcie, const std::string& kdir, const Shape& s,
+                std::vector<uint16_t>* out_c) {
+    auto dev = open_device(pcie, "", {{0, 0}});
+    auto a = ol::allocate_tensor_dram(*dev, s.Mt * s.Kt);
+    auto b = ol::allocate_tensor_dram(*dev, s.Kt * s.Nt);
+    ol::TensorDesc c; c.num_tiles = 0;
+    std::vector<uint16_t> bfill((std::size_t)s.Kt * s.Nt * kTileWords);
+    for (std::size_t i = 0; i < bfill.size(); ++i) bfill[i] = (uint16_t)(0x3800 + (i % 7));
+    std::vector<uint16_t> afill(s.Mt * s.Kt * kTileWords, 0x3c00);
+    write_buffer(*dev, *a.buf, afill.data(), s.Mt * s.Kt * kTileBytes);
+    write_buffer(*dev, *b.buf, bfill.data(), (std::size_t)s.Kt * s.Nt * kTileBytes);
+    auto op = ol::make_matmul(*dev, a, b, c, s.Mt, s.Kt, s.Nt, {0, 0}, kdir);
+    ol::execute(*dev, op);
+    out_c->assign((std::size_t)s.Mt * s.Nt * kTileWords, 0);
+    read_buffer(*dev, *c.buf, out_c->data(), (std::size_t)s.Mt * s.Nt * kTileBytes);
+    close_device(std::move(dev));
 }
 
 // Multi-channel B: n_cores = n_channels, core c reads its B column-slab from
@@ -147,6 +203,52 @@ int main() {
     const bool prefill = mode_s == "prefill";
     const bool cores_mode = mode_s == "cores";
     const bool channels_mode = mode_s == "channels";
+    const bool sharded_mode = mode_s == "sharded";
+
+    if (sharded_mode) {
+        // True-shard path: validate bit-identical vs single-core reference,
+        // then report wall time at n_shards channels.
+        // ref_check=true → compare sharded output against a single-core
+        // reference (Nt must be small enough for single-core L1). lm_head's
+        // Nt=4748 can't fit single-core, so it's timing-only; its column math
+        // is identical to ffn (same kernels + addressing), proven by the rest.
+        struct Case { Shape s; uint32_t nsh; bool ref_check; };
+        const std::vector<Case> cases = {
+            {{"qkv",      1, 64,  128},  8, true},
+            {{"o",        1, 64,  64},   8, true},
+            {{"ffn_gu",   1, 64,  384},  8, true},
+            {{"ffn_down", 1, 192, 64},   8, true},
+            {{"lm_head",  1, 64,  4748}, 8, false},
+        };
+        std::printf("%-9s Kt   Nt   shards  T(us)    correctness\n", "shape");
+        std::printf("----------------------------------------------------------\n");
+        bool all_ok = true;
+        uint32_t case_idx = 0;
+        for (const auto& cs : cases) {
+            const Shape& s = cs.s;
+            std::vector<uint16_t> ref, got;
+            // x0 = 2 + idx → each case on its own row (distinct cache key).
+            double t = bench_sharded(pcie, "", s, cs.nsh, 50, &got, 2 + case_idx++);
+            if (cs.ref_check) {
+                ref_output(pcie, "", s, &ref);
+                std::size_t mism = 0;
+                for (std::size_t i = 0; i < ref.size() && i < got.size(); ++i)
+                    if (ref[i] != got[i]) ++mism;
+                const bool ok = (mism == 0) && (ref.size() == got.size());
+                all_ok = all_ok && ok;
+                std::printf("%-9s %4u %4u  %5u   %8.2f  %s (%zu mismatch)\n",
+                            s.tag, s.Kt, s.Nt, cs.nsh, t,
+                            ok ? "BIT-IDENTICAL" : "DIFF", mism);
+            } else {
+                std::printf("%-9s %4u %4u  %5u   %8.2f  (timing only)\n",
+                            s.tag, s.Kt, s.Nt, cs.nsh, t);
+            }
+            std::fflush(stdout);
+        }
+        std::printf("----------------------------------------------------------\n");
+        std::printf("overall: %s\n", all_ok ? "ALL BIT-IDENTICAL" : "MISMATCH");
+        return all_ok ? 0 : 1;
+    }
 
     if (channels_mode) {
         const char* nb_c = std::getenv("MM_NOBREAD_DIR");

@@ -226,6 +226,10 @@ uint64_t make_noc_dram_addr(Device& device, uint64_t dram_offset);
 //   - write/read_dram_channel: host I/O to a specific channel's address space.
 uint32_t num_dram_channels(const Device& device);
 uint64_t make_noc_dram_addr_channel(Device& device, uint32_t channel, uint64_t dram_offset);
+// Bump-allocate `bytes` from a specific channel's DRAM allocator; returns the
+// device address (valid on that channel's address space).
+uint64_t alloc_dram_channel(Device& device, uint32_t channel, std::size_t bytes,
+                            uint32_t alignment = 32);
 void write_dram_channel(Device& device, uint32_t channel, uint64_t addr,
                         const void* src, std::size_t size);
 void read_dram_channel(Device& device, uint32_t channel, uint64_t addr,

@@ -115,8 +115,11 @@ struct Device {
     // reset_l1/release_kernels cycles.
     std::unordered_map<uint64_t, std::unordered_set<const Kernel*>> pinned_kernels;
 
-    // DRAM bump allocator (channel 0)
-    DramAllocator dram_alloc;
+    // DRAM bump allocators, one per channel. dram_allocs[0] is the default
+    // channel used by allocate_buffer(DRAM); the rest back per-channel weight
+    // sharding (allocate_weight_sharded). All span the same UNRESERVED range
+    // since each channel is an independent address space.
+    std::vector<DramAllocator> dram_allocs;
 
     // Cores that were cold-booted at device_open time. kernel_load() only
     // accepts cores listed here. Order matches the `cores` argument to

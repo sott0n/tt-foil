@@ -217,7 +217,9 @@ std::unique_ptr<Device> device_open(
     // Init DRAM bump allocator from HAL.
     uint64_t dram_base = dev->hal->get_dev_addr(tt_metal::HalDramMemAddrType::UNRESERVED);
     uint64_t dram_size = dev->hal->get_dev_size(tt_metal::HalDramMemAddrType::UNRESERVED);
-    dev->dram_alloc = DramAllocator{dram_base, dram_base, dram_base + dram_size};
+    dev->dram_allocs.assign(
+        dev->dram_cores.empty() ? 1 : dev->dram_cores.size(),
+        DramAllocator{dram_base, dram_base, dram_base + dram_size});
 
     // ---------------------------------------------------------------------
     // Cold-boot every requested Tensix core. Sequential is fine for the
@@ -381,6 +383,11 @@ void read_dram(Device& dev, uint64_t addr, void* dst, std::size_t size) {
 
 uint32_t num_dram_channels(const Device& dev) {
     return static_cast<uint32_t>(dev.dram_cores.size());
+}
+
+uint64_t alloc_dram_channel(Device& dev, uint32_t channel, std::size_t bytes,
+                            uint32_t alignment) {
+    return dev.dram_allocs.at(channel).alloc(bytes, alignment);
 }
 
 void write_dram_channel(Device& dev, uint32_t channel, uint64_t addr,

@@ -168,6 +168,44 @@ MatMulGridOp make_matmul_grid_cached(tt::foil::Device& dev,
                                      uint32_t mb_max = 1);  // see make_matmul
 
 // =====================================================================
+// Channel-sharded weight (B operand spread across DRAM channels)
+// =====================================================================
+// A [Kt x Nt] kt-major weight whose Nt columns are split column-wise across
+// `channels.size()` DRAM channels. Shard c lives on channel `channels[c]` at
+// `addrs[c]` as a contiguous [Kt x widths[c]] kt-major sub-tensor; `col_off[c]`
+// is its global starting column (tiles). Lets a matmul grid read its weight
+// from N channels concurrently, lifting the single-channel read-BW ceiling
+// that bounds single-token decode. Output stays unsharded (channel 0).
+struct ShardedWeight {
+    uint32_t Kt{0};
+    uint32_t Nt{0};
+    std::vector<uint32_t> channels;
+    std::vector<uint64_t> addrs;
+    std::vector<uint32_t> widths;
+    std::vector<uint32_t> col_off;
+};
+
+// Allocate + upload a [Kt x Nt] kt-major weight (host_tiles laid out exactly
+// like allocate_tensor_dram: tile (kt,nt) at index kt*Nt+nt), split column-wise
+// across `n_shards` DRAM channels (shard c → channel c). The column split
+// matches make_matmul_grid's per-core split, so an n_shards-core grid reads
+// one shard per core. n_shards must be <= num_dram_channels(dev) and <= Nt.
+ShardedWeight allocate_weight_sharded(tt::foil::Device& dev,
+                                      const uint16_t* host_tiles,
+                                      uint32_t Kt, uint32_t Nt, uint32_t n_shards);
+
+// Persistent matmul grid whose B is a ShardedWeight. cores.size() must equal
+// b.channels.size() (one core per shard/channel). A is replicated (channel 0),
+// output is unsharded (channel 0) — kernels are byte-identical to the stock
+// grid; only B's per-core base/stride differ. Cached + pinned like
+// make_matmul_grid_cached.
+MatMulGridOp make_matmul_grid_weight_sharded_cached(
+    tt::foil::Device& dev,
+    const TensorDesc& a, const ShardedWeight& b, TensorDesc& out,
+    uint32_t Mt, const std::vector<tt::foil::CoreCoord>& cores,
+    const std::string& kernel_dir = "", uint32_t mb_max = 1);
+
+// =====================================================================
 // ElementwiseMul
 //   y = x * z   (elementwise, per-tile)
 // =====================================================================

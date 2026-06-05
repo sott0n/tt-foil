@@ -191,11 +191,18 @@ constexpr uint32_t kFFtFused = 2 * kFFt;           // gate + up
 
 struct LayerW {
     tt::foil::op_lib::TensorDesc ln1g, ln2g, qng, kng;
-    tt::foil::op_lib::TensorDesc Wqkv, Wo;
+    // Matmul weights are sharded column-wise across all 8 DRAM channels so
+    // the decode matmul grid (one core per channel) streams them from
+    // distinct channels concurrently, lifting the single-channel read-BW
+    // ceiling that bounds single-token decode.
+    tt::foil::op_lib::ShardedWeight Wqkv, Wo;
     // iter8: Wgate + Wup are fused along Nt into Wgateup. Wdown is
     // separate because it operates on the post-silu * up product.
-    tt::foil::op_lib::TensorDesc Wgateup, Wdown;
+    tt::foil::op_lib::ShardedWeight Wgateup, Wdown;
 };
+
+// Number of DRAM channels to shard matmul weights across (Blackhole has 8).
+constexpr uint32_t kShard = 8;
 
 // CPU-only stage: load 11 .bin files from disk and tile-ize them. No
 // device interaction so safe to run on worker threads in parallel.
@@ -265,10 +272,6 @@ LayerW upload_layer(tt::foil::Device& dev, const TiledLayer& T) {
     L.ln2g  = ol::allocate_tensor_dram(dev, kHt);
     L.qng   = ol::allocate_tensor_dram(dev, kDt);
     L.kng   = ol::allocate_tensor_dram(dev, kDt);
-    L.Wqkv  = ol::allocate_tensor_dram(dev, kHt * kNqkvDt);
-    L.Wo    = ol::allocate_tensor_dram(dev, kNqDt * kHt);
-    L.Wgateup = ol::allocate_tensor_dram(dev, kHt * kFFtFused);
-    L.Wdown   = ol::allocate_tensor_dram(dev, kFFt * kHt);
     auto up = [&](auto& t, const std::vector<uint16_t>& d) {
         tt::foil::write_buffer(dev, *t.buf, d.data(), d.size() * 2);
     };
@@ -276,10 +279,14 @@ LayerW upload_layer(tt::foil::Device& dev, const TiledLayer& T) {
     up(L.ln2g,  T.ln2g);
     up(L.qng,   T.qng);
     up(L.kng,   T.kng);
-    up(L.Wqkv,  T.Wqkv);
-    up(L.Wo,      T.Wo);
-    up(L.Wgateup, T.Wgateup);
-    up(L.Wdown,   T.Wdown);
+    // Matmul weights: column-sharded across kShard DRAM channels (each [Kt x Nt]
+    // kt-major, same layout allocate_tensor_dram used). The column split inside
+    // allocate_weight_sharded matches make_matmul_grid's per-core split, so a
+    // kShard-core grid reads one shard per core.
+    L.Wqkv    = ol::allocate_weight_sharded(dev, T.Wqkv.data(),    kHt,   kNqkvDt,   kShard);
+    L.Wo      = ol::allocate_weight_sharded(dev, T.Wo.data(),      kNqDt, kHt,       kShard);
+    L.Wgateup = ol::allocate_weight_sharded(dev, T.Wgateup.data(), kHt,   kFFtFused, kShard);
+    L.Wdown   = ol::allocate_weight_sharded(dev, T.Wdown.data(),   kFFt,  kHt,       kShard);
     return L;
 }
 
@@ -368,33 +375,25 @@ int main(int argc, char** argv) try {
     // -----------------------------------------------------------------
     // Persistent matmul grids (matmul OpCache).
     //
-    // L1 CB layout depends only on Kt. Mt/Nt are RTAs. So all Kt=64
-    // matmuls (qkv, o, ffn_gate+up) share one persistent kernel on
-    // kMatmulKt64Grid; ffn_down (Kt=192) gets a separate L1 layout on
-    // kMatmulKt192Grid; the 8-core lm_head shape gets a third pinned
-    // grid. All three grids are on disjoint cores so each pin's L1
-    // footprint stays isolated.
-    //
-    // Per-core L1 (within 855 KB user arena):
-    //   kMatmulKt64Grid   Kt=64,  cb_b depth 2*Kt → ~386 KB
-    //   kMatmulKt192Grid  Kt=192, cb_b depth Kt   → ~770 KB
-    //   kLmHeadGrid       Kt=64,  cb_b depth 2*Kt → ~386 KB
-    const std::vector<tt::foil::CoreCoord> kMatmulKt64Grid = {
-        {2, 0}, {2, 1}, {2, 2}, {2, 3},
+    // Weights are channel-sharded (allocate_weight_sharded), so each matmul
+    // runs on a kShard(=8)-core grid — one core per DRAM channel — reading its
+    // weight shard from its own channel. L1 CB layout depends only on Kt, so
+    // all Kt=64 matmuls (qkv, o, ffn_gate+up, lm_head) share one pinned grid;
+    // ffn_down (Kt=192) gets a separate L1 layout on its own grid. Disjoint
+    // cores so each pin's L1 footprint stays isolated.
+    //   kShardGrid64   Kt=64,  cb_b depth 2*Kt → ~386 KB / core
+    //   kShardGrid192  Kt=192, cb_b depth Kt   → ~770 KB / core
+    const std::vector<tt::foil::CoreCoord> kShardGrid64 = {
+        {2, 0}, {2, 1}, {2, 2}, {2, 3}, {2, 4}, {2, 5}, {2, 6}, {2, 7},
     };
-    const std::vector<tt::foil::CoreCoord> kMatmulKt192Grid = {
-        {3, 0}, {3, 1}, {3, 2}, {3, 3},
-    };
-    const std::vector<tt::foil::CoreCoord> kLmHeadGrid = {
-        {4, 0}, {4, 1}, {4, 2}, {4, 3},
-        {4, 4}, {4, 5}, {4, 6}, {4, 7},
+    const std::vector<tt::foil::CoreCoord> kShardGrid192 = {
+        {3, 0}, {3, 1}, {3, 2}, {3, 3}, {3, 4}, {3, 5}, {3, 6}, {3, 7},
     };
     // (0,0) is the default transient core for embed/argmax/etc. (`core` below)
     // + where rmsnorm_rope is pinned. Must be booted.
     std::vector<tt::foil::CoreCoord> boot_cores = { {0, 0} };
-    for (const auto& c : kMatmulKt64Grid)  boot_cores.push_back(c);
-    for (const auto& c : kMatmulKt192Grid) boot_cores.push_back(c);
-    for (const auto& c : kLmHeadGrid)      boot_cores.push_back(c);
+    for (const auto& c : kShardGrid64)  boot_cores.push_back(c);
+    for (const auto& c : kShardGrid192) boot_cores.push_back(c);
     const bool use_fd = std::getenv("TT_FOIL_FAST_DISPATCH") != nullptr;
     const tt::foil::CoreCoord fd_dispatcher_core{1, 0};
     if (use_fd) {
@@ -442,11 +441,10 @@ int main(int argc, char** argv) try {
                                static_cast<std::size_t>(kV) * kH * 2);
     }
 
-    auto T_W_lm = ol::allocate_tensor_dram(*dev, kHt * kVt);
+    ol::ShardedWeight T_W_lm;
     {
         auto lmhead_tiles = fut_lmhead_tiles.get();
-        tt::foil::write_buffer(*dev, *T_W_lm.buf, lmhead_tiles.data(),
-                               lmhead_tiles.size() * 2);
+        T_W_lm = ol::allocate_weight_sharded(*dev, lmhead_tiles.data(), kHt, kVt, kShard);
     }
 
     auto T_cos     = ol::allocate_tensor_dram(*dev, kSt * kDtHalf);
@@ -543,40 +541,40 @@ int main(int argc, char** argv) try {
         tt::foil::release_kernels(*dev, core); tt::foil::reset_l1(*dev, core);
         g_prof.add(tag, std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
     };
-    // Multi-core matmul: cached per (Kt, n_cores, first_core). First
-    // call on a given key invokes the full make_matmul_grid + pins each
-    // per-core kernel; subsequent calls are pure RTA refresh + dispatch.
-    // NO release_kernels / reset_l1 — those would rewind the L1 past the
-    // pinned watermark and unpin the kernel.
+    // Channel-sharded matmul: weight B lives across kShard DRAM channels;
+    // each grid core reads its shard from its own channel. Cached per
+    // (Kt, n_cores, first_core); first call builds + pins the grid, later
+    // calls are pure RTA refresh. NO release_kernels / reset_l1 — those would
+    // rewind the L1 past the pinned watermark and unpin the kernel. The Nt
+    // arg is unused (shard widths come from the ShardedWeight); kept so call
+    // sites read the same as before.
     auto run_matmul_on = [&](const char* tag,
                              const std::vector<tt::foil::CoreCoord>& grid,
                              const ol::TensorDesc& a,
-                             const ol::TensorDesc& b,
+                             const ol::ShardedWeight& b,
                              ol::TensorDesc& out,
-                             uint32_t Mt, uint32_t Kt, uint32_t Nt) {
+                             uint32_t Mt) {
         auto t0 = Clock::now();
-        auto op = ol::make_matmul_grid_cached(*dev, a, b, out, Mt, Kt, Nt, grid);
+        auto op = ol::make_matmul_grid_weight_sharded_cached(*dev, a, b, out, Mt, grid);
         ol::execute(*dev, op);
-        // NO release_kernels / reset_l1 — matmul is pinned. Rewinding
-        // would invalidate the cached kernel.
         g_prof.add(tag, std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
     };
-    // Kt=64 matmuls (qkv, o, ffn_gate+up) → one shared cache entry on
-    // kMatmulKt64Grid. Kt=192 (ffn_down) → kMatmulKt192Grid.
+    // Kt=64 weights (qkv, o, ffn_gate+up, lm_head) → kShardGrid64.
+    // Kt=192 (ffn_down) → kShardGrid192.
     auto run_matmul_grid = [&](const char* tag,
                                const ol::TensorDesc& a,
-                               const ol::TensorDesc& b,
+                               const ol::ShardedWeight& b,
                                ol::TensorDesc& out,
-                               uint32_t Mt, uint32_t Kt, uint32_t Nt) {
-        const auto& grid = (Kt == kHt) ? kMatmulKt64Grid : kMatmulKt192Grid;
-        run_matmul_on(tag, grid, a, b, out, Mt, Kt, Nt);
+                               uint32_t Mt, uint32_t Kt, uint32_t /*Nt*/) {
+        const auto& grid = (Kt == kHt) ? kShardGrid64 : kShardGrid192;
+        run_matmul_on(tag, grid, a, b, out, Mt);
     };
     auto run_matmul_lmhead = [&](const char* tag,
                                  const ol::TensorDesc& a,
-                                 const ol::TensorDesc& b,
+                                 const ol::ShardedWeight& b,
                                  ol::TensorDesc& out,
-                                 uint32_t Mt, uint32_t Kt, uint32_t Nt) {
-        run_matmul_on(tag, kLmHeadGrid, a, b, out, Mt, Kt, Nt);
+                                 uint32_t Mt, uint32_t /*Kt*/, uint32_t /*Nt*/) {
+        run_matmul_on(tag, kShardGrid64, a, b, out, Mt);
     };
 
     const uint32_t kTotalNk    = kNkDt * kTileW;
@@ -944,8 +942,8 @@ int main(int argc, char** argv) try {
     // Prefill throughput uses the warm window (prefill start → first
     // token = prefill compute + lm_head + argmax) over kS prompt tokens.
     // Cores utilization is the static footprint: pinned worker cores vs
-    // the Blackhole 14x10 = 140 Tensix worker grid (matmul itself shards
-    // over 4-8 of these at a time).
+    // the Blackhole 14x10 = 140 Tensix worker grid (each matmul shards its
+    // channel-sharded weight over kShard=8 of these).
     // -----------------------------------------------------------------
     constexpr uint32_t kWorkerGrid = 14 * 10;  // Blackhole functional workers
     const double prefill_tps =
@@ -960,7 +958,7 @@ int main(int argc, char** argv) try {
     std::fprintf(stderr, "  end_to_end_latency_ms    %8.1f  (= %.2f s)\n",
                  wall_ms, wall_ms / 1000.0);
     std::fprintf(stderr, "  inter_token_latency_ms   %8.2f\n", itl_ms);
-    std::fprintf(stderr, "  cores_utilization        %7.1f%%  (%zu booted / %u worker grid; matmul 4-8 active)\n",
+    std::fprintf(stderr, "  cores_utilization        %7.1f%%  (%zu booted / %u worker grid; matmul shards weights over 8 DRAM channels)\n",
                  core_util, boot_cores.size(), kWorkerGrid);
     return 0;
 } catch (const std::exception& e) {

@@ -22,7 +22,7 @@ Buffer* buffer_alloc(Device& dev, BufferLocation loc, std::size_t size_bytes, Co
             break;
         }
         case BufferLocation::DRAM: {
-            dev_addr = dev.dram_alloc.alloc(size_bytes, /*alignment=*/32);
+            dev_addr = dev.dram_allocs[0].alloc(size_bytes, /*alignment=*/32);
             break;
         }
     }
