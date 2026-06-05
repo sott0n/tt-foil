@@ -112,7 +112,7 @@ int main() try {
     // Build multi-head BF16 buffers by replicating the single-head data.
     const uint32_t Nq = kNumQ  * kD;
     const uint32_t Nk = kNumKv * kD;
-    std::vector<uint16_t> q_rm(kS * Nq), v_rm(kS * Nk), kt_rm(Nk * kS), mask_rm(kS * kS);
+    std::vector<uint16_t> q_rm(kS * Nq), v_rm(kS * Nk), kt_rm(Nk * kS);
     for (uint32_t h = 0; h < kNumQ; ++h)
         for (uint32_t r = 0; r < kS; ++r)
             for (uint32_t c = 0; c < kD; ++c)
@@ -127,19 +127,23 @@ int main() try {
             for (uint32_t s = 0; s < kS; ++s)
                 kt_rm[(kv * kD + d) * kS + s] = f32_to_bf16(K1[s * kD + d]);
     }
-    for (uint32_t i = 0; i < kS * kS; ++i) mask_rm[i] = f32_to_bf16(mask_f[i]);
+    // Flash gqa_fused: device-side mask is a single 32x32 lower-triangular tile.
+    std::vector<uint16_t> tri_rm(kTileH * kTileW, 0);
+    for (uint32_t r = 0; r < kTileH; ++r)
+        for (uint32_t c = 0; c <= r; ++c)
+            tri_rm[r * kTileW + c] = f32_to_bf16(1.0f);
 
-    auto q_tiles  = tile2d(q_rm,    kS, Nq);
-    auto kt_tiles = tile2d(kt_rm,   Nk, kS);
-    auto v_tiles  = tile2d(v_rm,    kS, Nk);
-    auto m_tiles  = tile2d(mask_rm, kS, kS);
+    auto q_tiles  = tile2d(q_rm,   kS, Nq);
+    auto kt_tiles = tile2d(kt_rm,  Nk, kS);
+    auto v_tiles  = tile2d(v_rm,   kS, Nk);
+    auto m_tiles  = tile2d(tri_rm, kTileH, kTileW);  // single tile
 
     auto dev = tt::foil::open_device(pcie_index, "", {{0, 0}});
     namespace ol = tt::foil::op_lib;
     auto q  = ol::allocate_tensor_dram(*dev, kSt * kNumQ  * kDt);
     auto kt = ol::allocate_tensor_dram(*dev, kNumKv * kDt * kSt);
     auto v  = ol::allocate_tensor_dram(*dev, kSt * kNumKv * kDt);
-    auto m  = ol::allocate_tensor_dram(*dev, kSt * kSt);
+    auto m  = ol::allocate_tensor_dram(*dev, 1);  // single tri tile (flash)
     ol::TensorDesc out;
     tt::foil::write_buffer(*dev, *q.buf,  q_tiles.data(),  q_tiles.size()  * 2);
     tt::foil::write_buffer(*dev, *kt.buf, kt_tiles.data(), kt_tiles.size() * 2);

@@ -405,16 +405,17 @@ int main(int argc, char** argv) try {
         std::copy(s.begin(), s.end(), sin_rm.begin() + r * kHalf);
     }
 
-    // Prefill causal mask [kS × kS].
+    // Prefill causal mask: flash gqa_fused needs only the within-block 32x32
+    // lower-triangular tile (off-diagonal key blocks are fully in-range).
     const uint16_t one_bf16 = f32_to_bf16(1.0f);
-    std::vector<uint16_t> mask_rm(static_cast<size_t>(kS) * kS, 0);
-    for (uint32_t i = 0; i < kS; ++i)
-        for (uint32_t j = 0; j <= i; ++j)
-            mask_rm[i * kS + j] = one_bf16;
+    std::vector<uint16_t> tri_rm(static_cast<size_t>(kTileH) * kTileW, 0);
+    for (uint32_t r = 0; r < kTileH; ++r)
+        for (uint32_t c = 0; c <= r; ++c)
+            tri_rm[r * kTileW + c] = one_bf16;
 
     auto cos_tiles    = tile2d(cos_rm, kS, kHalf);
     auto sin_tiles    = tile2d(sin_rm, kS, kHalf);
-    auto mask_tiles   = tile2d(mask_rm, kS, kS);
+    auto mask_tiles   = tile2d(tri_rm, kTileH, kTileW);  // single tile
     auto final_g_tiles = fut_final_g_tiles.get();
 
     // -----------------------------------------------------------------------
@@ -559,7 +560,7 @@ int main(int argc, char** argv) try {
     // -----------------------------------------------------------------------
     auto T_cos     = ol::allocate_tensor_dram(*dev, kSt * kDtHalf);
     auto T_sin_pre = ol::allocate_tensor_dram(*dev, kSt * kDtHalf);
-    auto T_mask    = ol::allocate_tensor_dram(*dev, kSt * kSt);
+    auto T_mask    = ol::allocate_tensor_dram(*dev, 1);  // single tri tile (flash)
     tt::foil::write_buffer(*dev, *T_cos.buf,     cos_tiles.data(),  cos_tiles.size() * 2);
     tt::foil::write_buffer(*dev, *T_sin_pre.buf, sin_tiles.data(),  sin_tiles.size() * 2);
     tt::foil::write_buffer(*dev, *T_mask.buf,    mask_tiles.data(), mask_tiles.size() * 2);

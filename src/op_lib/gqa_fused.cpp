@@ -29,9 +29,6 @@ GqaFusedOp make_gqa_fused(tt::foil::Device& dev,
     if (num_kv == 0 || num_q % num_kv != 0)
         throw std::runtime_error("op_lib::make_gqa_fused: num_q must be a multiple of num_kv");
 
-    const uint32_t qkv_tiles  = St * Dt;          // per-head Q / V
-    const uint32_t kt_tiles   = Dt * St;          // per-head KT
-    const uint32_t mask_tiles = St * St;
     const uint32_t total_Nq   = num_q  * Dt;
     const uint32_t total_Nk   = num_kv * Dt;
 
@@ -41,8 +38,9 @@ GqaFusedOp make_gqa_fused(tt::foil::Device& dev,
         throw std::runtime_error("op_lib::make_gqa_fused: kt.num_tiles != num_kv*Dt * St");
     if (v.num_tiles != St * total_Nk)
         throw std::runtime_error("op_lib::make_gqa_fused: v.num_tiles != St * num_kv * Dt");
-    if (mask.num_tiles != mask_tiles)
-        throw std::runtime_error("op_lib::make_gqa_fused: mask.num_tiles != St*St");
+    // Flash form: the causal mask is a single 32x32 lower-triangular tile.
+    if (mask.num_tiles != 1)
+        throw std::runtime_error("op_lib::make_gqa_fused: mask.num_tiles != 1 (flash tri tile)");
     if (out.num_tiles == 0)
         out = allocate_tensor_dram(dev, St * total_Nq);
     else if (out.num_tiles != St * total_Nq)
@@ -57,28 +55,34 @@ GqaFusedOp make_gqa_fused(tt::foil::Device& dev,
         tt::foil::write_buffer(dev, *op.dram_scaler, s.data(), kTileBytes);
     }
 
-    const uint32_t qkv_bytes  = qkv_tiles  * kTileBytes;
-    const uint32_t kt_bytes   = kt_tiles   * kTileBytes;
-    const uint32_t mask_bytes = mask_tiles * kTileBytes;
-    const uint32_t row_bytes  = St         * kTileBytes;
-
-    auto alloc_l1 = [&](uint32_t bytes) {
-        return tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, bytes, core);
+    // Flash CB sizing — all O(Dt), independent of St. Each CB's fifo_size is
+    // exactly depth*page_size (the num_pages*page_size invariant). cb_q/kt/v are
+    // double-buffered (2*Dt) for reader/compute overlap; O and l use TWO
+    // ping/pong CBs (cb_o_a/b, cb_l_a/b) since a compute kernel must not
+    // wait_front + reserve_back the same CB in one iteration.
+    auto alloc_l1 = [&](uint32_t tiles) {
+        return tt::foil::allocate_buffer(
+            dev, tt::foil::BufferLocation::L1, tiles * kTileBytes, core);
     };
-    auto l1_q         = alloc_l1(qkv_bytes);
-    auto l1_kt        = alloc_l1(kt_bytes);
-    auto l1_v         = alloc_l1(qkv_bytes);
-    auto l1_reduce    = alloc_l1(kTileBytes);
-    auto l1_scores    = alloc_l1(row_bytes);
-    auto l1_exp       = alloc_l1(row_bytes);
-    auto l1_sum       = alloc_l1(kTileBytes);
-    auto l1_recip     = alloc_l1(kTileBytes);
-    auto l1_softmaxed = alloc_l1(row_bytes);
-    auto l1_exp_m     = alloc_l1(row_bytes);
-    auto l1_mask      = alloc_l1(mask_bytes);
-    auto l1_out       = alloc_l1(kTileBytes);
-    op.l1_cbs = {l1_q, l1_kt, l1_v, l1_reduce, l1_scores, l1_exp,
-                 l1_sum, l1_recip, l1_softmaxed, l1_exp_m, l1_mask, l1_out};
+    const uint32_t dq = 2 * Dt;   // double-buffered stream depth
+    auto l1_q      = alloc_l1(dq);
+    auto l1_kt     = alloc_l1(dq);
+    auto l1_v      = alloc_l1(dq);
+    auto l1_reduce = alloc_l1(1);
+    auto l1_s      = alloc_l1(2);
+    auto l1_p      = alloc_l1(2);
+    auto l1_pm     = alloc_l1(2);
+    auto l1_rs     = alloc_l1(2);
+    auto l1_pv     = alloc_l1(Dt);
+    auto l1_o_a    = alloc_l1(Dt);
+    auto l1_o_b    = alloc_l1(Dt);
+    auto l1_l_a    = alloc_l1(1);
+    auto l1_l_b    = alloc_l1(1);
+    auto l1_recip  = alloc_l1(1);
+    auto l1_tri    = alloc_l1(1);
+    auto l1_out    = alloc_l1(2);
+    op.l1_cbs = {l1_q, l1_kt, l1_v, l1_reduce, l1_s, l1_p, l1_pm, l1_rs,
+                 l1_pv, l1_o_a, l1_o_b, l1_l_a, l1_l_b, l1_recip, l1_tri, l1_out};
 
     using R = tt::foil::RiscBinary;
     std::array<R, 5> bins = {{
@@ -90,19 +94,24 @@ GqaFusedOp make_gqa_fused(tt::foil::Device& dev,
     }};
     op.kernel = tt::foil::load_kernel(dev, bins, core);
 
-    std::array<tt::foil::CbConfig, 12> cbs = {{
-        {0,  l1_q->device_addr,         qkv_bytes,  qkv_tiles,  kTileBytes},
-        {1,  l1_kt->device_addr,        kt_bytes,   kt_tiles,   kTileBytes},
-        {2,  l1_v->device_addr,         qkv_bytes,  qkv_tiles,  kTileBytes},
-        {3,  l1_reduce->device_addr,    kTileBytes, 1,          kTileBytes},
-        {4,  l1_scores->device_addr,    row_bytes,  St,         kTileBytes},
-        {5,  l1_exp->device_addr,       row_bytes,  St,         kTileBytes},
-        {6,  l1_sum->device_addr,       kTileBytes, 1,          kTileBytes},
-        {7,  l1_recip->device_addr,     kTileBytes, 1,          kTileBytes},
-        {8,  l1_softmaxed->device_addr, row_bytes,  St,         kTileBytes},
-        {9,  l1_exp_m->device_addr,     row_bytes,  St,         kTileBytes},
-        {10, l1_mask->device_addr,      mask_bytes, mask_tiles, kTileBytes},
-        {16, l1_out->device_addr,       kTileBytes, 1,          kTileBytes},
+    const uint32_t tb = kTileBytes;
+    std::array<tt::foil::CbConfig, 16> cbs = {{
+        {0,  l1_q->device_addr,      dq * tb, dq, tb},
+        {1,  l1_kt->device_addr,     dq * tb, dq, tb},
+        {2,  l1_v->device_addr,      dq * tb, dq, tb},
+        {3,  l1_reduce->device_addr, tb,      1,  tb},
+        {4,  l1_s->device_addr,      2 * tb,  2,  tb},
+        {5,  l1_p->device_addr,      2 * tb,  2,  tb},
+        {6,  l1_pm->device_addr,     2 * tb,  2,  tb},
+        {7,  l1_rs->device_addr,     2 * tb,  2,  tb},
+        {8,  l1_pv->device_addr,     Dt * tb, Dt, tb},
+        {9,  l1_o_a->device_addr,    Dt * tb, Dt, tb},
+        {10, l1_o_b->device_addr,    Dt * tb, Dt, tb},
+        {11, l1_l_a->device_addr,    tb,      1,  tb},
+        {12, l1_l_b->device_addr,    tb,      1,  tb},
+        {13, l1_recip->device_addr,  tb,      1,  tb},
+        {14, l1_tri->device_addr,    tb,      1,  tb},
+        {16, l1_out->device_addr,    2 * tb,  2,  tb},
     }};
     tt::foil::register_cbs(dev, *op.kernel, cbs);
 

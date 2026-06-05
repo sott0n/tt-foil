@@ -1,22 +1,29 @@
 // SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
 // SPDX-License-Identifier: Apache-2.0
 //
-// BRISC reader for fused multi-head GQA attention.
+// BRISC reader for fused multi-head GQA attention (FLASH STREAMING form).
 //
-// Loads the full Q [St, num_q*Dt], KT [num_kv*Dt, St], V [St, num_kv*Dt],
-// streaming each q_head's Q_h / KT_h / V_h tiles into cb_q / cb_kt / cb_v
-// in order so the compute kernel can run the per-head attention math
-// num_q times without re-launching the kernel.
+// Streams ONE key/value block at a time so the compute kernel's L1 footprint
+// is O(Dt), independent of St. Per (q_head h, query row-tile qt):
+//   - push Q_qt once (Dt tiles)
+//   - for each causal key block j in 0..=qt: push KT column j (Dt tiles,
+//     strided by St in the [num_kv*Dt, St] layout) then V row j (Dt tiles,
+//     contiguous in the [St, num_kv*Dt] layout).
 //
-// Mask and scaler are loaded once upfront and stay resident in their CBs
-// across all heads.
+// TRADEOFF: KT/V are re-read for every qt, so DRAM read traffic is
+// O(St^2 * Dt * num_q) vs the old O(St * Dt * num_q). This is the price of a
+// bounded L1; prefill perf is secondary to running at long sequence length.
+// cb_q/cb_kt/cb_v are double-buffered (depth 2*Dt) so reads overlap compute.
+//
+// The causal mask is now a single 32x32 lower-triangular tile, loaded once
+// into cb_tri and kept resident (off-diagonal blocks need no mask).
 //
 // Runtime args (BRISC):
 //   arg[0,1]  = q_noc   (lo, hi)   Q       [St, num_q*Dt]
 //   arg[2,3]  = kt_noc  (lo, hi)   KT      [num_kv*Dt, St]
 //   arg[4,5]  = v_noc   (lo, hi)   V       [St, num_kv*Dt]
 //   arg[6,7]  = scaler_noc         scaler tile (BF16(1.0))
-//   arg[8,9]  = mask_noc           mask    [St, St]
+//   arg[8,9]  = mask_noc           tri mask (single tile)
 //   arg[10]   = St
 //   arg[11]   = Dt
 //   arg[12]   = num_q
@@ -44,76 +51,65 @@ void kernel_main() {
     constexpr uint32_t cb_kt     = 1;
     constexpr uint32_t cb_v      = 2;
     constexpr uint32_t cb_reduce = 3;
-    constexpr uint32_t cb_mask   = 10;
+    constexpr uint32_t cb_tri    = 14;
     constexpr uint32_t kTileBytes = 32 * 32 * 2;
 
     const uint32_t gqa_groups = num_q / num_kv;
-    const uint32_t qkv_tiles  = St * Dt;
-    const uint32_t kt_tiles   = Dt * St;
-    const uint32_t mask_tiles = St * St;
     const uint32_t total_Nq   = num_q  * Dt;          // tile-cols of Q / out
-    const uint32_t total_Nk   = num_kv * Dt;          // tile-cols of V / tile-rows of KT
+    const uint32_t total_Nk   = num_kv * Dt;          // tile-cols of V
 
-    // ---- One-shot loads (persistent across heads) ----
+    // ---- One-shot loads (resident across heads) ----
     cb_reserve_back(cb_reduce, 1);
     noc_async_read(scaler_noc, get_write_ptr(cb_reduce), kTileBytes);
     noc_async_read_barrier();
     cb_push_back(cb_reduce, 1);
 
-    cb_reserve_back(cb_mask, mask_tiles);
-    {
-        uint32_t base = get_write_ptr(cb_mask);
-        for (uint32_t i = 0; i < mask_tiles; ++i) {
-            noc_async_read(mask_noc + i * kTileBytes, base + i * kTileBytes, kTileBytes);
-        }
-        noc_async_read_barrier();
-    }
-    cb_push_back(cb_mask, mask_tiles);
+    cb_reserve_back(cb_tri, 1);
+    noc_async_read(mask_noc, get_write_ptr(cb_tri), kTileBytes);
+    noc_async_read_barrier();
+    cb_push_back(cb_tri, 1);
 
-    // ---- Per-head streaming ----
     for (uint32_t h = 0; h < num_q; ++h) {
         const uint32_t kv = h / gqa_groups;
 
-        // Q_h tiles: (st, h*Dt + dt) in [St, num_q*Dt] layout
-        cb_reserve_back(cb_q, qkv_tiles);
-        {
-            uint32_t base = get_write_ptr(cb_q);
-            uint32_t idx  = 0;
-            for (uint32_t st = 0; st < St; ++st) {
-                for (uint32_t dt = 0; dt < Dt; ++dt, ++idx) {
-                    uint64_t src = q_noc + (st * total_Nq + h * Dt + dt) * kTileBytes;
-                    noc_async_read(src, base + idx * kTileBytes, kTileBytes);
+        for (uint32_t qt = 0; qt < St; ++qt) {
+            // Q_qt tiles: (qt, h*Dt + dt) in [St, num_q*Dt]
+            cb_reserve_back(cb_q, Dt);
+            {
+                uint32_t base = get_write_ptr(cb_q);
+                for (uint32_t dt = 0; dt < Dt; ++dt) {
+                    uint64_t src = q_noc + (uint64_t)(qt * total_Nq + h * Dt + dt) * kTileBytes;
+                    noc_async_read(src, base + dt * kTileBytes, kTileBytes);
                 }
+                noc_async_read_barrier();
             }
-            noc_async_read_barrier();
-        }
-        cb_push_back(cb_q, qkv_tiles);
+            cb_push_back(cb_q, Dt);
 
-        // KT_h tiles: (kv*Dt + rt, ct) in [num_kv*Dt, St] — contiguous block.
-        cb_reserve_back(cb_kt, kt_tiles);
-        {
-            uint32_t base    = get_write_ptr(cb_kt);
-            uint64_t src_blk = kt_noc + (kv * Dt) * St * kTileBytes;
-            for (uint32_t i = 0; i < kt_tiles; ++i) {
-                noc_async_read(src_blk + i * kTileBytes, base + i * kTileBytes, kTileBytes);
-            }
-            noc_async_read_barrier();
-        }
-        cb_push_back(cb_kt, kt_tiles);
-
-        // V_h tiles: (st, kv*Dt + dt) in [St, num_kv*Dt] layout
-        cb_reserve_back(cb_v, qkv_tiles);
-        {
-            uint32_t base = get_write_ptr(cb_v);
-            uint32_t idx  = 0;
-            for (uint32_t st = 0; st < St; ++st) {
-                for (uint32_t dt = 0; dt < Dt; ++dt, ++idx) {
-                    uint64_t src = v_noc + (st * total_Nk + kv * Dt + dt) * kTileBytes;
-                    noc_async_read(src, base + idx * kTileBytes, kTileBytes);
+            for (uint32_t j = 0; j <= qt; ++j) {
+                // KT column j tiles: (kv*Dt + k, j) in [num_kv*Dt, St] — strided by St.
+                cb_reserve_back(cb_kt, Dt);
+                {
+                    uint32_t base = get_write_ptr(cb_kt);
+                    for (uint32_t k = 0; k < Dt; ++k) {
+                        uint64_t src = kt_noc + (uint64_t)((kv * Dt + k) * St + j) * kTileBytes;
+                        noc_async_read(src, base + k * kTileBytes, kTileBytes);
+                    }
+                    noc_async_read_barrier();
                 }
+                cb_push_back(cb_kt, Dt);
+
+                // V row j tiles: (j, kv*Dt + dt) in [St, num_kv*Dt] — contiguous.
+                cb_reserve_back(cb_v, Dt);
+                {
+                    uint32_t base = get_write_ptr(cb_v);
+                    for (uint32_t dt = 0; dt < Dt; ++dt) {
+                        uint64_t src = v_noc + (uint64_t)(j * total_Nk + kv * Dt + dt) * kTileBytes;
+                        noc_async_read(src, base + dt * kTileBytes, kTileBytes);
+                    }
+                    noc_async_read_barrier();
+                }
+                cb_push_back(cb_v, Dt);
             }
-            noc_async_read_barrier();
         }
-        cb_push_back(cb_v, qkv_tiles);
     }
 }

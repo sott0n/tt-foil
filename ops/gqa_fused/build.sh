@@ -97,7 +97,7 @@ build_compute() {
     local src="$1" out_name="$2"
     echo "#include \"$src\"" > "$BUILD/kernel_includes.hpp"
 
-    # chlkc_list.h stub: CBs 0-7 (inputs/intermediates) and CB 16 (output) all BF16 (=5)
+    # chlkc_list.h stub: CBs 0-14 (inputs/intermediates) and CB 16 (output) all BF16 (=5)
     # Binary + reduce + bcast ops require ckernel::MathFidelity enum.
     cat > "$BUILD/chlkc_list.h" <<'EOF'
 #pragma once
@@ -111,19 +111,19 @@ constexpr ckernel::MathFidelity MATH_FIDELITY = static_cast<ckernel::MathFidelit
 #endif
 // Float16_b (=5) for CB 0-7, 16; 255 for others
 constexpr unsigned char pack_src_format[32] = {
-    5,5,5,5,5,5,5,5,5,5,5,255,255,255,255,255,
+    5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,255,
     5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
 };
 constexpr unsigned char pack_dst_format[32] = {
-    5,5,5,5,5,5,5,5,5,5,5,255,255,255,255,255,
+    5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,255,
     5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
 };
 constexpr std::int32_t unpack_src_format[32] = {
-    5,5,5,5,5,5,5,5,5,5,5,255,255,255,255,255,
+    5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,255,
     5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
 };
 constexpr std::int32_t unpack_dst_format[32] = {
-    5,5,5,5,5,5,5,5,5,5,5,255,255,255,255,255,
+    5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,255,
     5,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
 };
 constexpr std::uint8_t  pack_tile_num_faces[32]    = { 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4 };

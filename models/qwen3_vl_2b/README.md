@@ -17,7 +17,10 @@ device-resident.
 
 vocab=151936, hidden=2048, ffn=6144, num_q=16, num_kv=8, head_dim=128,
 rope_theta=5e6, rms_norm_eps=1e-6, tie_word_embeddings=True, 28 layers.
-Fixed `seq=32` (right-padded with `<|endoftext|>` = 151643).
+`qwen3_run` is fixed `seq=32` (right-padded with `<|endoftext|>` = 151643).
+`qwen3vl_run` takes a **variable** prefill length (`kS` inferred from the
+token_ids.bin size, any multiple of 32) and runs up to **seq=1024 (kSt=32)**
+since the flash-attention gqa rework — see [Attention](#attention) below.
 
 ## How to run
 
@@ -136,6 +139,25 @@ Key ops (all under `ops/`): `embedding`, `rmsnorm`, `rmsnorm_rope`,
 `add_rmsnorm`, `matmul` (sharded 1×4 / 1×8 grid), `gqa_fused` (prefill),
 `gqa_decode`, `kv_append`, `silu_mul`, `argmax_row0`, plus the
 `cq_dispatch` on-chip dispatcher used when `TT_FOIL_FAST_DISPATCH=1`.
+
+### Attention
+
+`gqa_fused` (prefill) and `gqa_decode` (decode) are **flash-attention
+streaming** kernels: they process one key/value block at a time and keep a
+running output accumulator + denominator in L1, so the L1 footprint is **O(Dt),
+independent of sequence length** (~110 KB). This is what lets `qwen3vl_run`
+reach seq=1024 — the earlier full-materialization kernels held the whole `St²`
+causal mask (2 MB at kSt=32) plus per-head Q/Kᵀ/V in L1 and OOM'd past ~kSt=16.
+
+The softmax has no row-max subtraction (the `1/√d` score scale is pre-folded
+into Q via the q_norm gamma), so the streaming accumulation is algebraically
+exact — no online-softmax rescaling. The causal mask is a single 32×32
+lower-triangular tile (off-diagonal key blocks are fully in-range; the diagonal
+block is the same triangle for every query row). Trade-off: the reader re-reads
+Kᵀ/V per query row-tile (DRAM O(St²·Dt)), but the causal inner loop also skips
+the upper-triangle score matmuls the old kernel computed-then-masked, so at
+kSt=4 flash is net **faster** (`pre:gqa_fused` -13%); seq=32 is unchanged and
+bit-identical.
 
 ## Environment summary
 
