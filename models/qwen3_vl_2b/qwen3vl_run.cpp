@@ -662,13 +662,21 @@ int main(int argc, char** argv) try {
                               uint32_t Mt, uint32_t Kt, uint32_t Nt) {
         auto t0 = Clock::now();
         // Weight-stationary block height for prefill (Mt>1): cache as many
-        // A-rows as cb_a (mb_max*Kt) + cb_b (2*Kt) fit in ~855 KB L1, capped
-        // at Mt. Kt=64 → 4, Kt=192 → 1 (no room to block). Decode (Mt=1)
-        // stays mb_max=1 == the original per-mt-row matmul.
+        // A-rows as cb_a (mb_max*Kt) + cb_b + cb_out fit in the L1 user arena,
+        // capped at Mt. The Blackhole Tensix DEFAULT_UNRESERVED arena is
+        // MEM_L1_SIZE(1536 KB) - DU_base(108.5 KB) = 1427.5 KB = 713 tiles;
+        // we budget 700 (≈26 KB safety margin). These matmul grids are pinned
+        // and dedicated (one matmul's CBs resident per core), so the whole
+        // arena is available. cb_b is double-buffered (2*Kt) when 6*Kt+2 ≤ 855
+        // (matmul.cpp threshold), else single (Kt). Result: Kt=64 → mb=8,
+        // Kt=192 (ffn_down) → mb=2 (was 4 / 1 under the old 427-tile budget;
+        // ffn_d weight re-reads halve → -44%). Decode (Mt=1) stays mb=1 ==
+        // the original per-mt-row matmul, byte-identical.
         uint32_t mb_max = 1;
         if (Mt > 1) {
-            const uint32_t budget = 427;  // tiles ≈ 855 KB / 2 KB
-            uint32_t cand = (2 * Kt + 2 < budget) ? (budget - 2 * Kt - 2) / Kt : 1;
+            const uint32_t budget = 700;  // L1 user tiles (713 real, 13 spare)
+            const uint32_t cb_b = ((6 * Kt + 2) <= 855) ? (2 * Kt) : Kt;
+            uint32_t cand = (cb_b + 2 < budget) ? (budget - cb_b - 2) / Kt : 1;
             if (cand < 1) cand = 1;
             mb_max = std::min(cand, Mt);
         }
