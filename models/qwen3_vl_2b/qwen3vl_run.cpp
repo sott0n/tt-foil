@@ -455,32 +455,37 @@ int main(int argc, char** argv) try {
     // -----------------------------------------------------------------------
     // Open device.
     // -----------------------------------------------------------------------
-    // Persistent matmul grids (matmul OpCache), weights channel-sharded.
-    //
-    // L1 CB layout depends only on Kt. Mt/Nt are RTAs. All Kt=64 matmuls
-    // (q/k/v/o/gate/up, lm_head) share one pinned kernel on kShardGrid64;
-    // ffn_down (Kt=192) gets kShardGrid192. Each grid is kShard(=8) cores
-    // wide — one per DRAM channel — reading its weight shard from its channel.
-    //
-    // Per-core L1 (within 855 KB user arena):
-    //   kShardGrid64   Kt=64,  cb_b depth 2*Kt → ~386 KB
-    //   kShardGrid192  Kt=192, cb_b depth Kt   → ~770 KB
-    //
-    // Weights are channel-sharded, so each matmul runs on a kShard(=8)-core
-    // grid (one core per DRAM channel). All Kt=64 weights (Wq/Wk/Wv/Wo/
-    // gate/up, lm_head) share kShardGrid64; ffn_down (Kt=192) gets kShardGrid192.
-    // Row 1 = cached decode ops, row 2 = prefill cached ops, so grids use 3-4.
+    // Persistent matmul grids (matmul OpCache), weights channel-sharded — each
+    // grid is kShard(=8) cores wide (one core per DRAM channel, reading its
+    // weight shard from its channel). The OpCache keys on (Kt, mb_max, n_cores,
+    // first_core), so a grid hosts a SEPARATE pinned kernel per distinct mb_max.
+    // Prefill (Mt=kSt>1) uses mb_max up to 8 (Kt=64) / 2 (Kt=192); decode and
+    // lm_head are Mt=1 → mb_max=1. To avoid stacking a prefill mb=8 grid and a
+    // mb=1 grid on the SAME cores (which overflows the ~1.43 MB L1 arena at
+    // seq>32), lm_head gets its OWN grid on dedicated cores. (Decode layer
+    // matmuls do still stack mb=1 over prefill mb=8 on kShardGrid64 — so
+    // seq>32 WITH num_decode>0 is an L1-capacity limit shared with the
+    // pre-sharding baseline; prefill-only, i.e. num_decode=0, fits.)
+    //   kShardGrid64   Kt=64,  q/k/v/o/gate/up (prefill mb≤8 + decode mb=1)
+    //   kShardGrid192  Kt=192, ffn_down (prefill mb≤2 + decode mb=1)
+    //   kShardGridLm   Kt=64,  lm_head only (mb=1) — separate so it never
+    //                          stacks with the prefill mb=8 grid.
+    // Row 1 = cached decode ops, row 2 = prefill cached ops, so grids use 3-5.
     const std::vector<tt::foil::CoreCoord> kShardGrid64 = {
         {3, 0}, {3, 1}, {3, 2}, {3, 3}, {3, 4}, {3, 5}, {3, 6}, {3, 7},
     };
     const std::vector<tt::foil::CoreCoord> kShardGrid192 = {
         {4, 0}, {4, 1}, {4, 2}, {4, 3}, {4, 4}, {4, 5}, {4, 6}, {4, 7},
     };
+    const std::vector<tt::foil::CoreCoord> kShardGridLm = {
+        {5, 0}, {5, 1}, {5, 2}, {5, 3}, {5, 4}, {5, 5}, {5, 6}, {5, 7},
+    };
     // (0,0) is the default transient core for embed/argmax/etc. (`core` below)
     // + where rmsnorm_rope is pinned. Must be booted.
     std::vector<tt::foil::CoreCoord> boot_cores = { {0, 0} };
     for (const auto& c : kShardGrid64)  boot_cores.push_back(c);
     for (const auto& c : kShardGrid192) boot_cores.push_back(c);
+    for (const auto& c : kShardGridLm)  boot_cores.push_back(c);
     const bool use_fd = std::getenv("TT_FOIL_FAST_DISPATCH") != nullptr;
     const tt::foil::CoreCoord fd_dispatcher_core{1, 0};
     if (use_fd) boot_cores.push_back(fd_dispatcher_core);
@@ -694,7 +699,7 @@ int main(int argc, char** argv) try {
                                   const ol::TensorDesc& a, const ol::ShardedWeight& b,
                                   ol::TensorDesc& out,
                                   uint32_t Mt, uint32_t Kt, uint32_t Nt) {
-        run_matmul_on(tag, kShardGrid64, a, b, out, Mt, Kt, Nt);
+        run_matmul_on(tag, kShardGridLm, a, b, out, Mt, Kt, Nt);
     };
 
     auto rope_tile = [&](const std::vector<uint16_t>& row) {
