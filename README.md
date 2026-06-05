@@ -360,12 +360,14 @@ precedence order, so by default they link against tt-foil's self-built
 
 ## Supported Models
 
-End-to-end neural network forward passes that run on a single Tensix
-core. Each model lives under [`models/`](models/) and is exercised by
-a paired test under [`tests/`](tests/).
+End-to-end neural network forward passes on one or more Tensix cores.
+Each model lives under [`models/`](models/) and is exercised by a paired
+test under [`tests/`](tests/) (or, for the larger models, an opt-in
+test suite under `models/<model>/tests/`).
 
 | Model | Description | Test |
 | --- | --- | --- |
+| **Qwen3-VL-2B-Instruct** | 28-layer LLM (vocab 151936, hidden 2048, GQA 16:8 heads), prefill + multi-step greedy decode, BF16 throughout, KV cache device-resident, multi-core sharded matmul grids, optional on-chip fast dispatch. Variable prefill length up to **seq=1024 (kSt=32)** via flash-attention `gqa_fused`/`gqa_decode` (L1 O(Dt), no St² mask). Text (`qwen3_run`, fixed seq=32) and image+text (`qwen3vl_run`, variable seq) runners. See [`models/qwen3_vl_2b/README.md`](models/qwen3_vl_2b/README.md). | model suite ([`models/qwen3_vl_2b/tests/`](models/qwen3_vl_2b/tests/), `-DTT_FOIL_MODEL_TESTS=ON`, `ctest -L model`) |
 | **ResNet-20** | Pretrained akamaster checkpoint + one CIFAR-10 test image. Full 19-conv + GAP + FC forward pass on device, BN folded into per-conv biases by [`models/resnet20/export.py`](models/resnet20/export.py). Worst per-class logit drift 0.14 vs the fp32 reference; dev argmax matches ref argmax = "cat". Data generated automatically on first build (requires Python + torch). | [`test_resnet20`](tests/test_resnet20.cpp) |
 
 ### Single-op kernel demos
