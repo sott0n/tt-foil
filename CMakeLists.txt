@@ -201,6 +201,9 @@ if(TT_FOIL_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
+# Standalone perf benchmarks (bench/run.sh). Plain executables, never ctest.
+add_subdirectory(bench)
+
 # ---- tt_foil_weaken host CLI ----
 # Used by scripts/build_firmware.sh to produce *_weakened.elf companions to
 # the firmware ELFs.  Mirrors tt-metal's ll_api::ElfFile::WeakenDataSymbols
