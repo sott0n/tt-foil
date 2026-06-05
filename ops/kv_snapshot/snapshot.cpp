@@ -57,19 +57,17 @@ void kernel_main() {
     const uint32_t kNkDt    = get_arg_val<uint32_t>(9);
     const uint32_t kStKv    = get_arg_val<uint32_t>(10);
 
-    const uint32_t kt_bytes = kNkDt * kSt * kTileBytes;
-    const uint32_t v_bytes  = kSt * kNkDt * kTileBytes;
+    // L1 scratch is bounded to one slot's worth — kNkDt K^T tiles + kNkDt V
+    // tiles + a zero tile — so it's O(kNkDt), independent of kSt. (The old
+    // version slurped the whole K^T + V = 2*kNkDt*kSt tiles, which OOMs L1
+    // for prefill sequences past ~kSt=8.)
+    const uint32_t row_bytes = kNkDt * kTileBytes;
 
     cb_reserve_back(cb_io, 1);
     const uint32_t l1_base   = get_write_ptr(cb_io);
     const uint32_t kt_buf    = l1_base;
-    const uint32_t v_buf     = l1_base + kt_bytes;
-    const uint32_t zero_buf  = l1_base + kt_bytes + v_bytes;
-
-    // Slurp both source tensors into L1 in one read each.
-    noc_async_read(kt_src, kt_buf, kt_bytes);
-    noc_async_read(v_src,  v_buf,  v_bytes);
-    noc_async_read_barrier();
+    const uint32_t v_buf     = l1_base + row_bytes;
+    const uint32_t zero_buf  = l1_base + 2 * row_bytes;
 
     // Build a 2 KB zero tile in L1 for the decode-slot fill.
     {
@@ -77,19 +75,24 @@ void kernel_main() {
         for (uint32_t i = 0; i < kTileBytes / 4; ++i) z[i] = 0u;
     }
 
-    // ----- Prefill slots: re-position K^T tiles, copy V tiles ---------
-    // K^T source is block-major (tile (c, s) at (c * kSt + s) * 2048);
-    // destination is slot-major (tile (s, c) at (s * kNkDt + c) * 2048).
-    // V is slot-major in both, so the per-tile offset stays the same.
+    // ----- Prefill slots: stream one slot (kNkDt tiles) at a time --------
+    // K^T source is block-major (tile (c, s) at (c * kSt + s) * 2048) →
+    // gather this slot's kNkDt tiles (strided by kSt). V source is
+    // slot-major (tile (s, c) at (s * kNkDt + c) * 2048) → one contiguous
+    // kNkDt-tile run. Destination is slot-major for both: contiguous per s.
     for (uint32_t s = 0; s < kSt; ++s) {
-        for (uint32_t c = 0; c < kNkDt; ++c) {
-            const uint32_t src_kt_off = (c * kSt + s) * kTileBytes;
-            const uint32_t src_v_off  = (s * kNkDt + c) * kTileBytes;
-            const uint64_t dst_off    = (uint64_t)(s * kNkDt + c) * kTileBytes;
+        for (uint32_t c = 0; c < kNkDt; ++c)
+            noc_async_read(kt_src + (uint64_t)(c * kSt + s) * kTileBytes,
+                           kt_buf + c * kTileBytes, kTileBytes);
+        noc_async_read(v_src + (uint64_t)(s * kNkDt) * kTileBytes, v_buf, row_bytes);
+        noc_async_read_barrier();
 
-            noc_async_write(kt_buf + src_kt_off, kt_dst + dst_off, kTileBytes);
-            noc_async_write(v_buf  + src_v_off,  v_dst  + dst_off, kTileBytes);
-        }
+        const uint64_t dst_row = (uint64_t)(s * kNkDt) * kTileBytes;
+        for (uint32_t c = 0; c < kNkDt; ++c)
+            noc_async_write(kt_buf + c * kTileBytes,
+                            kt_dst + dst_row + (uint64_t)c * kTileBytes, kTileBytes);
+        noc_async_write(v_buf, v_dst + dst_row, row_bytes);
+        noc_async_write_barrier();
     }
 
     // ----- Decode slots: zero --------------------------------------------

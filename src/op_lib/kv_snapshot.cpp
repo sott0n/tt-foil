@@ -35,12 +35,12 @@ static KvSnapshotOp make_kv_snapshot_impl(
 
     const std::string dir = resolve_kernel_dir(kernel_dir, "kv_snapshot");
 
-    // L1 scratch: K^T source (kNkDt*kSt tiles) + V source (kSt*kNkDt tiles)
-    // + one tile of zeros for decode-slot fill.
+    // L1 scratch: the snapshot kernel streams one slot at a time, so it only
+    // needs kNkDt K^T tiles + kNkDt V tiles + one zero tile — O(kNkDt),
+    // independent of kSt (the old kNkDt*kSt*2 staging OOMed past ~kSt=8).
     constexpr uint32_t kTileBytes = 2048;
-    const std::size_t kt_bytes = static_cast<std::size_t>(kNkDt) * kSt * kTileBytes;
-    const std::size_t v_bytes  = static_cast<std::size_t>(kSt) * kNkDt * kTileBytes;
-    const std::size_t scratch_bytes = kt_bytes + v_bytes + kTileBytes;
+    const std::size_t scratch_bytes =
+        (static_cast<std::size_t>(2) * kNkDt + 1) * kTileBytes;
 
     KvSnapshotOp op;
     op.l1_scratch = tt::foil::allocate_buffer(
