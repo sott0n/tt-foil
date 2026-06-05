@@ -88,18 +88,24 @@ History of every measured iteration (text + VL) lives in [`bench/PERF_HISTORY.md
 Single Blackhole chip (`TT_FOIL_DEVICE=0`), BF16 throughout, fast dispatch on,
 fresh `tt-smi -r`. Decode-path figures are the standing `qwen3_run` benchmark
 (prompt `[3838, 374, 279, 6722, 315, 6435] + 26×PAD` = "What is the capital of
-Tokyo" + endoftext, `num_decode=4`, latest `iter-matmul-opcache`, 2026-05-28).
+Tokyo" + endoftext, `num_decode=4`, latest `decode-dram-shard`, 2026-06-05).
 Prefill-throughput figures are the variable-length `qwen3vl_run` path
 (2026-06-05, post flash-attention + WS-matmul work).
 
 | Metric | Value | How it's measured |
 |--------|-------|-------------------|
 | **Prefill throughput** | 192 tok/s (seq=32) → **591 tok/s** (seq=512) | prefill tokens ÷ prefill wall (`qwen3vl_run`, see scaling table) |
-| **Decode throughput** | **4.7 tok/s** | 1 ÷ ITL (4 tokens ÷ 0.86 s) |
-| **TTFT** (time to first token) | **0.35 s** warm · **1.93 s** cold | prefill latency (warm); + 1.58 s weight upload (cold, 1.24 GB) |
-| **End-to-end latency** | **4.28 s** | full wall: weight upload + prefill(seq=32) + 4 decode steps |
-| **ITL** (inter-token latency) | **~215 ms / token** | decode wall ÷ tokens, 28 layers per token |
-| **Cores utilization** | 32 / 140 booted (**23 %**); 4–8 active per matmul (**3–6 %**) | static grid pinning vs the 14×10 Tensix worker grid |
+| **Decode throughput** | **6.1 tok/s** | 1 ÷ ITL (4 tokens ÷ 0.66 s) |
+| **TTFT** (time to first token) | **0.63 s** warm · **3.80 s** cold | prefill latency (warm); + weight upload (cold, 1.24 GB sharded across 8 channels) |
+| **End-to-end latency** | **4.46 s** | full wall: weight upload + prefill(seq=32) + 4 decode steps |
+| **ITL** (inter-token latency) | **~165 ms / token** | decode wall ÷ tokens, 28 layers per token |
+| **Cores utilization** | 22 / 140 booted (**16 %**); 8 active per matmul (one per DRAM channel) | static grid pinning vs the 14×10 Tensix worker grid |
+
+Decode matmul weights are column-sharded across all 8 DRAM channels (one grid
+core per channel), lifting the single-channel weight-read ceiling that bounds
+single-token decode. Same-build A/B vs un-sharded: **ITL 210 → 165 ms (−21.5 %),
+4.76 → 6.07 tok/s (+27.5 %), bit-identical**. The one-time cold weight upload is
+~0.45 s slower (per-shard repack); warm TTFT is unchanged.
 
 Tokens emitted (must stay bit-identical across optimisations): `2303, 220, 220, 16, 13`.
 
