@@ -89,15 +89,23 @@ Standing benchmark: prompt `[3838, 374, 279, 6722, 315, 6435] + 26×PAD`
 ("What is the capital of Tokyo" + endoftext), `num_decode=4`, BF16, single
 Blackhole chip (`TT_FOIL_DEVICE=0`), fast dispatch on, fresh `tt-smi -r`.
 
-| Stage | Latest (2026-05-24, `iter-percore-membar`) |
+| Stage | Latest (2026-05-28, `iter-matmul-opcache`) |
 |-------|--------------------------------------------|
-| **End-to-end wall** | **4.52 s** |
-| Weights load + upload (28 layers + embed + lm_head, 1.24 GB) | 1.59 s |
-| Prefill (seq=32, 28 layers) | 0.41 s |
-| Decode (4 tokens × 28 layers) | 1.09 s |
-| Decode latency / token | ~270 ms |
+| **End-to-end wall** | **4.28 s** |
+| Weights load + upload (28 layers + embed + lm_head, 1.24 GB) | 1.58 s |
+| Prefill (seq=32, 28 layers) | 0.35 s |
+| Decode (4 tokens × 28 layers) | 0.86 s |
+| Decode latency / token | ~215 ms |
 
 Tokens emitted (must stay bit-identical across optimisations): `2303, 220, 220, 16, 13`.
+
+The seq=32 standing bench above is unaffected by the recent **flash-attention
+gqa** (`flash-attention-gqa`) and **WS matmul L1 budget** (`matmul-ws-budget`)
+work — both target the `qwen3vl_run` variable-length prefill path (seq≥64,
+`Mt>1`), which seq=32 (`Mt=1`) doesn't exercise. Their effect shows at longer
+prefills: e.g. **seq=512 prefill 1136→867 ms (-24%)**, seq=1024 2384→1872 ms
+(-21%), all bit-identical. See [`bench/PERF_HISTORY.md`](bench/PERF_HISTORY.md)
+for the full per-op breakdown.
 
 ### Trajectory (selected iterations)
 
@@ -114,9 +122,10 @@ Tokens emitted (must stay bit-identical across optimisations): `2303, 220, 220, 
 | 2026-05-23 | iter20-simd-tile2d | 10.7 s | 6.0 s | AVX2 tile2d (16×uint16 = 256-bit vec) |
 | 2026-05-24 | iterR5-G2 | 9.82 s | 5.30 s | fast-dispatch (on-chip dispatcher kernel) |
 | 2026-05-24 | iterR5-G2-pathB | 9.64 s | 5.18 s | shape-keyed OpCache for 5 heaviest ops |
-| **2026-05-24** | **iter-percore-membar** | **4.52 s** | **1.09 s** | **`l1_membar` scoped to worker cores (~2.4 ms → ~30 µs per op)** |
+| 2026-05-24 | iter-percore-membar | 4.52 s | 1.09 s | `l1_membar` scoped to worker cores (~2.4 ms → ~30 µs per op) |
+| **2026-05-28** | **iter-matmul-opcache** | **4.28 s** | **0.86 s** | **matmul OpCache + disjoint pinned grids (RTA-only refresh)** |
 
-Cumulative speedup: **39.3 s → 4.52 s, -88%**. Bit-identical output throughout.
+Cumulative speedup: **39.3 s → 4.28 s, -89%**. Bit-identical output throughout.
 
 ## Architecture (per token)
 
