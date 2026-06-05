@@ -7,7 +7,9 @@
 # ELFs, and the no-Bread variant reader), then runs the sweep(s) on HW.
 #
 # Usage:
-#   bench/run.sh [decode|prefill|both]   # default: both
+#   bench/run.sh [decode|prefill|both|ws]   # default: both
+#     decode/prefill/both : read-vs-compute sweep (matmul_bench)
+#     ws                  : weight-stationary vs stock matmul (matmul_ws_check)
 #
 # Env:
 #   DEV                PCIe board to use (default 0). Exposed via
@@ -27,37 +29,46 @@ BUILD_DIR="${BUILD_DIR:-$REPO/build}"
 export TT_METAL_ROOT="${TT_METAL_ROOT:-$REPO/third_party/tt-metal}"
 
 if [[ "${SKIP_BUILD:-0}" != 1 ]]; then
-    echo ">> configuring + building matmul_bench"
+    echo ">> configuring + building bench targets"
     cmake -B "$BUILD_DIR" >/dev/null
-    cmake --build "$BUILD_DIR" --target matmul_bench -j"$(nproc)"
+    cmake --build "$BUILD_DIR" --target matmul_bench matmul_ws_check -j"$(nproc)"
 
     if [[ ! -f "$REPO/ops/matmul/prebuilt/writer.ncrisc.elf" ]]; then
         echo ">> building ops/matmul kernel ELFs"
         bash "$REPO/ops/matmul/build.sh"
     fi
+    if [[ ! -f "$REPO/ops/matmul_ws/prebuilt/writer.ncrisc.elf" ]]; then
+        echo ">> building ops/matmul_ws kernel ELFs"
+        bash "$REPO/ops/matmul_ws/build.sh"
+    fi
     echo ">> building no-Bread variant reader"
     bash "$HERE/build_noBread.sh"
 fi
-
-BIN="$BUILD_DIR/bench/matmul_bench"
-[[ -x "$BIN" ]] || { echo "missing $BIN — build failed?"; exit 1; }
 
 if [[ "${RESET:-0}" == 1 ]]; then
     echo ">> tt-smi -r $DEV"
     tt-smi -r "$DEV" >/dev/null 2>&1 || true
 fi
 
-run_one() {
+run_bench() {
     local m="$1"
     echo
     echo "================  matmul_bench  MM_MODE=$m  board=$DEV  ================"
     # TT_VISIBLE_DEVICES filters+remaps boards, so the bench opens index 0.
     TT_VISIBLE_DEVICES="$DEV" TT_FOIL_DEVICE=0 TT_FOIL_OPS_DIR="$REPO/ops" \
-        MM_NOBREAD_DIR="$HERE/prebuilt_noBread" MM_MODE="$m" "$BIN" 2>/dev/null
+        MM_NOBREAD_DIR="$HERE/prebuilt_noBread" MM_MODE="$m" \
+        "$BUILD_DIR/bench/matmul_bench" 2>/dev/null
+}
+run_ws() {
+    echo
+    echo "================  matmul_ws_check (WS vs stock)  board=$DEV  ================"
+    TT_VISIBLE_DEVICES="$DEV" TT_FOIL_DEVICE=0 "$BUILD_DIR/bench/matmul_ws_check" \
+        "$REPO/ops/matmul/prebuilt" "$REPO/ops/matmul_ws/prebuilt" 2>/dev/null
 }
 
 case "$MODE" in
-    decode|prefill) run_one "$MODE" ;;
-    both)           run_one decode; run_one prefill ;;
-    *) echo "usage: bench/run.sh [decode|prefill|both]"; exit 2 ;;
+    decode|prefill) run_bench "$MODE" ;;
+    both)           run_bench decode; run_bench prefill ;;
+    ws)             run_ws ;;
+    *) echo "usage: bench/run.sh [decode|prefill|both|ws]"; exit 2 ;;
 esac
