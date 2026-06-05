@@ -80,6 +80,15 @@ void kernel_main() {
     // gather this slot's kNkDt tiles (strided by kSt). V source is
     // slot-major (tile (s, c) at (s * kNkDt + c) * 2048) → one contiguous
     // kNkDt-tile run. Destination is slot-major for both: contiguous per s.
+    //
+    // FUTURE WORK (only if this becomes latency-bound at large kSt): batch
+    // CHUNK slots per read/write barrier instead of one. That cuts the barrier
+    // count from 2*kSt to 2*ceil(kSt/CHUNK) and restores cross-slot NOC
+    // overlap, at the cost of L1 = (2*kNkDt*CHUNK + 1) tiles. The ~855 KB user
+    // region leaves room for CHUNK up to ~6 (kNkDt=32). Today the per-op cost
+    // is data-bound, not barrier-bound — the bulk (1-barrier) and per-slot
+    // (2*kSt-barrier) variants measured identical under fast dispatch — so
+    // CHUNK=1 is fine; revisit only when a measurement says otherwise.
     for (uint32_t s = 0; s < kSt; ++s) {
         for (uint32_t c = 0; c < kNkDt; ++c)
             noc_async_read(kt_src + (uint64_t)(c * kSt + s) * kTileBytes,
