@@ -660,7 +660,18 @@ int main(int argc, char** argv) try {
                               ol::TensorDesc& out,
                               uint32_t Mt, uint32_t Kt, uint32_t Nt) {
         auto t0 = Clock::now();
-        auto op = ol::make_matmul_grid_cached(*dev, a, b, out, Mt, Kt, Nt, grid);
+        // Weight-stationary block height for prefill (Mt>1): cache as many
+        // A-rows as cb_a (mb_max*Kt) + cb_b (2*Kt) fit in ~855 KB L1, capped
+        // at Mt. Kt=64 → 4, Kt=192 → 1 (no room to block). Decode (Mt=1)
+        // stays mb_max=1 == the original per-mt-row matmul.
+        uint32_t mb_max = 1;
+        if (Mt > 1) {
+            const uint32_t budget = 427;  // tiles ≈ 855 KB / 2 KB
+            uint32_t cand = (2 * Kt + 2 < budget) ? (budget - 2 * Kt - 2) / Kt : 1;
+            if (cand < 1) cand = 1;
+            mb_max = std::min(cand, Mt);
+        }
+        auto op = ol::make_matmul_grid_cached(*dev, a, b, out, Mt, Kt, Nt, grid, "", mb_max);
         ol::execute(*dev, op);
         g_prof.add(tag, std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
     };
