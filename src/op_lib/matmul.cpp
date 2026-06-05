@@ -24,12 +24,24 @@ namespace tt::foil::op_lib {
 using detail::kTileBytes;
 using detail::resolve_kernel_dir;
 
+// Mb block height for the weight-stationary reader: how many A-rows the
+// configured cb_a can hold (cb_a depth / Kt), capped at Mt. Mb=1 (the default,
+// when cb_a was sized to a single Kt-deep row) reproduces the original
+// per-mt-row matmul byte-for-byte. Derived from cb_a's size so set_*_args
+// needs no extra parameter.
+static uint32_t matmul_mb(const tt::foil::Buffer& l1_a, uint32_t Kt, uint32_t Mt) {
+    uint32_t depth  = static_cast<uint32_t>(l1_a.size_bytes / kTileBytes);
+    uint32_t mb_max = (depth >= Kt) ? (depth / Kt) : 1u;
+    return (mb_max < Mt) ? mb_max : Mt;
+}
+
 MatMulOp make_matmul(tt::foil::Device& dev,
                      const TensorDesc& a, const TensorDesc& b,
                      TensorDesc& out,
                      uint32_t Mt, uint32_t Kt, uint32_t Nt,
                      tt::foil::CoreCoord core,
-                     const std::string& kernel_dir) {
+                     const std::string& kernel_dir,
+                     uint32_t mb_max) {
     if (a.num_tiles != Mt * Kt)
         throw std::runtime_error("op_lib::make_matmul: a.num_tiles != Mt*Kt");
     if (b.num_tiles != Kt * Nt)
@@ -51,12 +63,19 @@ MatMulOp make_matmul(tt::foil::Device& dev,
     // Per-core L1 ceilings (D_b = cb_b tile depth):
     //   D_b = 2*Kt: 6*Kt + 2 KB ≤ 855  →  Kt ≤ 142 (qkv/o/ffn-gateup/lm_head, all Kt=64)
     //   D_b =   Kt: 4*Kt + 2 KB ≤ 855  →  Kt ≤ 213 (FFN-down Kt=192 stays here)
-    const uint32_t cb_a_bytes = Kt * kTileBytes;
+    // Weight-stationary: cb_a caches mb_max A-rows (mb_max*Kt tiles) so the
+    // reader streams the B weight slice ceil(Mt/mb_max)× instead of Mt×. The
+    // DEFAULT mb_max=1 sizes cb_a to a single Kt-deep row — byte-identical CB
+    // layout (and behavior) to the pre-WS matmul. cb_out gets a second slot
+    // only when mb_max>1 so the writer can overlap; mb_max=1 keeps depth 1.
+    const uint32_t cb_a_tiles = mb_max * Kt;
+    const uint32_t cb_a_bytes = cb_a_tiles * kTileBytes;
     const uint32_t cb_b_tiles = ((6 * Kt + 2) <= 855) ? (2 * Kt) : Kt;
     const uint32_t cb_b_bytes = cb_b_tiles * kTileBytes;
+    const uint32_t cb_out_tiles = (mb_max > 1) ? 2u : 1u;
     op.l1_a   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, cb_a_bytes, core);
     op.l1_b   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, cb_b_bytes, core);
-    op.l1_out = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, kTileBytes, core);
+    op.l1_out = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, cb_out_tiles * kTileBytes, core);
 
     using R = tt::foil::RiscBinary;
     std::array<R, 5> bins = {{
@@ -69,9 +88,9 @@ MatMulOp make_matmul(tt::foil::Device& dev,
     op.kernel = tt::foil::load_kernel(dev, bins, core);
 
     std::array<tt::foil::CbConfig, 3> cbs = {{
-        {0,  op.l1_a->device_addr,   cb_a_bytes, Kt,         kTileBytes},
-        {1,  op.l1_b->device_addr,   cb_b_bytes, cb_b_tiles, kTileBytes},
-        {16, op.l1_out->device_addr, kTileBytes, 1,          kTileBytes},
+        {0,  op.l1_a->device_addr,   cb_a_bytes, cb_a_tiles,   kTileBytes},
+        {1,  op.l1_b->device_addr,   cb_b_bytes, cb_b_tiles,   kTileBytes},
+        {16, op.l1_out->device_addr, cb_out_tiles * kTileBytes, cb_out_tiles, kTileBytes},
     }};
     tt::foil::register_cbs(dev, *op.kernel, cbs);
 
@@ -107,15 +126,17 @@ void set_matmul_args(tt::foil::Device& dev, MatMulOp& op,
     const uint64_t dst_noc = tt::foil::make_noc_dram_addr(
         dev, out.buf->device_addr + out_tile_offset * kTileBytes);
 
-    std::array<uint32_t, 8> ra_brisc = {
+    const uint32_t Mb = matmul_mb(*op.l1_a, Kt, Mt);
+
+    std::array<uint32_t, 9> ra_brisc = {
         (uint32_t)a_noc, (uint32_t)(a_noc >> 32),
         (uint32_t)b_noc, (uint32_t)(b_noc >> 32),
-        Mt, Kt, Nt, Nt_stride,
+        Mt, Kt, Nt, Nt_stride, Mb,
     };
-    std::array<uint32_t, 3> ra_trisc  = {Mt, Kt, Nt};
-    std::array<uint32_t, 5> ra_ncrisc = {
+    std::array<uint32_t, 4> ra_trisc  = {Mt, Kt, Nt, Mb};
+    std::array<uint32_t, 6> ra_ncrisc = {
         (uint32_t)dst_noc, (uint32_t)(dst_noc >> 32),
-        Mt, Nt, Nt_stride,
+        Mt, Nt, Nt_stride, Mb,
     };
 
     tt::foil::set_runtime_args(dev, *op.kernel, R::RiscId::BRISC,  ra_brisc);
@@ -138,7 +159,8 @@ MatMulGridOp make_matmul_grid(tt::foil::Device& dev,
                               TensorDesc& out,
                               uint32_t Mt, uint32_t Kt, uint32_t Nt,
                               const std::vector<tt::foil::CoreCoord>& cores,
-                              const std::string& kernel_dir) {
+                              const std::string& kernel_dir,
+                              uint32_t mb_max) {
     if (cores.empty())
         throw std::runtime_error("op_lib::make_matmul_grid: cores must be non-empty");
     const uint32_t n_cores = static_cast<uint32_t>(cores.size());
@@ -170,19 +192,22 @@ MatMulGridOp make_matmul_grid(tt::foil::Device& dev,
     MatMulGridOp op;
     op.kernels.reserve(n_cores);
     op.l1_bufs.reserve(static_cast<std::size_t>(n_cores) * 3);
-    // iter12/13/14: see make_matmul for L1 budget rationale.
-    const uint32_t cb_a_bytes = Kt * kTileBytes;
+    // iter12/13/14 + WS: see make_matmul. mb_max=1 (default) is the original
+    // per-mt-row layout; mb_max>1 deepens cb_a to cache mb_max A-rows.
+    const uint32_t cb_a_tiles = mb_max * Kt;
+    const uint32_t cb_a_bytes = cb_a_tiles * kTileBytes;
     const uint32_t cb_b_tiles = ((6 * Kt + 2) <= 855) ? (2 * Kt) : Kt;
     const uint32_t cb_b_bytes = cb_b_tiles * kTileBytes;
+    const uint32_t cb_out_tiles = (mb_max > 1) ? 2u : 1u;
     for (const auto& core : cores) {
         auto l1_a   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, cb_a_bytes, core);
         auto l1_b   = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, cb_b_bytes, core);
-        auto l1_out = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, kTileBytes, core);
+        auto l1_out = tt::foil::allocate_buffer(dev, tt::foil::BufferLocation::L1, cb_out_tiles * kTileBytes, core);
         auto kernel = tt::foil::load_kernel(dev, bins, core);
         std::array<tt::foil::CbConfig, 3> cbs = {{
-            {0,  l1_a->device_addr,   cb_a_bytes, Kt,         kTileBytes},
-            {1,  l1_b->device_addr,   cb_b_bytes, cb_b_tiles, kTileBytes},
-            {16, l1_out->device_addr, kTileBytes, 1,          kTileBytes},
+            {0,  l1_a->device_addr,   cb_a_bytes, cb_a_tiles,   kTileBytes},
+            {1,  l1_b->device_addr,   cb_b_bytes, cb_b_tiles,   kTileBytes},
+            {16, l1_out->device_addr, cb_out_tiles * kTileBytes, cb_out_tiles, kTileBytes},
         }};
         tt::foil::register_cbs(dev, *kernel, cbs);
         op.kernels.push_back(kernel);
@@ -206,6 +231,8 @@ void set_matmul_grid_args(tt::foil::Device& dev, MatMulGridOp& op,
     const uint64_t a_dev_base   = a.buf->device_addr;
     const uint64_t b_dev_base   = b.buf->device_addr;
     const uint64_t out_dev_base = out.buf->device_addr;
+    // cb_a depth is uniform across the grid (built from one Kt/mb_max).
+    const uint32_t Mb = matmul_mb(*op.l1_bufs[0], Kt, Mt);
 
     uint32_t col_off_tiles = 0;
     for (uint32_t c = 0; c < n_cores; ++c) {
@@ -216,15 +243,15 @@ void set_matmul_grid_args(tt::foil::Device& dev, MatMulGridOp& op,
         const uint64_t b_noc   = tt::foil::make_noc_dram_addr(dev, b_dev_base   + col_off_bytes);
         const uint64_t dst_noc = tt::foil::make_noc_dram_addr(dev, out_dev_base + col_off_bytes);
 
-        std::array<uint32_t, 8> ra_brisc = {
+        std::array<uint32_t, 9> ra_brisc = {
             (uint32_t)a_noc, (uint32_t)(a_noc >> 32),
             (uint32_t)b_noc, (uint32_t)(b_noc >> 32),
-            Mt, Kt, Nt_per_core, /*Nt_stride=*/Nt,
+            Mt, Kt, Nt_per_core, /*Nt_stride=*/Nt, Mb,
         };
-        std::array<uint32_t, 3> ra_trisc = {Mt, Kt, Nt_per_core};
-        std::array<uint32_t, 5> ra_ncrisc = {
+        std::array<uint32_t, 4> ra_trisc = {Mt, Kt, Nt_per_core, Mb};
+        std::array<uint32_t, 6> ra_ncrisc = {
             (uint32_t)dst_noc, (uint32_t)(dst_noc >> 32),
-            Mt, Nt_per_core, /*Nt_stride=*/Nt,
+            Mt, Nt_per_core, /*Nt_stride=*/Nt, Mb,
         };
         col_off_tiles += Nt_per_core;
         auto& k = *op.kernels[c];
@@ -252,25 +279,31 @@ MatMulGridOp make_matmul_grid_cached(tt::foil::Device& dev,
                                      TensorDesc& out,
                                      uint32_t Mt, uint32_t Kt, uint32_t Nt,
                                      const std::vector<tt::foil::CoreCoord>& cores,
-                                     const std::string& kernel_dir) {
+                                     const std::string& kernel_dir,
+                                     uint32_t mb_max) {
     if (cores.empty())
         throw std::runtime_error("op_lib::make_matmul_grid_cached: cores must be non-empty");
 
-    // Cache key: (Kt, n_cores, first_core). Kt determines L1 CB layout;
-    // n_cores + first_core distinguishes disjoint grids. Mt/Nt are RTAs
-    // so the same entry serves many logical matmul shapes.
+    // Cache key: (Kt, mb_max, n_cores, first_core). Kt + mb_max determine the
+    // L1 CB layout (cb_a depth = mb_max*Kt); n_cores + first_core distinguish
+    // disjoint grids. Mt/Nt are RTAs so one entry serves many shapes — but a
+    // decode (mb_max=1) and prefill (mb_max>1) caller on the same cores get
+    // separate pinned entries, since their cb_a depths differ.
     struct Key {
         uint32_t Kt;
+        uint32_t mb_max;
         uint32_t n_cores;
         uint32_t x0;
         uint32_t y0;
         bool operator==(const Key& o) const noexcept {
-            return Kt == o.Kt && n_cores == o.n_cores && x0 == o.x0 && y0 == o.y0;
+            return Kt == o.Kt && mb_max == o.mb_max && n_cores == o.n_cores
+                && x0 == o.x0 && y0 == o.y0;
         }
     };
     struct KeyHash {
         std::size_t operator()(const Key& k) const noexcept {
             std::size_t h = k.Kt;
+            h = h * 1315423911u + k.mb_max;
             h = h * 1315423911u + k.n_cores;
             h = h * 1315423911u + k.x0;
             h = h * 1315423911u + k.y0;
@@ -282,11 +315,11 @@ MatMulGridOp make_matmul_grid_cached(tt::foil::Device& dev,
     if (out.num_tiles == 0)
         out = allocate_tensor_dram(dev, Mt * Nt);
 
-    Key key{Kt, static_cast<uint32_t>(cores.size()), cores[0].x, cores[0].y};
+    Key key{Kt, mb_max, static_cast<uint32_t>(cores.size()), cores[0].x, cores[0].y};
     auto it = g_cache.find(key);
     if (it == g_cache.end()) {
         auto op_ptr = std::make_unique<MatMulGridOp>(
-            make_matmul_grid(dev, a, b, out, Mt, Kt, Nt, cores, kernel_dir));
+            make_matmul_grid(dev, a, b, out, Mt, Kt, Nt, cores, kernel_dir, mb_max));
         // Pin every per-core kernel so release_kernels / reset_l1 from
         // surrounding transient ops on the same core doesn't disturb this
         // grid. Watermark on each pinned core freezes the L1 + kernel_config

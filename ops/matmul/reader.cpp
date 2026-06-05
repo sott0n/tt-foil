@@ -1,20 +1,26 @@
 // SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
 // SPDX-License-Identifier: Apache-2.0
 //
-// BRISC reader for matmul_dram (iter12): A-tile caching.
-// Mt rows × Nt cols × Kt inner. Previously A was re-read from DRAM
-// Nt times per (mt) row — for Mt=1 matmul this dominated NOC traffic.
-// Now A's Kt tiles are read once per mt and held in cb_a (depth Kt);
-// the compute kernel indexes them by kt for every nt iteration. B is
-// still read per (kt, nt) at cb_b depth 1.
+// BRISC reader for matmul. Mt rows × Nt cols × Kt inner, weight-stationary
+// with a runtime Mb block height: caches a BLOCK of Mb A-rows in cb_a and
+// reads each B column exactly once per (block, nt). The compute kernel reuses
+// that B column across all Mb rows of the block, so the B weight slice is
+// streamed only ceil(Mt/Mb)× from DRAM (vs Mt× when Mb=1).
+//
+// Mb=1 (the default for decode and every op_lib caller that doesn't opt in)
+// is byte-for-byte the original per-mt-row behavior. Prefill callers pass a
+// larger cb_a (Mb*Kt deep) + Mb>1 to amortize the weight reads.
+//
+// cb_a holds Mb*Kt tiles (host sizes it). cb_b holds Kt tiles (one column).
 //
 // Runtime args:
 //   arg[0..1] = A stream NOC addr (lo, hi)
 //   arg[2..3] = B stream NOC addr (lo, hi)
 //   arg[4]    = Mt
 //   arg[5]    = Kt
-//   arg[6]    = Nt  — *per-core* output column count
-//   arg[7]    = Nt_stride — row stride between B's (kt) rows, in tiles.
+//   arg[6]    = Nt        — per-core output column count
+//   arg[7]    = Nt_stride — B row stride between (kt) rows, in tiles
+//   arg[8]    = Mb        — A-row block height (1..Mt)
 
 #include <cstdint>
 
@@ -31,38 +37,38 @@ void kernel_main() {
     uint32_t Kt        = get_arg_val<uint32_t>(5);
     uint32_t Nt        = get_arg_val<uint32_t>(6);
     uint32_t Nt_stride = get_arg_val<uint32_t>(7);
+    uint32_t Mb        = get_arg_val<uint32_t>(8);
 
     constexpr uint32_t cb_a = 0;
     constexpr uint32_t cb_b = 1;
     constexpr uint32_t kTileBytes = 32 * 32 * 2;
 
-    for (uint32_t mt = 0; mt < Mt; ++mt) {
-        // Stage A: read Kt A tiles once into cb_a (depth Kt). Issue all
-        // reads back-to-back, then single barrier — lets NOC pipeline
-        // the requests instead of round-tripping per tile.
-        cb_reserve_back(cb_a, Kt);
-        uint32_t a_wp_base = get_write_ptr(cb_a);
-        for (uint32_t kt = 0; kt < Kt; ++kt) {
-            uint64_t a_src = a_base + (mt * Kt + kt) * kTileBytes;
-            noc_async_read(a_src, a_wp_base + kt * kTileBytes, kTileBytes);
+    for (uint32_t mt0 = 0; mt0 < Mt; mt0 += Mb) {
+        const uint32_t mb = (mt0 + Mb <= Mt) ? Mb : (Mt - mt0);
+
+        // Cache this block's mb A-rows (mb*Kt tiles), one batched barrier.
+        cb_reserve_back(cb_a, mb * Kt);
+        uint32_t a_wp = get_write_ptr(cb_a);
+        for (uint32_t r = 0; r < mb; ++r) {
+            const uint32_t mt = mt0 + r;
+            for (uint32_t kt = 0; kt < Kt; ++kt) {
+                uint64_t a_src = a_base + (mt * Kt + kt) * kTileBytes;
+                noc_async_read(a_src, a_wp + (r * Kt + kt) * kTileBytes, kTileBytes);
+            }
         }
         noc_async_read_barrier();
-        cb_push_back(cb_a, Kt);
+        cb_push_back(cb_a, mb * Kt);
 
-        // Stage B: per (nt), batch all Kt B tiles into cb_b (depth Kt) with
-        // a single noc_async_read_barrier. NOC HW pipelines the Kt
-        // outstanding reads; we save (Kt-1) per-tile barriers.
+        // Read each B column once; compute reuses it across the mb rows.
         for (uint32_t nt = 0; nt < Nt; ++nt) {
             cb_reserve_back(cb_b, Kt);
-            uint32_t b_wp_base = get_write_ptr(cb_b);
+            uint32_t b_wp = get_write_ptr(cb_b);
             for (uint32_t kt = 0; kt < Kt; ++kt) {
                 uint64_t b_src = b_base + (kt * Nt_stride + nt) * kTileBytes;
-                noc_async_read(b_src, b_wp_base + kt * kTileBytes, kTileBytes);
+                noc_async_read(b_src, b_wp + kt * kTileBytes, kTileBytes);
             }
             noc_async_read_barrier();
             cb_push_back(cb_b, Kt);
         }
-        // Compute pops cb_a (Kt tiles) at end of this mt row; reader's
-        // next cb_reserve_back(cb_a, Kt) will block until that happens.
     }
 }

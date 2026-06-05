@@ -70,12 +70,17 @@ struct MatMulOp {
     std::shared_ptr<tt::foil::Buffer> l1_b;
     std::shared_ptr<tt::foil::Buffer> l1_out;
 };
+// mb_max = weight-stationary block height (A-rows cached in cb_a). Default 1
+// reproduces the original per-mt-row matmul exactly (cb_a = Kt deep). Pass >1
+// (prefill, Mt>1) to cache mb_max A-rows so the B weight slice is streamed
+// ceil(Mt/mb_max)× instead of Mt× — caller must keep mb_max*Kt + cb_b in L1.
 MatMulOp make_matmul(tt::foil::Device& dev,
                      const TensorDesc& a, const TensorDesc& b,
                      TensorDesc& out,
                      uint32_t Mt, uint32_t Kt, uint32_t Nt,
                      tt::foil::CoreCoord core = {},
-                     const std::string& kernel_dir = "");
+                     const std::string& kernel_dir = "",
+                     uint32_t mb_max = 1);
 // Update RTAs only (no kernel reload, no L1/CB alloc). Lets one op handle
 // drive matmuls of arbitrary shape so the dispatch ELF-cache hits.
 void set_matmul_args(tt::foil::Device& dev, MatMulOp& op,
@@ -118,7 +123,8 @@ MatMulGridOp make_matmul_grid(tt::foil::Device& dev,
                               TensorDesc& out,
                               uint32_t Mt, uint32_t Kt, uint32_t Nt,
                               const std::vector<tt::foil::CoreCoord>& cores,
-                              const std::string& kernel_dir = "");
+                              const std::string& kernel_dir = "",
+                              uint32_t mb_max = 1);  // see make_matmul
 void set_matmul_grid_args(tt::foil::Device& dev, MatMulGridOp& op,
                           const TensorDesc& a, const TensorDesc& b,
                           const TensorDesc& out,
@@ -145,7 +151,8 @@ MatMulGridOp make_matmul_grid_cached(tt::foil::Device& dev,
                                      TensorDesc& out,
                                      uint32_t Mt, uint32_t Kt, uint32_t Nt,
                                      const std::vector<tt::foil::CoreCoord>& cores,
-                                     const std::string& kernel_dir = "");
+                                     const std::string& kernel_dir = "",
+                                     uint32_t mb_max = 1);  // see make_matmul
 
 // =====================================================================
 // ElementwiseMul

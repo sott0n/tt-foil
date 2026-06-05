@@ -37,10 +37,6 @@ if [[ "${SKIP_BUILD:-0}" != 1 ]]; then
         echo ">> building ops/matmul kernel ELFs"
         bash "$REPO/ops/matmul/build.sh"
     fi
-    if [[ ! -f "$REPO/ops/matmul_ws/prebuilt/writer.ncrisc.elf" ]]; then
-        echo ">> building ops/matmul_ws kernel ELFs"
-        bash "$REPO/ops/matmul_ws/build.sh"
-    fi
     echo ">> building no-Bread variant reader"
     bash "$HERE/build_noBread.sh"
 fi
@@ -61,9 +57,9 @@ run_bench() {
 }
 run_ws() {
     echo
-    echo "================  matmul_ws_check (WS vs stock)  board=$DEV  ================"
-    TT_VISIBLE_DEVICES="$DEV" TT_FOIL_DEVICE=0 "$BUILD_DIR/bench/matmul_ws_check" \
-        "$REPO/ops/matmul/prebuilt" "$REPO/ops/matmul_ws/prebuilt" 2>/dev/null
+    echo "================  matmul_ws_check (mb_max>1 vs mb_max=1)  board=$DEV  ================"
+    TT_VISIBLE_DEVICES="$DEV" TT_FOIL_DEVICE=0 TT_FOIL_OPS_DIR="$REPO/ops" \
+        "$BUILD_DIR/bench/matmul_ws_check" 2>/dev/null
 }
 
 case "$MODE" in
