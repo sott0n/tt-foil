@@ -83,65 +83,55 @@ bench/bench.sh <tag>           # uses the canonical "What is the capital of Toky
 
 History of every measured iteration (text + VL) lives in [`bench/PERF_HISTORY.md`](bench/PERF_HISTORY.md).
 
-## Current performance
+## Performance
 
-Standing benchmark: prompt `[3838, 374, 279, 6722, 315, 6435] + 26×PAD`
-("What is the capital of Tokyo" + endoftext), `num_decode=4`, BF16, single
-Blackhole chip (`TT_FOIL_DEVICE=0`), fast dispatch on, fresh `tt-smi -r`.
+Single Blackhole chip (`TT_FOIL_DEVICE=0`), BF16 throughout, fast dispatch on,
+fresh `tt-smi -r`. Decode-path figures are the standing `qwen3_run` benchmark
+(prompt `[3838, 374, 279, 6722, 315, 6435] + 26×PAD` = "What is the capital of
+Tokyo" + endoftext, `num_decode=4`, latest `iter-matmul-opcache`, 2026-05-28).
+Prefill-throughput figures are the variable-length `qwen3vl_run` path
+(2026-06-05, post flash-attention + WS-matmul work).
 
-| Stage | Latest (2026-05-28, `iter-matmul-opcache`) |
-|-------|--------------------------------------------|
-| **End-to-end wall** | **4.28 s** |
-| Weights load + upload (28 layers + embed + lm_head, 1.24 GB) | 1.58 s |
-| Prefill (seq=32, 28 layers) | 0.35 s |
-| Decode (4 tokens × 28 layers) | 0.86 s |
-| Decode latency / token | ~215 ms |
+| Metric | Value | How it's measured |
+|--------|-------|-------------------|
+| **Prefill throughput** | 192 tok/s (seq=32) → **591 tok/s** (seq=512) | prefill tokens ÷ prefill wall (`qwen3vl_run`, see scaling table) |
+| **Decode throughput** | **4.7 tok/s** | 1 ÷ ITL (4 tokens ÷ 0.86 s) |
+| **TTFT** (time to first token) | **0.35 s** warm · **1.93 s** cold | prefill latency (warm); + 1.58 s weight upload (cold, 1.24 GB) |
+| **End-to-end latency** | **4.28 s** | full wall: weight upload + prefill(seq=32) + 4 decode steps |
+| **ITL** (inter-token latency) | **~215 ms / token** | decode wall ÷ tokens, 28 layers per token |
+| **Cores utilization** | 32 / 140 booted (**23 %**); 4–8 active per matmul (**3–6 %**) | static grid pinning vs the 14×10 Tensix worker grid |
 
 Tokens emitted (must stay bit-identical across optimisations): `2303, 220, 220, 16, 13`.
 
-### Variable-length prefill (`qwen3vl_run`)
+### Prefill throughput scaling (`qwen3vl_run`)
 
-The standing bench above is the fixed-length `qwen3_run` text path (seq=32,
-`Mt=1`, decode-dominated). Long prompts run through `qwen3vl_run`, whose
-**prefill** is where the recent **flash-attention gqa** (`flash-attention-gqa`)
-and **WS matmul L1 budget** (`matmul-ws-budget`, 2026-06-05) work lands.
-`prefill:total` (28 layers, `num_decode=0`), paired same-session runs on
-`TT_FOIL_DEVICE=0`:
+Prefill is matmul-bound and parallelises across the sequence, so throughput
+climbs with prompt length until weight-read bandwidth saturates. `prefill:total`
+(28 layers, `num_decode=0`), single-session runs on `TT_FOIL_DEVICE=0`:
 
-| seq | kSt | before | after | Δ |
-|-----|-----|--------|-------|---|
-| 32   | 1  | 166 ms  | 167 ms  | ~0 (Mt=1, no WS blocking) |
-| 128  | 4  | 301 ms  | 259 ms  | **-14%** |
-| 512  | 16 | 1105 ms | 867 ms  | **-22%** |
-| 1024 | 32 | 2355 ms | 1872 ms | **-20%** |
+| seq | kSt | prefill wall | throughput |
+|-----|-----|--------------|------------|
+| 32   | 1  | 167 ms  | 192 tok/s |
+| 128  | 4  | 259 ms  | 494 tok/s |
+| 512  | 16 | 867 ms  | **591 tok/s** |
+| 1024 | 32 | 1872 ms | 547 tok/s |
 
-`before` = WS A-row budget at 427 tiles; `after` = 700 tiles (real arena is
-713) — this lifts `mb_max` to 8 (Kt=64) / 2 (Kt=192 ffn_down), halving the
-ffn_down weight re-reads. All outputs bit-identical (same fp32 K-loop). The
-benefit grows with sequence length because WS blocking only helps `Mt>1`
-(seq≥64); seq=32 is byte-identical. seq=1024 end-to-end is itself unlocked by
-the flash-attention rework (St-independent L1). Full per-op breakdown in
-[`bench/PERF_HISTORY.md`](bench/PERF_HISTORY.md).
+seq=32 is throughput-poor (`Mt=1`, no weight-stationary reuse); seq≥128 unlocks
+WS `mb_max` blocking (Kt=64 → 8, Kt=192 ffn_down → 2). seq=1024 is reachable at
+all only because the flash-attention gqa rework made attention L1 O(Dt),
+sequence-independent. All outputs bit-identical with the seq=32 oracle.
 
-### Trajectory (selected iterations)
+### Cores utilization detail
 
-| Date | Tag | Wall | Decode | Highlight |
-|------|-----|------|--------|-----------|
-| 2026-05-21 | baseline | 39.3 s | 18.0 s | per-op dispatch floor ~3.5 ms |
-| 2026-05-22 | iter5-weights-parallel | 18.7 s | 10.4 s | weights load pipelined with UMD open |
-| 2026-05-22 | iter6-device-argmax | 17.5 s | 9.2 s | device-side argmax kills 9.7 MB logits readback |
-| 2026-05-22 | iter7-fused-qkv | 16.4 s | 8.3 s | Wq/Wk/Wv concatenated → 1 matmul |
-| 2026-05-23 | iter12-matmul-acache | 17.1 s | 8.7 s | A-tile cache in matmul reader |
-| 2026-05-23 | iter13-matmul-bbatch | 16.2 s | 8.0 s | Kt-batched B reads, single barrier |
-| 2026-05-23 | iter17-rmsnorm-rope | 13.8 s | 6.0 s | fused RMSNorm+RoPE for Q/K |
-| 2026-05-23 | iter19-prepare-workers | 11.4 s | 6.0 s | 16-worker tile2d pool |
-| 2026-05-23 | iter20-simd-tile2d | 10.7 s | 6.0 s | AVX2 tile2d (16×uint16 = 256-bit vec) |
-| 2026-05-24 | iterR5-G2 | 9.82 s | 5.30 s | fast-dispatch (on-chip dispatcher kernel) |
-| 2026-05-24 | iterR5-G2-pathB | 9.64 s | 5.18 s | shape-keyed OpCache for 5 heaviest ops |
-| 2026-05-24 | iter-percore-membar | 4.52 s | 1.09 s | `l1_membar` scoped to worker cores (~2.4 ms → ~30 µs per op) |
-| **2026-05-28** | **iter-matmul-opcache** | **4.28 s** | **0.86 s** | **matmul OpCache + disjoint pinned grids (RTA-only refresh)** |
+The chip exposes a **14×10 = 140** Tensix worker grid. The model statically
+pins **32** of them (1 transient + 4+4+8 matmul/lm_head grids + 1 dispatcher +
+14 per-op cached cores). At any instant the heaviest stage (matmul) shards over
+only **4–8** cores — utilization is dispatch/latency-bound, not compute-bound,
+so the remaining cores are headroom, not a bottleneck. Per-op cores are pinned
+(OpCache) so repeated calls skip kernel reload.
 
-Cumulative speedup: **39.3 s → 4.28 s, -89%**. Bit-identical output throughout.
+Full per-iteration history (39.3 s → 4.28 s, -89% cumulative; bit-identical
+output throughout) lives in [`bench/PERF_HISTORY.md`](bench/PERF_HISTORY.md).
 
 ## Architecture (per token)
 
