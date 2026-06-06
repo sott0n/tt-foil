@@ -480,12 +480,26 @@ int main(int argc, char** argv) try {
     const std::vector<tt::foil::CoreCoord> kShardGridLm = {
         {5, 0}, {5, 1}, {5, 2}, {5, 3}, {5, 4}, {5, 5}, {5, 6}, {5, 7},
     };
+    // Decode layer matmuls (Mt=1 → mb=1) get their OWN grids, disjoint from the
+    // prefill mb>1 grids above. Without this, at seq>32 the prefill mb=8/2 grid
+    // and the decode mb=1 grid would both pin on rows 3-4 (different OpCache
+    // keys) and overflow the L1 arena (esp. Kt=192: 577+385 tiles > 713). With
+    // decode on rows 6-7, prefill + decode coexist. (At seq=32 prefill is also
+    // Mt=1 → it shares these decode grids; rows 3-4 stay unused there.)
+    const std::vector<tt::foil::CoreCoord> kShardGrid64Dec = {
+        {6, 0}, {6, 1}, {6, 2}, {6, 3}, {6, 4}, {6, 5}, {6, 6}, {6, 7},
+    };
+    const std::vector<tt::foil::CoreCoord> kShardGrid192Dec = {
+        {7, 0}, {7, 1}, {7, 2}, {7, 3}, {7, 4}, {7, 5}, {7, 6}, {7, 7},
+    };
     // (0,0) is the default transient core for embed/argmax/etc. (`core` below)
     // + where rmsnorm_rope is pinned. Must be booted.
     std::vector<tt::foil::CoreCoord> boot_cores = { {0, 0} };
-    for (const auto& c : kShardGrid64)  boot_cores.push_back(c);
-    for (const auto& c : kShardGrid192) boot_cores.push_back(c);
-    for (const auto& c : kShardGridLm)  boot_cores.push_back(c);
+    for (const auto& c : kShardGrid64)     boot_cores.push_back(c);
+    for (const auto& c : kShardGrid192)    boot_cores.push_back(c);
+    for (const auto& c : kShardGridLm)     boot_cores.push_back(c);
+    for (const auto& c : kShardGrid64Dec)  boot_cores.push_back(c);
+    for (const auto& c : kShardGrid192Dec) boot_cores.push_back(c);
     const bool use_fd = std::getenv("TT_FOIL_FAST_DISPATCH") != nullptr;
     const tt::foil::CoreCoord fd_dispatcher_core{1, 0};
     if (use_fd) boot_cores.push_back(fd_dispatcher_core);
@@ -686,13 +700,18 @@ int main(int argc, char** argv) try {
         ol::execute(*dev, op);
         g_prof.add(tag, std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
     };
-    // Route by Kt: Kt=64 (q/k/v/o/gate/up, lm_head) → kShardGrid64;
-    // Kt=192 (ffn_down) → kShardGrid192.
+    // Route by (Kt, prefill-vs-decode): Mt>1 (prefill, mb>1) → prefill grids
+    // (rows 3-4); Mt==1 (decode, and prefill at seq=32) → decode grids (rows
+    // 6-7). Keeping the two mb_max regimes on disjoint cores stops their
+    // separate pinned OpCache entries from co-residing and overflowing L1.
     auto run_matmul = [&](const char* tag,
                            const ol::TensorDesc& a, const ol::ShardedWeight& b,
                            ol::TensorDesc& out,
                            uint32_t Mt, uint32_t Kt, uint32_t Nt) {
-        const auto& grid = (Kt == kHt) ? kShardGrid64 : kShardGrid192;
+        const bool prefill = (Mt > 1);
+        const auto& grid = (Kt == kHt)
+            ? (prefill ? kShardGrid64  : kShardGrid64Dec)
+            : (prefill ? kShardGrid192 : kShardGrid192Dec);
         run_matmul_on(tag, grid, a, b, out, Mt, Kt, Nt);
     };
     auto run_matmul_lmhead = [&](const char* tag,
