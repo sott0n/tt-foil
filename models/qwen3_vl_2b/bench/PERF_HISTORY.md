@@ -15,13 +15,21 @@ Raw profile dumps land in `bench/runs/` (gitignored). Wall numbers are the binar
 
 | Variant | First baseline | Latest | Delta | Latest tag | Detail |
 |---|---|---|---|---|---|
-| Text | ~39.3 s (2026-05-21) | **4.46 s** | -34.8 s (-89%) | `decode-dram-shard` (2026-06-05) | [§ Text iteration log](#text-iteration-log) |
-| VL   | 5.28 s (2026-05-27)  | **3.72 s** | -1.56 s (-30%) | `iter3-matmul-opcache` (2026-05-28) | [§ VL iteration log](#vl-iteration-log) |
+| Text | ~39.3 s (2026-05-21) | **4.46 s** wall · decode **6.07 tok/s** | -34.8 s (-89%) wall | `decode-dram-shard` (2026-06-05) | [§ Text iteration log](#text-iteration-log) |
+| VL   | 5.28 s (2026-05-27)  | **3.72 s** wall · decode **5.32 tok/s** | -1.56 s (-30%) wall | `vl-decode-grid-split` (2026-06-06) | [§ VL iteration log](#vl-iteration-log) |
 
 > **Note:** `decode-dram-shard` is a **decode-latency** optimization, not a wall
 > one — it cuts ITL **210 → 165 ms (−21.5 %)** / **4.76 → 6.07 tok/s** while wall
 > rises ~0.27 s (one-time cold weight upload). The at-a-glance column tracks wall,
 > which under-represents this change; see the log rows for the decode deltas.
+
+> **VL note:** the 3.72 s wall is still the `iter3-matmul-opcache` measurement —
+> the later VL rows (`decode-dram-shard`, `vl-lmhead-grid-fix`,
+> `vl-decode-grid-split`) are decode-latency / long-prefill / OOM-fix changes and
+> did **not** re-run the 96-token vision standing bench (the decode A/B was taken
+> on the seq=32 text prompt: ITL 216.3 → 188.1 ms, **4.62 → 5.32 tok/s**,
+> bit-identical). So the wall column is unchanged but decode is faster and
+> seq>32 + num_decode>0 now runs at all (was OOM). See the VL log rows.
 
 The biggest recent shared mechanism is the **matmul OpCache** (`make_matmul_grid_cached`) — one `MatMulGridOp` pinned per `(Kt, n_cores, first_core)` shape key; later calls collapse to an RTA-only refresh. Disjoint persistent grids per `Kt` keep each shape's L1 footprint isolated. See [Text iter-matmul-opcache](#text-iteration-log) / [VL iter3-matmul-opcache](#vl-iteration-log).
 
